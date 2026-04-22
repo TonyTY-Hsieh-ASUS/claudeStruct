@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claudestruct"
+version = "0.1.0"
+description = "Token-efficient Claude Code companion for dev, review, planning, and debugging"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "claudestruct" }]
+dependencies = [
+  "anthropic>=0.40.0",
+  "click>=8.1.0",
+  "rich>=13.7.0",
+  "pathspec>=0.12.0",
+]
+
+[project.scripts]
+cs = "claudestruct.cli:main"
+claudestruct = "claudestruct.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+claudestruct = ["py.typed"]
