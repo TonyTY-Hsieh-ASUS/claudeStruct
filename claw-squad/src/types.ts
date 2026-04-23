@@ -88,23 +88,6 @@ export interface RunConfig {
   githubRepo?: string;
 }
 
-/**
- * Per-role model and effort. Tuned for the 3-agent division of labor:
- * - Planner does the heavy reasoning (requirements + design).
- * - Coder is the workhorse — fast, focused.
- * - Reviewer is a skeptic — needs good reasoning, not as much as Planner.
- */
-export interface AgentModelConfig {
-  planner: { model: string; effort: "high" | "xhigh" | "max" };
-  coder: { model: string; effort: "medium" | "high" | "xhigh" };
-  reviewer: { model: string; effort: "high" | "xhigh" };
-}
-
-export const DEFAULT_MODELS: AgentModelConfig = {
-  // Planner: hardest job, needs adaptive thinking + max effort
-  planner: { model: "claude-opus-4-7", effort: "max" },
-  // Coder: high throughput. Sonnet is fast and capable for implementation work.
-  coder: { model: "claude-sonnet-4-6", effort: "high" },
-  // Reviewer: skeptic, needs strong reasoning on diffs
-  reviewer: { model: "claude-opus-4-7", effort: "xhigh" },
-};
+// Per-agent provider config now lives in ./config.ts as AgentConfig.
+// Use loadAgentConfig() to resolve CLI + file + defaults into the
+// concrete config passed to createProvider().

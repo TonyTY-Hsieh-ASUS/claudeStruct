@@ -5,11 +5,14 @@
  * Coder's `files[]` output, writes it to disk, runs git add/commit, and
  * (optionally) pushes and opens a PR. Keeping the agent pure-functional makes
  * it trivially unit-testable and keeps the sandbox boundary clean.
+ *
+ * Provider-agnostic: takes an already-built Provider instance so the user
+ * can point Coder at any backend (Anthropic, OpenAI, local Ollama, ...).
  */
 
-import { invoke, type InvokeResult } from "../claude.js";
 import { loadPrompt } from "../prompts.js";
-import type { AgentModelConfig, ReviewVerdict, TodoItem } from "../types.js";
+import type { InvokeResult, Provider } from "../providers/types.js";
+import type { ReviewVerdict, TodoItem } from "../types.js";
 
 export interface CoderFileEdit {
   path: string;
@@ -36,7 +39,7 @@ interface CoderInput {
   fileContext: Array<{ path: string; content: string }>;
   /** Reviewer feedback from a previous round on this task. */
   reviewerFeedback?: ReviewVerdict;
-  modelCfg: AgentModelConfig["coder"];
+  provider: Provider;
   onText?: (chunk: string) => void;
 }
 
@@ -116,12 +119,10 @@ export async function runCoder(input: CoderInput): Promise<CoderOutcome> {
   const systemPrompt = loadPrompt("coder");
   const userMessage = buildUserMessage(input);
 
-  const usage = await invoke({
+  const usage = await input.provider.invoke({
     role: "coder",
     systemPrompt,
     userMessage,
-    model: input.modelCfg.model,
-    effort: input.modelCfg.effort,
     onText: input.onText,
   });
 

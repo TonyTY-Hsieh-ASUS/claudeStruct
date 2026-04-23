@@ -1,34 +1,32 @@
 # claw-squad
 
-**A 3-agent Claude orchestrator that plans, codes, and reviews — then learns from every loop.**
+**A 3-agent Claude orchestrator that plans, codes, and reviews — then learns from every loop. Each agent can run on any supported model backend.**
 
 Inspired by [openclaw/openclaw](https://github.com/openclaw/openclaw) (gateway-based control plane + pluggable sandboxes) and [HKUDS/OpenHarness](https://github.com/HKUDS/OpenHarness) (clean agent loop + hooks). This project takes their best ideas and lands them in a tighter, more opinionated tool focused on one workflow: **requirement → shipped code**.
 
-Written in **TypeScript** (orchestrator) + **Go** (sandbox binary). No Python in this tool — the existing `cs` CLI in the parent repo stays Python; `claw-squad` is a separate system with a different job.
+Written in **TypeScript** (orchestrator) + **Go** (sandbox binary). No Python.
 
 ## What it does
 
 ```
 User requirement
    ↓
-┌─────────────────────────────────┐
-│  Planner (opus-4-7, effort=max)  │
-│   1. Asks clarifying questions   │
-│   2. Produces a TODO list        │
-└──────────────┬──────────────────┘
+┌──────────────────────────────────────┐
+│  Planner                              │
+│   1. Asks clarifying questions        │
+│   2. Produces a TODO list             │
+└──────────────┬───────────────────────┘
                ↓
      ┌───── one TODO item ─────┐
      ↓                          │
 ┌──────────────────────┐        │  (request_changes)
 │ Coder                │        │
-│  (sonnet-4-6, high)   │        │
 │  · writes code        │        │
-│  · git commit          │───────┤
+│  · git commit         │───────┤
 └─────────┬─────────────┘        │
           ↓ diff                  │
 ┌──────────────────────┐        │
 │ Reviewer              │        │
-│  (opus-4-7, xhigh)    │        │
 │  · reads diff only    │        │
 │  · structured verdict │        │
 └─────────┬─────────────┘        │
@@ -38,15 +36,67 @@ User requirement
     & memory, picks next task
 ```
 
+## Model choice is per-agent
+
+Each of the 3 agents can run on any backend. Mix & match freely — e.g. cloud Claude for Planner (best reasoning), local Ollama for Coder (cost-free bulk work), GPT-4 for Reviewer (second-opinion diversity).
+
+| Provider | `name` value | Notes |
+|---|---|---|
+| Anthropic | `anthropic` | Native SDK. Keeps prompt caching (1h TTL) + adaptive thinking. |
+| OpenAI | `openai` | GPT-5 / GPT-4 family. `effort` maps to `reasoning_effort` on reasoning models. |
+| Google Gemini | `gemini` | Via Gemini's OpenAI-compat endpoint. Default baseURL preset. |
+| MiniMax | `minimax` | Via their OpenAI-compat endpoint. |
+| Ollama | `ollama` | Default `http://localhost:11434/v1`. |
+| vLLM | `vllm` | Default `http://localhost:8000/v1`. |
+| SGLang | `sglang` | Default `http://localhost:30000/v1`. |
+| Any OpenAI-wire-format server | `openai-compat` | Pass your own `baseURL`. |
+
+Everything except Anthropic goes through the `openai` npm SDK with a different `baseURL` — one code path, many backends.
+
+### Configure via file OR CLI flags OR both
+
+**Option 1: `.claw-squad/config.json`**
+
+```json
+{
+  "agents": {
+    "planner": {
+      "name": "anthropic",
+      "model": "claude-opus-4-7",
+      "effort": "max"
+    },
+    "coder": {
+      "name": "ollama",
+      "model": "qwen2.5-coder:14b",
+      "baseURL": "http://localhost:11434/v1"
+    },
+    "reviewer": {
+      "name": "openai",
+      "model": "gpt-5",
+      "effort": "high"
+    }
+  }
+}
+```
+
+**Option 2: CLI flags** (override config file per-run)
+
+```bash
+node dist/cli.js run "<requirement>" \
+  --planner-provider anthropic --planner-model claude-opus-4-7 \
+  --coder-provider ollama --coder-model qwen2.5-coder:14b \
+  --reviewer-provider openai --reviewer-model gpt-5
+```
+
+Both can coexist — CLI wins, file wins over built-in defaults, and defaults are all-Anthropic.
+
 ## Why 3 agents, not 1
 
-Splitting the roles gives three cost wins:
+1. **Planner Q&A first, Coder second.** Clarifying questions happen before Coder tokens are spent. Cheapest role clears the ambiguity.
+2. **Reviewer sees diffs, Coder sees files.** Different context shapes → different token counts. 500-line file with a 10-line change sends 10 lines to the Reviewer, not 500.
+3. **Prompts cached per role (Anthropic only).** 1h TTL `cache_control: ephemeral` on each agent's system prompt. Repeat calls cost ~10% of prompt input. Other providers fall back to server-side auto-caching or nothing, depending on backend.
 
-1. **Planner Q&A first, Coder second.** Clarifying questions happen before any Coder tokens are spent. Requirements get hammered out by the cheapest role (Planner is thinking-heavy but output-light).
-2. **Reviewer sees diffs, Coder sees files.** Different context shapes → different token counts. A 500-line file with a 10-line change sends 10 lines to the Reviewer, not 500. That's a 50× savings on Reviewer input tokens for typical edits.
-3. **System prompts cached 1h per role.** Each agent has a frozen `.md` prompt loaded with `cache_control: ephemeral, ttl: 1h`. After the first call, repeat invocations pay ~10% of the prompt's input cost.
-
-Plus the obvious correctness win: the Reviewer catches what the Coder missed, and the Planner catches what the Reviewer missed.
+Plus the correctness win: the Reviewer catches what the Coder missed.
 
 ## Install
 
@@ -61,75 +111,87 @@ go build -o claw-sandbox .
 export CLAW_SANDBOX_BIN=$(pwd)/claw-sandbox
 ```
 
+## Env vars per provider
+
+| Provider | Env var |
+|---|---|
+| anthropic | `ANTHROPIC_API_KEY` |
+| openai | `OPENAI_API_KEY` |
+| gemini | `GOOGLE_API_KEY` |
+| minimax | `MINIMAX_API_KEY` |
+| ollama / vllm / sglang | optional (local servers usually accept any string) |
+| openai-compat | `OPENAI_COMPAT_API_KEY`, or `--<role>-api-key` |
+
+Also `GITHUB_TOKEN` when `--github` is enabled.
+
 ## Usage
 
 ```bash
+# Local dry run with all-Anthropic defaults
 export ANTHROPIC_API_KEY=sk-ant-...
-
-# Local dry run (no GitHub push, no sandbox). Safe default.
 node dist/cli.js run "add retry logic to the API client with exponential backoff"
 
-# Turn on GitHub push + PR + auto-merge (with human confirmation)
-export GITHUB_TOKEN=ghp_...
-node dist/cli.js run "<requirement>" --github --github-repo tonyandclaw/myrepo
+# Coder runs locally on Ollama, Planner & Reviewer stay on Claude
+export ANTHROPIC_API_KEY=sk-ant-...
+node dist/cli.js run "<requirement>" \
+  --coder-provider ollama --coder-model qwen2.5-coder:14b
 
-# Turn on the Go sandbox wrapper for git/shell commands
-node dist/cli.js run "<requirement>" --sandbox
+# All three on cloud OpenAI
+export OPENAI_API_KEY=sk-...
+node dist/cli.js run "<requirement>" \
+  --planner-provider openai --planner-model gpt-5 --planner-effort max \
+  --coder-provider openai --coder-model gpt-5-mini \
+  --reviewer-provider openai --reviewer-model gpt-5 --reviewer-effort high
 
-# Scaffold .claw-squad/ in an existing repo
+# Scaffold config.json
 node dist/cli.js init
+
+# Turn on GitHub + Go sandbox
+node dist/cli.js run "<requirement>" --github --github-repo owner/repo --sandbox
 ```
 
-## User-facing requirements → where they live
+## User requirements → implementation
 
-| Your requirement | Implementation |
+| Requirement | Implementation |
 |---|---|
-| Security mechanism, default off | `--sandbox` flag → `claw-sandbox` Go binary (rlimits + path validation + env scrubbing). Default: off. Also: hardcoded `.git/.env/.ssh` deny-list in TS applier is **always on** (not user-disableable). |
+| Security mechanism, default off | `--sandbox` flag → `claw-sandbox` Go binary (rlimits + path validation + env scrubbing). Always-on: hardcoded `.git/.env/.ssh/` deny-list in TS applier (not user-disableable). |
 | Multi-agent review mechanism | `src/orchestrator.ts` — Planner Q&A then Coder ↔ Reviewer loop with bounded `maxReviewRounds`. Only approved diffs get merged. |
-| Planner thinking + Q&A before dispatch | Planner uses `thinking: adaptive` + `effort: max`. Refuses to emit TODOs until its `planReady` phase. |
-| Reviewer requests changes → Coder fixes → re-review | `runTaskLoop` in orchestrator. Reviewer's findings are passed back into Coder's next user turn as explicit fix items. |
-| Approve PR and merge | Phase 2 — `src/github/octokit.ts` skeleton is in place; wiring into the approve branch is the next step. Right now approve just exits the task loop. |
-| Loop back to Planner for TODO review | After each task, `runPlanner(..., mode: "loop")` is invoked with memory snippet + completed-task summary, and can revise the TODO list or emit `complete`. |
+| Planner thinking + Q&A before dispatch | Planner uses adaptive thinking (Anthropic) or `reasoning_effort` (OpenAI/Gemini). Refuses to emit TODOs until its `planReady` phase. |
+| Reviewer requests changes → Coder fixes → re-review | `runTaskLoop` in orchestrator. Reviewer's findings passed back into Coder's next user turn as explicit fix items. |
 | Self-learning, default on | `src/memory/memory.ts` — appends lessons + patterns to `.claw-squad/memory/*.md` after every task. Planner reads the most recent 8 KB on each invocation. Disable with `--no-self-learning`. |
+| Flexible model choice | Provider registry maps 8 backends to 2 client classes (native Anthropic + generic OpenAI-compat). Per-agent config via JSON or CLI. |
 
 ## Key design choices
 
-- **Prompts live as Markdown files**, not template strings in TypeScript. This keeps the cached prefix byte-stable across runs and lets humans audit/edit prompts without a rebuild.
-- **Coder never talks to git directly.** It produces a JSON list of file edits; the orchestrator writes them, runs `git add/commit`, and (if enabled) pushes. Keeps the security boundary clean and the agent trivially unit-testable.
-- **Reviewer sees only the staged diff**, not any dirty files the user already had. Deterministic, smaller payload.
-- **Token accountability**: every LLM call's usage is tallied; end-of-run summary shows input, output, cache reads, cache writes, and estimated cost.
+- **Prompts live as Markdown files**, not template strings. Keeps the cached prefix byte-stable and auditable.
+- **Coder never talks to git directly.** Produces JSON file edits; orchestrator writes + commits.
+- **Reviewer sees only the staged diff**, deterministic, smaller payload.
+- **Token accountability**: every LLM call's usage tallied; end-of-run summary shows input, output, cache reads, cache writes, estimated cost.
 - **Human-in-the-loop by default** for destructive GitHub actions (push, merge). Pass `--no-confirm` to automate.
-
-## Models
-
-| Role | Model | Effort | Why |
-|---|---|---|---|
-| Planner | `claude-opus-4-7` | `max` | Hardest reasoning — requirements + design live here |
-| Coder | `claude-sonnet-4-6` | `high` | Fast, capable for implementation; most of the tokens flow here |
-| Reviewer | `claude-opus-4-7` | `xhigh` | Skeptic work, benefits from strong reasoning but less than Planner |
-
-Override by editing `src/types.ts` `DEFAULT_MODELS` or (future work) via a `--models` flag.
+- **Single dependency for non-Anthropic providers** (`openai` npm package). No plugin framework, no LiteLLM adapter chain — just baseURL swap.
 
 ## What's wired vs. deferred
 
 **Phase 1 (done):**
-- Planner / Coder / Reviewer agents with cached prompts
+- Provider abstraction (8 backends via 2 client classes)
+- Per-agent config: defaults + `config.json` + CLI flags with precedence
+- Planner / Coder / Reviewer agents
 - 3-agent orchestrator loop with bounded rounds
 - Local file apply + git commit
 - Path validation (always on) + Go sandbox (opt-in)
 - Self-learning memory
 - Interactive CLI with `prompts`
-- Smoke tests (23 TS + 7 Go)
+- **48** TS smoke tests + **7** Go tests
 
 **Phase 2 (skeleton in place, wiring pending):**
 - `src/github/octokit.ts` has `pushBranch` / `openPr` / `postReview` / `mergePr`.
-- Next step is to call them from the `approve` branch of `runTaskLoop`.
+- Next step: wire them into the `approve` branch of `runTaskLoop`.
 
 ## Testing
 
 ```bash
-pnpm test         # 23 TS smoke tests (parsers, memory, path validation)
-cd ../claw-sandbox && go test ./...   # 7 Go tests (path validation)
+pnpm test         # 48 TS smoke tests (parsers, memory, path, providers, config)
+cd ../claw-sandbox && go test ./...   # 7 Go tests
 ```
 
-Neither hits the Claude API — API integration tests come in a follow-up.
+No API calls. API integration tests come in a follow-up.

@@ -1,16 +1,25 @@
 /**
  * Planner agent: requirements Q&A + TODO list generation + per-loop review.
  *
- * Token-efficiency:
- *  - System prompt is loaded once from disk, cached with 1h TTL.
- *  - Q&A history accumulates in the messages array (after the cached prefix),
- *    so each new question payload is cheap: prior turns hit the cache.
+ * Provider-agnostic: receives an already-constructed Provider from the
+ * orchestrator. This keeps the agent cheap to call (no client
+ * reinstantiation per turn) and lets the user point Planner at any
+ * backend (Anthropic, OpenAI, local Ollama, Gemini, etc.).
+ *
+ * Token efficiency on Anthropic:
+ *  - System prompt is loaded once from disk; the AnthropicProvider marks
+ *    it with cache_control ephemeral TTL=1h so repeat calls hit cache.
+ *  - Q&A history accumulates in the messages array (after the cached
+ *    prefix), so each new question payload is cheap: prior turns hit
+ *    the cache.
+ *
+ * On non-Anthropic providers there's no explicit caching, but OpenAI-class
+ * backends do some server-side auto-caching of identical prefixes.
  */
 
-import { invoke, type InvokeResult } from "../claude.js";
 import { loadPrompt } from "../prompts.js";
+import type { InvokeResult, Provider } from "../providers/types.js";
 import type {
-  AgentModelConfig,
   ClarificationTurn,
   SquadState,
   TodoItem,
@@ -39,7 +48,7 @@ interface PlannerInput {
   memorySnippet?: string;
   /** Summary of just-completed task, used in loop mode. */
   completedTaskSummary?: string;
-  modelCfg: AgentModelConfig["planner"];
+  provider: Provider;
   onText?: (chunk: string) => void;
 }
 
@@ -96,12 +105,12 @@ function buildUserMessage(input: PlannerInput): string {
 }
 
 /** Parse Planner's response. Tolerant: falls back to `ready` if shape is off. */
-export function parsePlannerOutput(text: string): PlannerOutcome["phase"] extends infer P ? {
+export function parsePlannerOutput(text: string): {
   phase: PlannerPhase;
   questions?: string[];
   understanding?: string;
   todos?: TodoItem[];
-} : never {
+} {
   const phaseMatch = text.match(/##\s*Phase:\s*(\w+)/i);
   const phaseRaw = phaseMatch?.[1]?.toLowerCase() ?? "";
   let phase: PlannerPhase = "ready";
@@ -151,12 +160,10 @@ export async function runPlanner(input: PlannerInput): Promise<PlannerOutcome> {
   const systemPrompt = loadPrompt("planner");
   const userMessage = buildUserMessage(input);
 
-  const usage = await invoke({
+  const usage = await input.provider.invoke({
     role: "planner",
     systemPrompt,
     userMessage,
-    model: input.modelCfg.model,
-    effort: input.modelCfg.effort,
     onText: input.onText,
   });
 

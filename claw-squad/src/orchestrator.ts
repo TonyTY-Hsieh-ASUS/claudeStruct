@@ -16,6 +16,11 @@
  *   - Clarifying questions always go back to the user (Planner's purpose).
  *   - Destructive GitHub actions (push, merge) gate on `requireHumanApproval`.
  *     Default true until the user opts out — we err toward safety.
+ *
+ * Provider neutrality:
+ *   - Each agent gets its own Provider instance from the registry. Users
+ *     can set per-agent provider+model in .claw-squad/config.json or via
+ *     CLI flags. Defaults are Anthropic (opus-4-7 / sonnet-4-6 / opus-4-7).
  */
 
 import pc from "picocolors";
@@ -28,11 +33,10 @@ import {
   readMemorySnippet,
 } from "./memory/memory.js";
 import { applyAndCommit, readFileSnapshots } from "./sandbox/applier.js";
-import type { InvokeResult } from "./claude.js";
-import { estimateCost } from "./claude.js";
+import type { AgentConfig } from "./config.js";
+import { createProvider, estimateCost } from "./providers/registry.js";
+import type { InvokeResult, Provider } from "./providers/types.js";
 import {
-  DEFAULT_MODELS,
-  type AgentModelConfig,
   type ReviewVerdict,
   type RunConfig,
   type SquadState,
@@ -63,14 +67,28 @@ export interface OrchestratorResult {
   reason: "complete" | "max_loops" | "blocked" | "aborted";
 }
 
+interface Providers {
+  planner: Provider;
+  coder: Provider;
+  reviewer: Provider;
+}
+
+function buildProviders(agentCfg: AgentConfig): Providers {
+  return {
+    planner: createProvider(agentCfg.planner),
+    coder: createProvider(agentCfg.coder),
+    reviewer: createProvider(agentCfg.reviewer),
+  };
+}
+
 export async function runOrchestrator(args: {
   config: RunConfig;
+  agentConfig: AgentConfig;
   requirement: string;
-  models?: AgentModelConfig;
   ui: UserInterface;
 }): Promise<OrchestratorResult> {
-  const { config, requirement, ui } = args;
-  const models = args.models ?? DEFAULT_MODELS;
+  const { config, requirement, ui, agentConfig } = args;
+  const providers = buildProviders(agentConfig);
 
   const state: SquadState = {
     requirement,
@@ -121,7 +139,7 @@ export async function runOrchestrator(args: {
       state,
       mode: "initial",
       memorySnippet,
-      modelCfg: models.planner,
+      provider: providers.planner,
       onText: (c) => ui.streamAgent("planner", c),
     });
     track(outcome.usage);
@@ -158,7 +176,7 @@ export async function runOrchestrator(args: {
       memorySnippet: config.selfLearning
         ? readMemorySnippet(config.repoRoot)
         : undefined,
-      modelCfg: models.planner,
+      provider: providers.planner,
       onText: (c) => ui.streamAgent("planner", c),
     });
     track(outcome.usage);
@@ -184,7 +202,7 @@ export async function runOrchestrator(args: {
       task: next,
       state,
       config,
-      models,
+      providers,
       ui,
       track,
     });
@@ -211,7 +229,7 @@ export async function runOrchestrator(args: {
         ? readMemorySnippet(config.repoRoot)
         : undefined,
       completedTaskSummary: summarizeTask(next, state.reviewHistory),
-      modelCfg: models.planner,
+      provider: providers.planner,
       onText: (c) => ui.streamAgent("planner", c),
     });
     track(plannerReview.usage);
@@ -234,11 +252,11 @@ async function runTaskLoop(args: {
   task: TodoItem;
   state: SquadState;
   config: RunConfig;
-  models: AgentModelConfig;
+  providers: Providers;
   ui: UserInterface;
   track: (u: InvokeResult) => void;
 }): Promise<"complete" | "blocked" | "aborted"> {
-  const { task, state, config, models, ui, track } = args;
+  const { task, state, config, providers, ui, track } = args;
   let lastVerdict: ReviewVerdict | undefined;
 
   for (let round = 0; round < config.maxReviewRounds; round++) {
@@ -267,7 +285,7 @@ async function runTaskLoop(args: {
       todo: task,
       fileContext,
       reviewerFeedback: lastVerdict,
-      modelCfg: models.coder,
+      provider: providers.coder,
       onText: (c) => ui.streamAgent("coder", c),
     });
     track(coderOut.usage);
@@ -303,7 +321,7 @@ async function runTaskLoop(args: {
       todo: task,
       diff: applied.diff,
       coderRationale: coderOut.rationale,
-      modelCfg: models.reviewer,
+      provider: providers.reviewer,
       onText: (c) => ui.streamAgent("reviewer", c),
     });
     track(reviewOut.usage);

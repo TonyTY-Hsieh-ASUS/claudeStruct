@@ -5,11 +5,13 @@
  * file contents. A 500-line file with a 10-line change sends 10 lines to the
  * Reviewer, not 500. This is the single biggest reason we split Coder and
  * Reviewer into separate agents: their context shapes are different.
+ *
+ * Provider-agnostic: takes a Provider instance so it can target any backend.
  */
 
-import { invoke, type InvokeResult } from "../claude.js";
 import { loadPrompt } from "../prompts.js";
-import type { AgentModelConfig, ReviewVerdict, TodoItem } from "../types.js";
+import type { InvokeResult, Provider } from "../providers/types.js";
+import type { ReviewVerdict, TodoItem } from "../types.js";
 
 export interface ReviewerOutcome {
   verdict: ReviewVerdict;
@@ -21,7 +23,7 @@ interface ReviewerInput {
   todo: TodoItem;
   diff: string;
   coderRationale?: string;
-  modelCfg: AgentModelConfig["reviewer"];
+  provider: Provider;
   onText?: (chunk: string) => void;
 }
 
@@ -86,12 +88,10 @@ export async function runReviewer(
   const systemPrompt = loadPrompt("reviewer");
   const userMessage = buildUserMessage(input);
 
-  const usage = await invoke({
+  const usage = await input.provider.invoke({
     role: "reviewer",
     systemPrompt,
     userMessage,
-    model: input.modelCfg.model,
-    effort: input.modelCfg.effort,
     onText: input.onText,
   });
 
