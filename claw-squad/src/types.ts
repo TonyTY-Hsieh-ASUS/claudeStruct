@@ -86,6 +86,14 @@ export interface RunConfig {
   githubEnabled: boolean;
   /** GitHub repo, e.g. "tonyandclaw/claudeStruct". Required if githubEnabled. */
   githubRepo?: string;
+  /**
+   * Hard cap on estimated USD spent on LLM calls before the run aborts.
+   * Undefined = no cap. Checked after every LLM invocation. The estimate
+   * is the same number the CLI prints at the end; see registry.ts.
+   */
+  maxCostUsd?: number;
+  /** Hard cap on total tokens (input + output + cache). Undefined = no cap. */
+  maxTokens?: number;
 }
 
 // Per-agent provider config now lives in ./config.ts as AgentConfig.

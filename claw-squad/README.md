@@ -170,22 +170,21 @@ node dist/cli.js run "<requirement>" --github --github-repo owner/repo --sandbox
 - **Human-in-the-loop by default** for destructive GitHub actions (push, merge). Pass `--no-confirm` to automate.
 - **Single dependency for non-Anthropic providers** (`openai` npm package). No plugin framework, no LiteLLM adapter chain — just baseURL swap.
 
-## What's wired vs. deferred
+## What's wired
 
-**Phase 1 (done):**
-- Provider abstraction (8 backends via 2 client classes)
-- Per-agent config: defaults + `config.json` + CLI flags with precedence
-- Planner / Coder / Reviewer agents
-- 3-agent orchestrator loop with bounded rounds
-- Local file apply + git commit
-- Path validation (always on) + Go sandbox (opt-in)
-- Self-learning memory
-- Interactive CLI with `prompts`
-- **48** TS smoke tests + **7** Go tests
-
-**Phase 2 (skeleton in place, wiring pending):**
-- `src/github/octokit.ts` has `pushBranch` / `openPr` / `postReview` / `mergePr`.
-- Next step: wire them into the `approve` branch of `runTaskLoop`.
+- **Provider abstraction**: 8 backends (Anthropic, OpenAI, Gemini, MiniMax, Ollama, vLLM, SGLang, openai-compat) via 2 client classes
+- **Per-agent config**: defaults + `config.json` + CLI flags, with precedence
+- **3-agent loop**: Planner / Coder / Reviewer, bounded by `maxReviewRounds`
+- **GitHub integration** (`--github`): push branch, find-or-create draft PR, post Reviewer verdict as inline PR review, mark-ready + squash-merge on approve. PR description includes the TODO and original requirement.
+- **Coder round-1 file context**: `src/context-gather.ts` uses keyword + path matching against `git ls-files` so round 1 starts with relevant files preloaded, not a blank slate
+- **Local file apply + git commit** with always-on path deny-list (`.git/`, `.env`, `.ssh/`)
+- **Go sandbox** (`--sandbox`, opt-in): rlimits + path validation + env scrubbing
+- **Self-learning memory** (`--no-self-learning` to disable): lessons.md + patterns.md per repo, Planner reads recent 8 KB
+- **Budget caps**: `--max-cost <usd>` and `--max-tokens-total <n>` abort the run as soon as the cumulative cost/tokens cross the threshold
+- **Lifecycle hooks** (`--hooks <path>`): `preAgent` / `postAgent` / `preCommit` / `postCommit` / `onBudgetExceeded`. Throw `HookAbort` to cancel a step. See `examples/hooks.sample.mjs`.
+- **State snapshots + resume** (`--resume`): orchestrator persists `.claw-squad/state.json` after every outer loop and in `finally`. Use `--resume` to pick up a long run after a budget trip / network blip / manual interrupt.
+- Interactive CLI with `prompts` + `commander`
+- **67 TS tests** (parsers, memory, path validation, providers, config, snapshot, hooks, context-gather) + **7 Go tests**
 
 ## Testing
 

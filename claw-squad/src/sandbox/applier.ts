@@ -10,7 +10,6 @@
  *   - Must not match a hardcoded deny-list (.git/, .env, .ssh/, /etc/, ...).
  */
 
-import { execFileSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -20,6 +19,7 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { CoderFileEdit } from "../agents/coder.js";
+import { runGit } from "../git.js";
 
 const DENY_PATTERNS = [
   /(^|\/)\.git(\/|$)/,
@@ -70,12 +70,10 @@ export function applyAndCommit(args: {
 }): ApplyResult {
   const { repoRoot, branch, edits, commitMessage, sandboxEnabled } = args;
 
+  const gitOpts = { repoRoot, sandboxEnabled };
+
   // Ensure we are on the branch (create if needed, from current HEAD).
-  runGit(repoRoot, sandboxEnabled, [
-    "checkout",
-    "-B",
-    branch,
-  ]);
+  runGit(gitOpts, ["checkout", "-B", branch]);
 
   const applied: string[] = [];
   for (const edit of edits) {
@@ -97,17 +95,17 @@ export function applyAndCommit(args: {
   }
 
   // Stage everything the Coder touched.
-  runGit(repoRoot, sandboxEnabled, ["add", "--", ...applied]);
+  runGit(gitOpts, ["add", "--", ...applied]);
 
   // Grab the staged diff BEFORE committing — this is what the Reviewer reads.
-  const diff = runGit(repoRoot, sandboxEnabled, ["diff", "--cached"]);
+  const diff = runGit(gitOpts, ["diff", "--cached"]);
 
   // Commit. If there's nothing staged (Coder returned identical content),
   // skip — git would error with "nothing to commit".
   let commitSha: string | undefined;
   if (diff.trim().length > 0) {
-    runGit(repoRoot, sandboxEnabled, ["commit", "-m", commitMessage]);
-    commitSha = runGit(repoRoot, sandboxEnabled, ["rev-parse", "HEAD"]).trim();
+    runGit(gitOpts, ["commit", "-m", commitMessage]);
+    commitSha = runGit(gitOpts, ["rev-parse", "HEAD"]).trim();
   }
 
   return {
@@ -143,29 +141,3 @@ export function readFileSnapshots(
   return out;
 }
 
-function runGit(
-  repoRoot: string,
-  sandboxEnabled: boolean,
-  args: string[],
-): string {
-  const cmd = sandboxEnabled ? findSandboxBinary() : "git";
-  const fullArgs = sandboxEnabled ? ["--repo", repoRoot, "--", "git", ...args] : args;
-  try {
-    return execFileSync(cmd, fullArgs, {
-      cwd: repoRoot,
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-  } catch (err) {
-    const e = err as NodeJS.ErrnoException & { stderr?: Buffer };
-    const stderr = e.stderr?.toString?.() ?? e.message;
-    throw new Error(`git ${args.join(" ")} failed: ${stderr}`);
-  }
-}
-
-function findSandboxBinary(): string {
-  // Look for `claw-sandbox` on PATH. If the user enabled --sandbox but
-  // didn't build the Go binary, fail loudly.
-  const candidate = process.env.CLAW_SANDBOX_BIN ?? "claw-sandbox";
-  return candidate;
-}

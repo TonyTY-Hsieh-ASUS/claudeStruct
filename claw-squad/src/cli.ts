@@ -20,6 +20,8 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { runOrchestrator, type UserInterface } from "./orchestrator.js";
 import { loadAgentConfig, type AgentCliOverride } from "./config.js";
+import { loadSnapshot } from "./snapshot.js";
+import { loadHooksFromFile, NO_HOOKS, type Hooks } from "./hooks.js";
 import type { AgentRole, RunConfig } from "./types.js";
 
 const program = new Command();
@@ -51,7 +53,20 @@ const runCmd = program
   .option("--github", "actually push and PR to GitHub. Default off (dry local run).")
   .option("--github-repo <owner/repo>", "GitHub repo target when --github is set")
   .option("--no-self-learning", "disable memory/lessons.md writing")
-  .option("--no-confirm", "skip human confirmation on destructive GitHub actions");
+  .option("--no-confirm", "skip human confirmation on destructive GitHub actions")
+  .option(
+    "--max-cost <usd>",
+    "abort when estimated spend exceeds this many USD",
+  )
+  .option(
+    "--max-tokens-total <n>",
+    "abort when total tokens (input+output+cache) exceeds n",
+  )
+  .option("--resume", "resume from .claw-squad/state.json")
+  .option(
+    "--hooks <path>",
+    "load a JS/TS module exporting lifecycle hooks (default export or `hooks` named export)",
+  );
 
 // Per-role provider flags. Commander can't easily do templated option
 // names, so we add each explicitly. Keeping the name pattern stable
@@ -81,6 +96,12 @@ runCmd.action(async (requirement: string, opts: Record<string, unknown>) => {
       selfLearning: opts.selfLearning !== false,
       githubEnabled: Boolean(opts.github),
       githubRepo: opts.githubRepo as string | undefined,
+      maxCostUsd:
+        opts.maxCost !== undefined ? Number(opts.maxCost) : undefined,
+      maxTokens:
+        opts.maxTokensTotal !== undefined
+          ? Number(opts.maxTokensTotal)
+          : undefined,
     };
 
     if (config.githubEnabled && !config.githubRepo) {
@@ -103,12 +124,41 @@ runCmd.action(async (requirement: string, opts: Record<string, unknown>) => {
     logConfig(config, agentConfig);
     const ui = buildUI();
 
+    // Hooks (optional — defaults to no-op).
+    let hooks: Hooks = NO_HOOKS;
+    if (typeof opts.hooks === "string") {
+      hooks = await loadHooksFromFile(opts.hooks, (m) => console.error(m));
+    }
+
+    // --resume: rehydrate SquadState from disk.
+    let resumeFrom;
+    let resumeTotals;
+    if (opts.resume) {
+      const snap = loadSnapshot(config.repoRoot);
+      if (!snap) {
+        console.error(
+          pc.red(`no snapshot at .claw-squad/state.json — nothing to resume`),
+        );
+        process.exit(1);
+      }
+      resumeFrom = snap.state;
+      resumeTotals = snap.totals;
+      console.log(
+        pc.cyan(
+          `Resuming from ${snap.savedAt} — ${snap.state.todos.length} todos, loopCount=${snap.state.loopCount}, prior spend $${snap.totals.costUsd.toFixed(4)}`,
+        ),
+      );
+    }
+
     try {
       const result = await runOrchestrator({
         config,
         agentConfig,
         requirement,
         ui,
+        hooks,
+        resumeFrom,
+        resumeTotals,
       });
       printSummary(result);
       if (result.reason === "complete") process.exit(0);
