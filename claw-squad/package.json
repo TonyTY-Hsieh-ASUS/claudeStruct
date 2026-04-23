@@ -1,0 +1,36 @@
+{
+  "name": "claw-squad",
+  "version": "0.1.0",
+  "description": "3-agent Claude orchestrator: Planner -> Coder -> Reviewer with self-learning memory. Inspired by openclaw (gateway + sandboxing) and OpenHarness (agent loop + hooks).",
+  "type": "module",
+  "bin": {
+    "claw-squad": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/cli.ts",
+    "start": "node dist/cli.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.90.0",
+    "@octokit/rest": "^21.0.0",
+    "commander": "^12.1.0",
+    "openai": "^6.34.0",
+    "picocolors": "^1.1.1",
+    "prompts": "^2.4.2",
+    "simple-git": "^3.27.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/prompts": "^2.4.9",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

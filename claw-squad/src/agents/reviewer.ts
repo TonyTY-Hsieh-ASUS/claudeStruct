@@ -1,0 +1,103 @@
+/**
+ * Reviewer agent: examine a diff, produce structured verdict.
+ *
+ * Token efficiency: the Reviewer only sees the diff + the TODO, NOT the full
+ * file contents. A 500-line file with a 10-line change sends 10 lines to the
+ * Reviewer, not 500. This is the single biggest reason we split Coder and
+ * Reviewer into separate agents: their context shapes are different.
+ *
+ * Provider-agnostic: takes a Provider instance so it can target any backend.
+ */
+
+import { loadPrompt } from "../prompts.js";
+import type { InvokeResult, Provider } from "../providers/types.js";
+import type { ReviewVerdict, TodoItem } from "../types.js";
+
+export interface ReviewerOutcome {
+  verdict: ReviewVerdict;
+  message: string;
+  usage: InvokeResult;
+}
+
+interface ReviewerInput {
+  todo: TodoItem;
+  diff: string;
+  coderRationale?: string;
+  provider: Provider;
+  onText?: (chunk: string) => void;
+}
+
+function buildUserMessage(input: ReviewerInput): string {
+  const parts: string[] = [];
+  parts.push(`## TODO (${input.todo.id})`);
+  parts.push(`Title: ${input.todo.title}`);
+  parts.push(`Description: ${input.todo.description}`);
+  parts.push("");
+  if (input.coderRationale) {
+    parts.push("## Coder rationale");
+    parts.push(input.coderRationale.trim());
+    parts.push("");
+  }
+  parts.push("## Diff");
+  parts.push("```diff");
+  parts.push(input.diff);
+  parts.push("```");
+  parts.push("");
+  parts.push("Produce the review JSON per the system prompt.");
+  return parts.join("\n");
+}
+
+export function parseReviewerOutput(text: string): ReviewVerdict {
+  const jsonMatch = text.match(/```json\s*([\s\S]*?)```/);
+  if (!jsonMatch?.[1]) {
+    // Defensive: if the Reviewer didn't return JSON, treat as request_changes
+    // to force a retry rather than silently approving.
+    return {
+      decision: "request_changes",
+      summary: "Reviewer did not return a parseable verdict; requesting a re-review.",
+      findings: [
+        {
+          severity: "high",
+          issue: "No ```json block in the response.",
+          suggestion: "Re-run the Reviewer.",
+        },
+      ],
+    };
+  }
+  try {
+    const parsed = JSON.parse(jsonMatch[1]);
+    const decision: ReviewVerdict["decision"] =
+      parsed.decision === "approve" ? "approve" : "request_changes";
+    return {
+      decision,
+      summary: String(parsed.summary ?? ""),
+      findings: Array.isArray(parsed.findings) ? parsed.findings : [],
+    };
+  } catch (err) {
+    return {
+      decision: "request_changes",
+      summary: `Reviewer JSON parse failed: ${(err as Error).message}`,
+      findings: [],
+    };
+  }
+}
+
+export async function runReviewer(
+  input: ReviewerInput,
+): Promise<ReviewerOutcome> {
+  const systemPrompt = loadPrompt("reviewer");
+  const userMessage = buildUserMessage(input);
+
+  const usage = await input.provider.invoke({
+    role: "reviewer",
+    systemPrompt,
+    userMessage,
+    onText: input.onText,
+  });
+
+  return {
+    verdict: parseReviewerOutput(usage.text),
+    message: usage.text,
+    usage,
+  };
+}
