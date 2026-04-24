@@ -87,6 +87,19 @@ export interface GithubClient {
     timeoutMs?: number;
     onProgress?: (checks: CheckSummary[]) => void;
   }) => Promise<CiWaitResult>;
+
+  /**
+   * Close a PR without merging, leaving a comment explaining why.
+   * Used by the orchestrator's rollback path when a task is abandoned
+   * (max review rounds exceeded, hook abort) so reviewers see a clear
+   * reason rather than a ghost PR just vanishing.
+   */
+  closePr: (args: {
+    owner: string;
+    repo: string;
+    prNumber: number;
+    reason: string;
+  }) => Promise<void>;
 }
 
 export { summarizeChecks, type CheckSummary, type CiWaitResult };
@@ -235,6 +248,23 @@ export function makeGithubClient(): GithubClient {
         merge_method: "squash",
       });
       return { merged: merged.data.merged, sha: merged.data.sha };
+    },
+
+    async closePr({ owner, repo, prNumber, reason }) {
+      // Post an explanatory comment first so the close event sits
+      // under a human-readable rationale in the timeline.
+      await octokit.issues.createComment({
+        owner,
+        repo,
+        issue_number: prNumber,
+        body: `claw-squad: abandoning this task. ${reason}`,
+      });
+      await octokit.pulls.update({
+        owner,
+        repo,
+        pull_number: prNumber,
+        state: "closed",
+      });
     },
   };
 }

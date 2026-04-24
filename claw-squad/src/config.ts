@@ -14,7 +14,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { AgentRole } from "./types.js";
+import type { AgentRole, RepoSpec, RunConfig } from "./types.js";
 import type { ProviderConfig, ProviderName } from "./providers/types.js";
 
 /**
@@ -178,6 +178,65 @@ interface ConfigFile {
     systemPrompt?: string;
     provider: ProviderConfig;
   }>;
+  /**
+   * Optional multi-repo spec. When present, supersedes the legacy
+   * `repoRoot` / `githubRepo` fields on `RunConfig` — the orchestrator
+   * routes each task to the repo its `repoAlias` names.
+   */
+  repos?: RepoSpec[];
+}
+
+/**
+ * Read the `repos` list out of the config file on disk, if any. Kept
+ * separate from `loadAgentConfig` so the CLI can merge it into
+ * `RunConfig` without threading agent logic through that path.
+ */
+export function loadReposFromFile(input: ConfigInput): RepoSpec[] | undefined {
+  const parsed = readConfigFile(
+    input.configPath ?? autoConfigPath(input.repoRoot),
+  );
+  if (!parsed?.repos || parsed.repos.length === 0) return undefined;
+  return parsed.repos;
+}
+
+/**
+ * Collapse the legacy single-repo config keys and the new `repos` list
+ * into the canonical form the orchestrator consumes.
+ *
+ * Order of precedence:
+ *   1. If `config.repos` is set and non-empty, use it verbatim.
+ *   2. Otherwise synthesize `[{ alias: "default", root, githubRepo }]`.
+ *
+ * This lets every existing single-repo run keep working without
+ * requiring a config migration, while multi-repo configs opt in by
+ * listing `repos` explicitly.
+ */
+export function resolveRepos(config: RunConfig): RepoSpec[] {
+  if (config.repos && config.repos.length > 0) {
+    // Defensive validation — duplicate aliases would make lookups
+    // ambiguous, and empty roots would silently break git invocations.
+    const aliases = new Set<string>();
+    for (const r of config.repos) {
+      if (!r.alias || r.alias.length === 0) {
+        throw new Error(`repos[*]: missing alias`);
+      }
+      if (!r.root || r.root.length === 0) {
+        throw new Error(`repos[${r.alias}]: missing root`);
+      }
+      if (aliases.has(r.alias)) {
+        throw new Error(`repos: duplicate alias "${r.alias}"`);
+      }
+      aliases.add(r.alias);
+    }
+    return config.repos;
+  }
+  return [
+    {
+      alias: "default",
+      root: config.repoRoot,
+      githubRepo: config.githubRepo,
+    },
+  ];
 }
 
 function readConfigFile(path: string): ConfigFile | undefined {

@@ -19,7 +19,11 @@ import prompts from "prompts";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { runOrchestrator, type UserInterface } from "./orchestrator.js";
-import { loadAgentConfig, type AgentCliOverride } from "./config.js";
+import {
+  loadAgentConfig,
+  loadReposFromFile,
+  type AgentCliOverride,
+} from "./config.js";
 import { loadSnapshot } from "./snapshot.js";
 import { loadHooksFromFile, NO_HOOKS, type Hooks } from "./hooks.js";
 import { detectTestCommand } from "./test-runner.js";
@@ -92,7 +96,15 @@ const runCmd = program
     "--ci-timeout <ms>",
     "wall-clock cap for CI wait (default 900000)",
   )
-  .option("--tui", "use the Ink-based terminal UI instead of plain streaming output");
+  .option("--tui", "use the Ink-based terminal UI instead of plain streaming output")
+  .option(
+    "--no-rollback-on-max-rounds",
+    "keep the task branch + PR when the Coder↔Reviewer loop hits max rounds (default: revert + close)",
+  )
+  .option(
+    "--no-rollback-on-hard-fail",
+    "keep the task branch on a preCommit hook abort (default: revert to starting ref)",
+  );
 
 // Per-role provider flags. Commander can't easily do templated option
 // names, so we add each explicitly. Keeping the name pattern stable
@@ -134,11 +146,43 @@ runCmd.action(async (requirement: string, opts: Record<string, unknown>) => {
       waitForCi: Boolean(opts.waitForCi),
       ciTimeoutMs:
         opts.ciTimeout !== undefined ? Number(opts.ciTimeout) : undefined,
+      // Commander sets opts.rollbackOnMaxRounds=false when --no-rollback-on-max-rounds
+      // is passed. Default is undefined → treated as "on" by the orchestrator.
+      rollbackOnMaxRounds: opts.rollbackOnMaxRounds !== false,
+      rollbackOnHardFail: opts.rollbackOnHardFail !== false,
     };
 
-    if (config.githubEnabled && !config.githubRepo) {
-      console.error(pc.red("--github requires --github-repo owner/name"));
+    // Pull multi-repo spec out of the config file if present. When
+    // unset, the orchestrator falls back to the legacy single-repo
+    // shape, so this is purely opt-in.
+    try {
+      const repos = loadReposFromFile({
+        repoRoot: config.repoRoot,
+        configPath: opts.config as string | undefined,
+      });
+      if (repos) config.repos = repos;
+    } catch (err) {
+      console.error(pc.red(`config error: ${(err as Error).message}`));
       process.exit(1);
+    }
+
+    // --github validation: when multi-repo is set, every repo must name
+    // its githubRepo. Otherwise the legacy single-repo flag applies.
+    if (config.githubEnabled) {
+      if (config.repos && config.repos.length > 0) {
+        const missing = config.repos.filter((r) => !r.githubRepo);
+        if (missing.length > 0) {
+          console.error(
+            pc.red(
+              `--github with multi-repo config requires githubRepo on each repo (missing: ${missing.map((r) => r.alias).join(", ")})`,
+            ),
+          );
+          process.exit(1);
+        }
+      } else if (!config.githubRepo) {
+        console.error(pc.red("--github requires --github-repo owner/name"));
+        process.exit(1);
+      }
     }
 
     let agentConfig;

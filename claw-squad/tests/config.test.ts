@@ -8,7 +8,26 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { DEFAULT_AGENT_CONFIG, loadAgentConfig } from "../src/config.js";
+import {
+  DEFAULT_AGENT_CONFIG,
+  loadAgentConfig,
+  loadReposFromFile,
+  resolveRepos,
+} from "../src/config.js";
+import type { RunConfig } from "../src/types.js";
+
+function baseRunConfig(repoRoot: string): RunConfig {
+  return {
+    repoRoot,
+    maxClarifications: 3,
+    maxReviewRounds: 3,
+    maxLoops: 10,
+    requireHumanApproval: true,
+    sandboxEnabled: false,
+    selfLearning: true,
+    githubEnabled: false,
+  };
+}
 
 describe("loadAgentConfig", () => {
   let root: string;
@@ -121,5 +140,79 @@ describe("loadAgentConfig", () => {
     });
     expect(cfg.reviewer.baseURL).toBe("http://farcorner:11434/v1");
     expect(cfg.reviewer.apiKey).toBe("k");
+  });
+});
+
+describe("resolveRepos", () => {
+  it("synthesizes a default single-repo spec from legacy fields", () => {
+    const cfg = baseRunConfig("/repo/foo");
+    cfg.githubRepo = "owner/foo";
+    const out = resolveRepos(cfg);
+    expect(out).toEqual([
+      { alias: "default", root: "/repo/foo", githubRepo: "owner/foo" },
+    ]);
+  });
+
+  it("uses config.repos verbatim when set", () => {
+    const cfg = baseRunConfig("/repo/foo");
+    cfg.repos = [
+      { alias: "fe", root: "/repo/fe", githubRepo: "o/fe" },
+      { alias: "be", root: "/repo/be" },
+    ];
+    expect(resolveRepos(cfg)).toEqual(cfg.repos);
+  });
+
+  it("rejects duplicate aliases", () => {
+    const cfg = baseRunConfig("/repo/foo");
+    cfg.repos = [
+      { alias: "x", root: "/a" },
+      { alias: "x", root: "/b" },
+    ];
+    expect(() => resolveRepos(cfg)).toThrow(/duplicate alias/);
+  });
+
+  it("rejects empty alias", () => {
+    const cfg = baseRunConfig("/repo/foo");
+    cfg.repos = [{ alias: "", root: "/a" }];
+    expect(() => resolveRepos(cfg)).toThrow(/alias/);
+  });
+
+  it("rejects empty root", () => {
+    const cfg = baseRunConfig("/repo/foo");
+    cfg.repos = [{ alias: "x", root: "" }];
+    expect(() => resolveRepos(cfg)).toThrow(/root/);
+  });
+});
+
+describe("loadReposFromFile", () => {
+  let root: string;
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "claw-cfg-repos-"));
+  });
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("returns undefined when no repos key is present", () => {
+    mkdirSync(join(root, ".claw-squad"), { recursive: true });
+    writeFileSync(
+      join(root, ".claw-squad/config.json"),
+      JSON.stringify({ agents: {} }),
+    );
+    expect(loadReposFromFile({ repoRoot: root })).toBeUndefined();
+  });
+
+  it("returns the repos list verbatim when set", () => {
+    mkdirSync(join(root, ".claw-squad"), { recursive: true });
+    writeFileSync(
+      join(root, ".claw-squad/config.json"),
+      JSON.stringify({
+        repos: [
+          { alias: "fe", root: "/fe", githubRepo: "o/fe" },
+          { alias: "be", root: "/be" },
+        ],
+      }),
+    );
+    expect(loadReposFromFile({ repoRoot: root })).toHaveLength(2);
   });
 });
