@@ -11,18 +11,35 @@
  *     useInput. Each prompt blocks the orchestrator via an unresolved
  *     Promise; pressing Enter / y / n resolves it.
  *
- * Why no ink-text-input dep? The single text field we need (typing an
- * answer to a Planner question) is small enough to implement with
- * useInput. Fewer deps, less version skew.
+ * Keyboard shortcuts (PR-3):
+ *   q              — graceful quit (sets budgetExceeded; orchestrator
+ *                    exits at next checkBudget).
+ *   j / k          — scroll the activity pane.
+ *   p c r a        — filter activity by role (planner / coder /
+ *                    reviewer / all).
+ *   s              — filter by subagent.
+ *   ?              — toggle help overlay.
+ *
+ * Per-role cost tracking lives in the header so "who is burning the
+ * budget" is visible at a glance — same four buckets the CLI summary
+ * uses after a run.
  */
 
 import React, { useEffect, useState } from "react";
 import { Box, Text, render, useInput } from "ink";
-import type { AgentRole, SquadState } from "../types.js";
+import {
+  ROLE_BUCKETS,
+  type AgentRole,
+  type RoleBucket,
+  type SquadState,
+} from "../types.js";
 import type { UserInterface } from "../orchestrator.js";
 
 interface LogLine {
   id: number;
+  /** Role tag, if any. `undefined` means a plain orchestrator log line. */
+  role?: RoleBucket | "orchestrator";
+  ts: string;
   text: string;
 }
 
@@ -31,10 +48,19 @@ interface AppProps {
   subscribe: (fn: () => void) => () => void;
 }
 
+interface PerRoleTotal {
+  calls: number;
+  costUsd: number;
+}
+
 interface TuiState {
   logs: LogLine[];
   streamBuffer: string;
   activeRole: AgentRole | "idle";
+  /** Name of the currently-running subagent, or undefined. */
+  inflightSubagent?: string;
+  /** Skills activated for the current task. */
+  activeSkills: string[];
   tokens: {
     input: number;
     output: number;
@@ -42,8 +68,16 @@ interface TuiState {
     cacheWrite: number;
     costUsd: number;
   };
+  perRole: Record<RoleBucket, PerRoleTotal>;
   squadState?: SquadState;
   pendingPrompt?: PendingPrompt;
+  /** Filter applied to the activity pane. undefined = show all. */
+  filter?: RoleBucket;
+  /** Lines skipped from the tail by j/k scrolling. */
+  scrollOffset: number;
+  helpVisible: boolean;
+  /** Resolves the quit promise when the user presses `q`. */
+  quitRequested: boolean;
 }
 
 type PendingPrompt =
@@ -57,6 +91,12 @@ type PendingPrompt =
       resolve: (answers: string[]) => void;
     };
 
+function emptyPerRole(): Record<RoleBucket, PerRoleTotal> {
+  const out = {} as Record<RoleBucket, PerRoleTotal>;
+  for (const b of ROLE_BUCKETS) out[b] = { calls: 0, costUsd: 0 };
+  return out;
+}
+
 /**
  * Subscription model: TuiUi mutates `currentState` in place and calls
  * every subscriber. React hooks subscribe in App to force a re-render.
@@ -68,10 +108,16 @@ class Store {
     logs: [],
     streamBuffer: "",
     activeRole: "idle",
+    activeSkills: [],
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 },
+    perRole: emptyPerRole(),
+    scrollOffset: 0,
+    helpVisible: false,
+    quitRequested: false,
   };
   private subscribers = new Set<() => void>();
   private nextId = 1;
+  onQuit?: () => void;
 
   subscribe = (fn: () => void): (() => void) => {
     this.subscribers.add(fn);
@@ -84,32 +130,39 @@ class Store {
     for (const s of this.subscribers) s();
   }
 
-  appendLog(text: string): void {
-    // Ink renders all log lines every tick, so we cap the buffer to
-    // keep render cost bounded.
+  appendLog(text: string, role?: LogLine["role"]): void {
     const logs = [
       ...this.state.logs,
-      { id: this.nextId++, text: stripTrailingNewlines(text) },
+      {
+        id: this.nextId++,
+        role,
+        ts: timestamp(),
+        text: stripTrailingNewlines(text),
+      },
     ];
-    while (logs.length > 200) logs.shift();
+    while (logs.length > 500) logs.shift();
     this.state = { ...this.state, logs };
     this.notify();
   }
 
   appendStream(role: AgentRole, chunk: string): void {
-    // Stream chunks flow fast. Batch them into a single-line buffer;
-    // flush to the log on newline. This keeps "live typing" feel
-    // without flooding the log history.
     const combined = this.state.streamBuffer + chunk;
     const parts = combined.split("\n");
     const carry = parts.pop() ?? "";
     const newLogs = parts.map((p) => ({
       id: this.nextId++,
-      text: `[${role}] ${p}`,
+      role: role as RoleBucket,
+      ts: timestamp(),
+      text: p,
     }));
     const logs = [...this.state.logs, ...newLogs];
-    while (logs.length > 200) logs.shift();
-    this.state = { ...this.state, logs, streamBuffer: carry, activeRole: role };
+    while (logs.length > 500) logs.shift();
+    this.state = {
+      ...this.state,
+      logs,
+      streamBuffer: carry,
+      activeRole: role,
+    };
     this.notify();
   }
 
@@ -118,14 +171,35 @@ class Store {
     this.notify();
   }
 
-  addUsage(delta: {
-    input: number;
-    output: number;
-    cacheRead: number;
-    cacheWrite: number;
-    costUsd: number;
-  }): void {
+  setInflightSubagent(name: string | undefined): void {
+    this.state = { ...this.state, inflightSubagent: name };
+    this.notify();
+  }
+
+  setActiveSkills(names: string[]): void {
+    this.state = { ...this.state, activeSkills: names };
+    this.notify();
+  }
+
+  addUsage(
+    role: RoleBucket,
+    delta: {
+      input: number;
+      output: number;
+      cacheRead: number;
+      cacheWrite: number;
+      costUsd: number;
+    },
+  ): void {
     const t = this.state.tokens;
+    const existing = this.state.perRole[role];
+    const perRole = {
+      ...this.state.perRole,
+      [role]: {
+        calls: existing.calls + 1,
+        costUsd: existing.costUsd + delta.costUsd,
+      },
+    };
     this.state = {
       ...this.state,
       tokens: {
@@ -135,6 +209,7 @@ class Store {
         cacheWrite: t.cacheWrite + delta.cacheWrite,
         costUsd: t.costUsd + delta.costUsd,
       },
+      perRole,
     };
     this.notify();
   }
@@ -148,25 +223,91 @@ class Store {
     this.state = { ...this.state, pendingPrompt: p };
     this.notify();
   }
+
+  setFilter(filter?: RoleBucket): void {
+    this.state = { ...this.state, filter, scrollOffset: 0 };
+    this.notify();
+  }
+
+  scroll(delta: number): void {
+    const next = Math.max(0, this.state.scrollOffset + delta);
+    this.state = { ...this.state, scrollOffset: next };
+    this.notify();
+  }
+
+  toggleHelp(): void {
+    this.state = { ...this.state, helpVisible: !this.state.helpVisible };
+    this.notify();
+  }
+
+  requestQuit(): void {
+    this.state = { ...this.state, quitRequested: true };
+    this.notify();
+    this.onQuit?.();
+  }
 }
 
 const App: React.FC<AppProps> = ({ state, subscribe }) => {
-  // `state` is mutated in place by the store; subscribe on mount so
-  // React re-renders.
   const [, forceRender] = useState(0);
   useEffect(
     () => subscribe(() => forceRender((n) => n + 1)),
     [subscribe],
   );
 
+  // Global hotkeys: only active when no prompt is pending. useInput is
+  // conditional via the `isActive` option so clarifications can own
+  // keystrokes without fighting us for them.
+  useInput(
+    (input, key) => {
+      if (input === "?") {
+        store.toggleHelp();
+        return;
+      }
+      if (input === "q") {
+        store.requestQuit();
+        return;
+      }
+      if (input === "j" || key.downArrow) {
+        store.scroll(-1);
+        return;
+      }
+      if (input === "k" || key.upArrow) {
+        store.scroll(1);
+        return;
+      }
+      if (input === "a") store.setFilter(undefined);
+      else if (input === "p") store.setFilter("planner");
+      else if (input === "c") store.setFilter("coder");
+      else if (input === "r") store.setFilter("reviewer");
+      else if (input === "s") store.setFilter("subagent");
+    },
+    { isActive: !state.pendingPrompt },
+  );
+
   return React.createElement(
     Box,
     { flexDirection: "column" },
     React.createElement(Header, { state }),
+    React.createElement(SubagentBadge, {
+      name: state.inflightSubagent,
+      skills: state.activeSkills,
+    }),
     React.createElement(TodoPanel, { todos: state.squadState?.todos ?? [] }),
-    React.createElement(ActivityPane, { logs: state.logs }),
+    React.createElement(ActivityPane, {
+      logs: state.logs,
+      filter: state.filter,
+      scrollOffset: state.scrollOffset,
+    }),
+    state.helpVisible ? React.createElement(HelpOverlay) : null,
     state.pendingPrompt
       ? React.createElement(PendingPromptView, { pending: state.pendingPrompt })
+      : null,
+    state.quitRequested
+      ? React.createElement(
+          Text,
+          { dimColor: true },
+          "[q] quit requested — orchestrator will exit at next checkpoint…",
+        )
       : null,
   );
 };
@@ -174,6 +315,10 @@ const App: React.FC<AppProps> = ({ state, subscribe }) => {
 const Header: React.FC<{ state: TuiState }> = ({ state }) => {
   const t = state.tokens;
   const totalTokens = t.input + t.output + t.cacheRead + t.cacheWrite;
+  const cells = ROLE_BUCKETS.map((b) => {
+    const r = state.perRole[b];
+    return `${b}:${r.calls}×/$${r.costUsd.toFixed(3)}`;
+  }).join("  ");
   return React.createElement(
     Box,
     { borderStyle: "round", padding: 1, marginBottom: 1 },
@@ -183,14 +328,30 @@ const Header: React.FC<{ state: TuiState }> = ({ state }) => {
       React.createElement(
         Text,
         { bold: true, color: "cyan" },
-        `claw-squad  •  active: ${state.activeRole}`,
+        `claw-squad  •  active: ${state.activeRole}  •  ?=help`,
       ),
       React.createElement(
         Text,
         null,
         `in ${t.input.toLocaleString()}  out ${t.output.toLocaleString()}  cache ${t.cacheRead.toLocaleString()}↓/${t.cacheWrite.toLocaleString()}↑  total ${totalTokens.toLocaleString()}  $${t.costUsd.toFixed(4)}`,
       ),
+      React.createElement(Text, { dimColor: true }, cells),
     ),
+  );
+};
+
+const SubagentBadge: React.FC<{ name?: string; skills: string[] }> = ({
+  name,
+  skills,
+}) => {
+  if (!name && skills.length === 0) return null;
+  const parts: string[] = [];
+  if (name) parts.push(`subagent: ${name}`);
+  if (skills.length > 0) parts.push(`skills: ${skills.join(", ")}`);
+  return React.createElement(
+    Box,
+    { paddingX: 1, marginBottom: 1 },
+    React.createElement(Text, { color: "magenta" }, parts.join("  •  ")),
   );
 };
 
@@ -209,26 +370,53 @@ const TodoPanel: React.FC<{ todos: SquadState["todos"] }> = ({ todos }) => {
       React.createElement(
         Text,
         { key: t.id, color: colorForStatus(t.status) },
-        `  ${statusGlyph(t.status)} ${t.id}  ${t.title}${t.mergedPrNumber ? `  (PR #${t.mergedPrNumber})` : ""}`,
+        `  ${statusGlyph(t.status)} ${t.id}  ${t.title}${t.mergedPrNumber ? `  (PR #${t.mergedPrNumber})` : ""}${t.rolledBack ? "  ↺" : ""}`,
       ),
     ),
   );
 };
 
-const ActivityPane: React.FC<{ logs: LogLine[] }> = ({ logs }) => {
-  // Static + windowing: show only the tail (terminal is usually ~40
-  // rows). Using <Static> on the tail would let us render more without
-  // re-rendering but it'd also skip color updates. The simple windowed
-  // approach is plenty fast for our traffic.
-  const tail = logs.slice(-20);
+const ActivityPane: React.FC<{
+  logs: LogLine[];
+  filter?: RoleBucket;
+  scrollOffset: number;
+}> = ({ logs, filter, scrollOffset }) => {
+  const filtered = filter ? logs.filter((l) => l.role === filter) : logs;
+  const windowSize = 20;
+  const end = filtered.length - scrollOffset;
+  const start = Math.max(0, end - windowSize);
+  const tail = filtered.slice(start, end);
+  const label = filter ? `activity [${filter}]` : "activity";
   return React.createElement(
     Box,
     { flexDirection: "column" },
+    React.createElement(
+      Text,
+      { dimColor: true },
+      `${label} — showing ${tail.length}/${filtered.length}${scrollOffset > 0 ? ` (scrolled +${scrollOffset})` : ""}`,
+    ),
     ...tail.map((l) =>
-      React.createElement(Text, { key: l.id }, l.text),
+      React.createElement(
+        Text,
+        { key: l.id, color: colorForRole(l.role) },
+        `${l.ts}  ${l.text}`,
+      ),
     ),
   );
 };
+
+const HelpOverlay: React.FC = () =>
+  React.createElement(
+    Box,
+    { borderStyle: "double", paddingX: 1, marginTop: 1, flexDirection: "column" },
+    React.createElement(Text, { bold: true }, "Keyboard shortcuts"),
+    React.createElement(Text, null, "  q         graceful quit (next checkpoint)"),
+    React.createElement(Text, null, "  j / ↓     scroll activity down"),
+    React.createElement(Text, null, "  k / ↑     scroll activity up"),
+    React.createElement(Text, null, "  a         filter: all"),
+    React.createElement(Text, null, "  p/c/r/s   filter: planner/coder/reviewer/subagent"),
+    React.createElement(Text, null, "  ?         toggle this help"),
+  );
 
 const PendingPromptView: React.FC<{ pending: PendingPrompt }> = ({
   pending,
@@ -322,9 +510,39 @@ function colorForStatus(
   }
 }
 
+function colorForRole(r?: LogLine["role"]): string | undefined {
+  switch (r) {
+    case "planner":
+      return "cyan";
+    case "coder":
+      return "green";
+    case "reviewer":
+      return "yellow";
+    case "subagent":
+      return "magenta";
+    case "orchestrator":
+      return "white";
+    default:
+      return undefined;
+  }
+}
+
 function stripTrailingNewlines(s: string): string {
   return s.replace(/\n+$/g, "");
 }
+
+function timestamp(): string {
+  const d = new Date();
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  const ss = String(d.getSeconds()).padStart(2, "0");
+  return `${hh}:${mm}:${ss}`;
+}
+
+// Module-scoped store so useInput in App can reach the instance
+// without threading it through props. Only one TUI is ever live per
+// process (we mount once from cli.ts and unmount on exit).
+let store = new Store();
 
 /**
  * UserInterface implementation backed by an Ink render. Construct,
@@ -332,7 +550,7 @@ function stripTrailingNewlines(s: string): string {
  * the orchestrator returns so the process can exit cleanly.
  */
 export class TuiUi implements UserInterface {
-  private store = new Store();
+  private store = store;
   private app?: ReturnType<typeof render>;
 
   mount(): void {
@@ -345,30 +563,44 @@ export class TuiUi implements UserInterface {
   }
 
   unmount(): void {
-    // waitUntilExit resolves when Ink finishes rendering; we just
-    // clean up synchronously here.
     this.app?.unmount();
   }
 
-  /** Use this to feed token usage into the header from the orchestrator. */
-  trackUsage(delta: {
-    input: number;
-    output: number;
-    cacheRead: number;
-    cacheWrite: number;
-    costUsd: number;
-  }): void {
-    this.store.addUsage(delta);
+  /** Register a callback fired when the user presses `q`. */
+  onQuit(fn: () => void): void {
+    this.store.onQuit = fn;
+  }
+
+  /** Feed token usage into the header from the orchestrator. */
+  trackUsage(
+    role: RoleBucket,
+    delta: {
+      input: number;
+      output: number;
+      cacheRead: number;
+      cacheWrite: number;
+      costUsd: number;
+    },
+  ): void {
+    this.store.addUsage(role, delta);
   }
 
   updateState(s: SquadState): void {
     this.store.setSquadState(s);
   }
 
+  setInflightSubagent(name?: string): void {
+    this.store.setInflightSubagent(name);
+  }
+
+  setActiveSkills(names: string[]): void {
+    this.store.setActiveSkills(names);
+  }
+
   // UserInterface implementation below.
 
   log(msg: string): void {
-    this.store.appendLog(msg);
+    this.store.appendLog(msg, "orchestrator");
   }
 
   streamAgent(role: string, chunk: string): void {

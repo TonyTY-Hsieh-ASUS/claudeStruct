@@ -45,6 +45,12 @@ import {
   type Hooks,
 } from "./hooks.js";
 import { saveSnapshot } from "./snapshot.js";
+import {
+  appendEvent,
+  startRun,
+  type RunLogEvent,
+  type RunLogHandle,
+} from "./runs/log.js";
 import { runTests, type TestRunResult } from "./test-runner.js";
 import {
   loadSkills,
@@ -68,7 +74,7 @@ import {
 } from "./github/octokit.js";
 import { detectDefaultBranch, headSha } from "./git.js";
 import { resolveRepos, type AgentConfig } from "./config.js";
-import { createProvider } from "./providers/registry.js";
+import { createProvider, estimateCost } from "./providers/registry.js";
 import type { InvokeResult, Provider } from "./providers/types.js";
 import {
   type RepoSpec,
@@ -89,6 +95,34 @@ export interface UserInterface {
   log: (msg: string) => void;
   /** Surface an agent's streamed output. */
   streamAgent: (role: string, chunk: string) => void;
+  /**
+   * Optional. When implemented (e.g. by the TUI), the orchestrator
+   * calls this per LLM invocation so the UI can update a live
+   * header. Absent on simple UIs (plain CLI, tests).
+   */
+  trackUsage?: (
+    role: RoleBucket,
+    delta: {
+      input: number;
+      output: number;
+      cacheRead: number;
+      cacheWrite: number;
+      costUsd: number;
+    },
+  ) => void;
+  /** Optional. Fired when the orchestrator dispatches a subagent call. */
+  setInflightSubagent?: (name: string | undefined) => void;
+  /** Optional. Fired when a task activates Skills. */
+  setActiveSkills?: (names: string[]) => void;
+  /**
+   * Optional. Register a callback to receive user-initiated quit
+   * requests (e.g. pressing `q` in the TUI). When invoked, the
+   * orchestrator trips the budget-exceeded path so the next
+   * checkBudget() returns false and the run exits cleanly.
+   */
+  onQuit?: (fn: () => void) => void;
+  /** Optional. Reflect SquadState changes (TODO updates) back to the UI. */
+  updateState?: (state: SquadState) => void;
 }
 
 export interface OrchestratorResult {
@@ -193,6 +227,7 @@ export async function runOrchestrator(args: {
         continue;
       }
       ui.log(pc.cyan(`\n[subagent:${r.name}] answering…`));
+      ui.setInflightSubagent?.(r.name);
       try {
         const resp = await runSubagent(spec, {
           name: r.name,
@@ -208,6 +243,8 @@ export async function runOrchestrator(args: {
             `  [subagent:${r.name}] failed: ${(err as Error).message}`,
           ),
         );
+      } finally {
+        ui.setInflightSubagent?.(undefined);
       }
       if (!checkBudget()) break;
     }
@@ -263,10 +300,73 @@ export async function runOrchestrator(args: {
 
   const totals: RunTotals = args.resumeTotals ?? emptyRunTotals();
 
+  // Per-run event log. JSONL on disk; dashboard folds it back into a
+  // summary. Survives crashes (append-only, no trailing bracket).
+  const runLog: RunLogHandle = startRun(config.repoRoot);
+  appendEvent(runLog, {
+    type: "run-start",
+    ts: new Date().toISOString(),
+    requirement,
+    config: {
+      repoRoot: config.repoRoot,
+      githubEnabled: config.githubEnabled,
+      sandboxEnabled: config.sandboxEnabled,
+      maxLoops: config.maxLoops,
+      maxReviewRounds: config.maxReviewRounds,
+    },
+  });
+  const logPhase = (label: string, message?: string): void => {
+    try {
+      appendEvent(runLog, {
+        type: "phase",
+        ts: new Date().toISOString(),
+        label,
+        message,
+      });
+    } catch {
+      // Run log is best-effort — don't let an FS hiccup kill a real run.
+    }
+  };
+
   const persist = () => saveSnapshot(config.repoRoot, state, totals);
   let budgetExceeded: string | undefined;
+
+  // User-initiated quit (TUI `q` key). Reuse the budgetExceeded path so
+  // we drop out at the next checkBudget with reason=aborted — the
+  // cleanest exit we already have.
+  ui.onQuit?.(() => {
+    budgetExceeded = "user requested quit";
+  });
   const track = (role: RoleBucket, u: InvokeResult) => {
+    // Record the per-call cost up front — same estimate the run total
+    // consumes — so the JSONL event matches the aggregate exactly.
+    const callCost = estimateCost(u);
     addUsage(totals, role, u);
+    // Feed live per-role header updates to any UI that wants them.
+    ui.trackUsage?.(role, {
+      input: u.inputTokens,
+      output: u.outputTokens,
+      cacheRead: u.cacheReadTokens,
+      cacheWrite: u.cacheCreationTokens,
+      costUsd: callCost,
+    });
+    // Emit a usage event to the run log. Best-effort — swallow I/O
+    // errors so run log problems never abort a run.
+    try {
+      appendEvent(runLog, {
+        type: "usage",
+        ts: new Date().toISOString(),
+        role,
+        provider: u.provider,
+        inputTokens: u.inputTokens,
+        outputTokens: u.outputTokens,
+        cacheReadTokens: u.cacheReadTokens,
+        cacheCreationTokens: u.cacheCreationTokens,
+        costUsd: callCost,
+      });
+    } catch {
+      /* ignore */
+    }
 
     // Hard caps — checked AFTER each call so we trip as soon as we're
     // over. Budget is a run-wide concern, so we consult `overall`.
@@ -300,14 +400,33 @@ export async function runOrchestrator(args: {
     return false;
   };
 
+  let endReason: OrchestratorResult["reason"] = "aborted";
   try {
-    return await runPhases();
+    const result = await runPhases();
+    endReason = result.reason;
+    return result;
   } finally {
     // Always persist — even on exception — so --resume can pick up.
     try {
       persist();
     } catch (err) {
       ui.log(`[snapshot] save failed: ${(err as Error).message}`);
+    }
+    // Close out the run log. Best-effort: a failed write shouldn't
+    // ripple into the caller's error handling.
+    try {
+      appendEvent(runLog, {
+        type: "run-end",
+        ts: new Date().toISOString(),
+        reason: endReason,
+        overall: {
+          costUsd: totals.overall.costUsd,
+          cacheSavedUsd: totals.overall.cacheSavedUsd,
+          calls: totals.overall.calls,
+        },
+      });
+    } catch {
+      /* ignore */
     }
   }
 
@@ -431,6 +550,7 @@ export async function runOrchestrator(args: {
       );
     }
 
+    logPhase(`task.start`, `${next.id}: ${next.title}`);
     const reason = await runTaskLoop({
       task: next,
       state,
@@ -443,6 +563,7 @@ export async function runOrchestrator(args: {
       checkBudget,
       hooks,
       allSkills,
+      logPhase,
     });
 
     if (reason === "blocked" || reason === "aborted") {
@@ -451,6 +572,18 @@ export async function runOrchestrator(args: {
       if (config.selfLearning && next.rolledBack) {
         const lesson = lessonFromCompletedTask(next, state.reviewHistory);
         appendLesson(config.repoRoot, lesson);
+      }
+      if (next.rolledBack) {
+        try {
+          appendEvent(runLog, {
+            type: "todo-complete",
+            ts: new Date().toISOString(),
+            id: next.id,
+            title: next.title,
+            iterations: next.iterations,
+            rolledBack: true,
+          });
+        } catch { /* ignore */ }
       }
       return { state, totals, reason };
     }
@@ -464,6 +597,15 @@ export async function runOrchestrator(args: {
       const lesson = lessonFromCompletedTask(next, state.reviewHistory);
       appendLesson(config.repoRoot, lesson);
     }
+    try {
+      appendEvent(runLog, {
+        type: "todo-complete",
+        ts: new Date().toISOString(),
+        id: next.id,
+        title: next.title,
+        iterations: next.iterations,
+      });
+    } catch { /* ignore */ }
 
     // Planner re-invoked on outer loop to review TODO + plan next step.
     ui.log(pc.cyan("\n[Planner] reviewing progress…"));
@@ -496,6 +638,7 @@ export async function runOrchestrator(args: {
 
     // Snapshot at the end of each outer loop so --resume picks up here.
     persist();
+    ui.updateState?.(state);
   }
 
   return { state, totals, reason: "max_loops" };
@@ -514,6 +657,8 @@ async function runTaskLoop(args: {
   checkBudget: () => boolean;
   hooks: Hooks;
   allSkills: Skill[];
+  /** Append a phase marker to the run log. Best-effort; never throws. */
+  logPhase: (label: string, message?: string) => void;
 }): Promise<"complete" | "blocked" | "aborted"> {
   const {
     task,
@@ -527,6 +672,7 @@ async function runTaskLoop(args: {
     checkBudget,
     hooks,
     allSkills,
+    logPhase,
   } = args;
   const { spec: repoSpec, ownerRepo, baseBranch } = repo;
   const repoRoot = repoSpec.root;
@@ -595,6 +741,7 @@ async function runTaskLoop(args: {
 
   for (let round = 0; round < config.maxReviewRounds; round++) {
     task.iterations += 1;
+    logPhase(`coder.round`, `${task.id} round ${round + 1}/${config.maxReviewRounds}`);
     ui.log(
       pc.cyan(
         `\n[Coder] round ${round + 1}/${config.maxReviewRounds} on ${task.id}…`,
@@ -644,6 +791,7 @@ async function runTaskLoop(args: {
       taggedNames: task.skills,
       contextFilePaths: fileContext.map((f) => f.path),
     });
+    ui.setActiveSkills?.(activeSkills.map((s) => s.name));
     const skillsBlock = renderSkillsForCoder(activeSkills);
     if (activeSkills.length > 0) {
       ui.log(
@@ -794,6 +942,7 @@ async function runTaskLoop(args: {
     }
 
     // Reviewer reads the diff.
+    logPhase(`reviewer.examine`, `${task.id} diff=${applied.diff.length}B`);
     ui.log(pc.cyan(`\n[Reviewer] examining diff (${applied.diff.length} bytes)…`));
     const reviewOut = await runReviewer({
       todo: task,
