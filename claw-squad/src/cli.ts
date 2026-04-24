@@ -99,6 +99,14 @@ const runCmd = program
   )
   .option("--tui", "use the Ink-based terminal UI instead of plain streaming output")
   .option(
+    "--slack-channel <id>",
+    "post activity to a Slack channel (thread) instead of stdout. Needs SLACK_BOT_TOKEN env.",
+  )
+  .option(
+    "--web-ui [port]",
+    "serve a localhost web UI on the given port (default 3737)",
+  )
+  .option(
     "--no-rollback-on-max-rounds",
     "keep the task branch + PR when the Coder↔Reviewer loop hits max rounds (default: revert + close)",
   )
@@ -200,16 +208,61 @@ runCmd.action(async (requirement: string, opts: Record<string, unknown>) => {
 
     logConfig(config, agentConfig);
 
-    // TUI or plain CLI? The TUI is opt-in AND requires a TTY — if
-    // stdout is redirected (CI, pipe) we fall back silently.
+    // UI selection: TUI, Slack, Web UI, or plain CLI. At most one
+    // remote/rich UI at a time — combining them creates confusing
+    // behavior (whose `confirm` wins?) and we don't need it yet.
+    const uiFlags = [
+      opts.tui ? "--tui" : undefined,
+      opts.slackChannel ? "--slack-channel" : undefined,
+      opts.webUi !== undefined ? "--web-ui" : undefined,
+    ].filter(Boolean);
+    if (uiFlags.length > 1) {
+      console.error(
+        pc.red(
+          `Pick one UI: ${uiFlags.join(", ")} are mutually exclusive.`,
+        ),
+      );
+      process.exit(1);
+    }
+
     let ui: UserInterface;
     let tuiInstance: { unmount(): void } | undefined;
+    let remoteUi: { shutdown(): Promise<void> } | undefined;
     if (opts.tui && process.stdout.isTTY) {
       const { TuiUi } = await import("./tui/tui.js");
       const tui = new TuiUi();
       tui.mount();
       ui = tui;
       tuiInstance = tui;
+    } else if (opts.slackChannel) {
+      const { SlackUi } = await import("./ui/slack.js");
+      const slack = new SlackUi({
+        channel: String(opts.slackChannel),
+        openerText: `claw-squad starting: ${requirement.slice(0, 200)}`,
+      });
+      await slack.ready();
+      ui = slack;
+      remoteUi = slack;
+    } else if (opts.webUi !== undefined) {
+      // `--web-ui` alone → default port 3737. `--web-ui 8080` →
+      // Commander hands us "8080" as a string.
+      const portArg =
+        typeof opts.webUi === "string" ? Number(opts.webUi) : undefined;
+      const { WebUi } = await import("./ui/web.js");
+      const web = new WebUi({ port: portArg });
+      try {
+        const addr = await web.start();
+        console.log(
+          pc.cyan(`web UI listening on http://${addr.host}:${addr.port}`),
+        );
+      } catch (err) {
+        console.error(
+          pc.red(`web UI failed to start: ${(err as Error).message}`),
+        );
+        process.exit(1);
+      }
+      ui = web;
+      remoteUi = web;
     } else {
       if (opts.tui && !process.stdout.isTTY) {
         console.log(pc.yellow("[tui] stdout is not a TTY; falling back to plain CLI"));
@@ -254,6 +307,7 @@ runCmd.action(async (requirement: string, opts: Record<string, unknown>) => {
         resumeTotals,
       });
       tuiInstance?.unmount();
+      await remoteUi?.shutdown();
       printSummary(result);
       if (result.reason === "complete") process.exit(0);
       if (result.reason === "blocked" || result.reason === "aborted")
@@ -261,6 +315,7 @@ runCmd.action(async (requirement: string, opts: Record<string, unknown>) => {
       process.exit(3);
     } catch (err) {
       tuiInstance?.unmount();
+      await remoteUi?.shutdown();
       console.error(pc.red(`\nFatal: ${(err as Error).message}`));
       process.exit(1);
     }
