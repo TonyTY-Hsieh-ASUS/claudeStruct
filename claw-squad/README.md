@@ -170,6 +170,16 @@ node dist/cli.js run "<requirement>" --github --github-repo owner/repo --sandbox
 - **Human-in-the-loop by default** for destructive GitHub actions (push, merge). Pass `--no-confirm` to automate.
 - **Single dependency for non-Anthropic providers** (`openai` npm package). No plugin framework, no LiteLLM adapter chain — just baseURL swap.
 
+## New in v0.3 (squad-extensions)
+
+- **Test runner** between Coder and Reviewer: `--test-cmd "npm test"` runs the tests after every Coder commit. If they fail, output is fed into Coder's next round as a `critical` finding — *Reviewer is skipped*, saving an LLM call per bad commit. `--auto-test` sniffs the repo for `package.json` / `pyproject.toml` / `go.mod` / `Cargo.toml` / `pom.xml` / `build.gradle` / `Makefile` and picks one.
+- **CI wait** between Reviewer approve and merge: `--wait-for-ci` polls GitHub's `check_runs` + legacy commit-status for the PR's head SHA. On failure, the failing check names + URLs feed into Coder as another round. Timeouts configurable via `--ci-timeout` (default 15 min).
+- **Skills**: drop `.claw-squad/skills/*.md` files with YAML frontmatter (`name`, `description`, optional `apply_to` globs). Planner sees a compact catalog and tags TODOs with `skills: [...]`; orchestrator also auto-activates any skill whose `apply_to` matches the Coder's file context. Full skill body goes into Coder's user turn, not into the (cached) system prompt — so cache hits aren't burnt on skills the task doesn't need.
+- **Subagents**: declare ephemeral research/verification helpers in `subagents: [...]` in `config.json`. Each has its own provider config — use cheap/fast models (`claude-haiku-4-5`, `gpt-4o-mini`, local Ollama) for subordinate work. Planner delegates by emitting `## Delegate <name>\n<prompt>`; answers fold into Planner's next turn.
+- **TUI** (`--tui`): Ink-based terminal UI with a live status header (tokens, cost, active agent), a TODO panel (✓/◐/✗/·), and a scrolling activity pane. Handles confirm/clarification prompts in-TUI via `useInput`. Falls back to plain CLI when stdout isn't a TTY.
+
+See `examples/config.with-subagents.json` and `examples/skills/typescript-conventions.md` for concrete templates.
+
 ## What's wired
 
 - **Provider abstraction**: 8 backends (Anthropic, OpenAI, Gemini, MiniMax, Ollama, vLLM, SGLang, openai-compat) via 2 client classes

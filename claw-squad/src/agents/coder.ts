@@ -39,6 +39,12 @@ interface CoderInput {
   fileContext: Array<{ path: string; content: string }>;
   /** Reviewer feedback from a previous round on this task. */
   reviewerFeedback?: ReviewVerdict;
+  /**
+   * Pre-rendered skills block (see src/skills.ts#renderSkillsForCoder).
+   * Pasted into the user turn between file context and the response
+   * instructions. Empty string means no skills active for this task.
+   */
+  skillsBlock?: string;
   provider: Provider;
   onText?: (chunk: string) => void;
 }
@@ -76,6 +82,11 @@ function buildUserMessage(input: CoderInput): string {
       parts.push("```");
       parts.push("");
     }
+  }
+
+  if (input.skillsBlock && input.skillsBlock.trim().length > 0) {
+    parts.push(input.skillsBlock.trim());
+    parts.push("");
   }
 
   parts.push(

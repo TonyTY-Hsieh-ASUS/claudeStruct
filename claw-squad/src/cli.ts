@@ -22,6 +22,7 @@ import { runOrchestrator, type UserInterface } from "./orchestrator.js";
 import { loadAgentConfig, type AgentCliOverride } from "./config.js";
 import { loadSnapshot } from "./snapshot.js";
 import { loadHooksFromFile, NO_HOOKS, type Hooks } from "./hooks.js";
+import { detectTestCommand } from "./test-runner.js";
 import type { AgentRole, RunConfig } from "./types.js";
 
 const program = new Command();
@@ -66,7 +67,28 @@ const runCmd = program
   .option(
     "--hooks <path>",
     "load a JS/TS module exporting lifecycle hooks (default export or `hooks` named export)",
-  );
+  )
+  .option(
+    "--test-cmd <cmd>",
+    "shell command to run after each Coder commit; failure feeds back to Coder",
+  )
+  .option(
+    "--auto-test",
+    "auto-detect a test command (npm test / pytest / go test / cargo test / ...)",
+  )
+  .option(
+    "--test-timeout <ms>",
+    "wall-clock cap for the test command (default 300000)",
+  )
+  .option(
+    "--wait-for-ci",
+    "after Reviewer approves, block on GitHub CI before merging",
+  )
+  .option(
+    "--ci-timeout <ms>",
+    "wall-clock cap for CI wait (default 900000)",
+  )
+  .option("--tui", "use the Ink-based terminal UI instead of plain streaming output");
 
 // Per-role provider flags. Commander can't easily do templated option
 // names, so we add each explicitly. Keeping the name pattern stable
@@ -102,6 +124,12 @@ runCmd.action(async (requirement: string, opts: Record<string, unknown>) => {
         opts.maxTokensTotal !== undefined
           ? Number(opts.maxTokensTotal)
           : undefined,
+      testCommand: resolveTestCommand(opts),
+      testTimeoutMs:
+        opts.testTimeout !== undefined ? Number(opts.testTimeout) : undefined,
+      waitForCi: Boolean(opts.waitForCi),
+      ciTimeoutMs:
+        opts.ciTimeout !== undefined ? Number(opts.ciTimeout) : undefined,
     };
 
     if (config.githubEnabled && !config.githubRepo) {
@@ -122,7 +150,23 @@ runCmd.action(async (requirement: string, opts: Record<string, unknown>) => {
     }
 
     logConfig(config, agentConfig);
-    const ui = buildUI();
+
+    // TUI or plain CLI? The TUI is opt-in AND requires a TTY — if
+    // stdout is redirected (CI, pipe) we fall back silently.
+    let ui: UserInterface;
+    let tuiInstance: { unmount(): void } | undefined;
+    if (opts.tui && process.stdout.isTTY) {
+      const { TuiUi } = await import("./tui/tui.js");
+      const tui = new TuiUi();
+      tui.mount();
+      ui = tui;
+      tuiInstance = tui;
+    } else {
+      if (opts.tui && !process.stdout.isTTY) {
+        console.log(pc.yellow("[tui] stdout is not a TTY; falling back to plain CLI"));
+      }
+      ui = buildUI();
+    }
 
     // Hooks (optional — defaults to no-op).
     let hooks: Hooks = NO_HOOKS;
@@ -160,12 +204,14 @@ runCmd.action(async (requirement: string, opts: Record<string, unknown>) => {
         resumeFrom,
         resumeTotals,
       });
+      tuiInstance?.unmount();
       printSummary(result);
       if (result.reason === "complete") process.exit(0);
       if (result.reason === "blocked" || result.reason === "aborted")
         process.exit(2);
       process.exit(3);
     } catch (err) {
+      tuiInstance?.unmount();
       console.error(pc.red(`\nFatal: ${(err as Error).message}`));
       process.exit(1);
     }
@@ -268,6 +314,21 @@ function logConfig(
     );
   }
   console.log(pc.dim("─".repeat(60)));
+}
+
+function resolveTestCommand(opts: Record<string, unknown>): string | undefined {
+  // Explicit --test-cmd wins. Fall back to --auto-test detection.
+  if (typeof opts.testCmd === "string" && opts.testCmd.length > 0) {
+    return opts.testCmd;
+  }
+  if (opts.autoTest) {
+    const detected = detectTestCommand(String(opts.root ?? process.cwd()));
+    if (detected) {
+      console.log(pc.dim(`[auto-test] detected: ${detected}`));
+    }
+    return detected;
+  }
+  return undefined;
 }
 
 function buildUI(): UserInterface {

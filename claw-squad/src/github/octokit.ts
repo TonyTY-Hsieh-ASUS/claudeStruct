@@ -23,6 +23,12 @@
 
 import { Octokit } from "@octokit/rest";
 import { pushBranch as gitPushBranch, type GitOptions } from "../git.js";
+import {
+  summarizeChecks,
+  waitForCi,
+  type CheckSummary,
+  type CiWaitResult,
+} from "./ci-wait.js";
 import type { ReviewVerdict } from "../types.js";
 
 export interface GithubClient {
@@ -68,7 +74,22 @@ export interface GithubClient {
     prNumber: number;
     commitTitle?: string;
   }) => Promise<{ merged: boolean; sha?: string }>;
+
+  /**
+   * Block until CI for the PR's head SHA settles. See ci-wait.ts for
+   * the polling semantics. Used by the orchestrator between "Reviewer
+   * approved" and "merge PR" when --wait-for-ci is set.
+   */
+  waitForCi: (args: {
+    owner: string;
+    repo: string;
+    prNumber: number;
+    timeoutMs?: number;
+    onProgress?: (checks: CheckSummary[]) => void;
+  }) => Promise<CiWaitResult>;
 }
+
+export { summarizeChecks, type CheckSummary, type CiWaitResult };
 
 export function makeGithubClient(): GithubClient {
   const token = process.env.GITHUB_TOKEN;
@@ -179,6 +200,17 @@ export function makeGithubClient(): GithubClient {
           throw err;
         }
       }
+    },
+
+    async waitForCi({ owner, repo, prNumber, timeoutMs, onProgress }) {
+      return waitForCi({
+        octokit,
+        owner,
+        repo,
+        prNumber,
+        timeoutMs,
+        onProgress,
+      });
     },
 
     async markReadyAndMerge({ owner, repo, prNumber, commitTitle }) {
