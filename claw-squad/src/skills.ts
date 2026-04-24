@@ -31,6 +31,7 @@
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import picomatch from "picomatch";
 
 export interface Skill {
   name: string;
@@ -197,8 +198,7 @@ export function selectSkillsForTask(args: {
     for (const s of allSkills) {
       if (!s.applyTo || s.applyTo.length === 0) continue;
       for (const glob of s.applyTo) {
-        const re = globToRegex(glob);
-        if (contextFilePaths.some((p) => re.test(p))) {
+        if (contextFilePaths.some((p) => picomatch.isMatch(p, glob))) {
           picked.set(s.name, s);
           break;
         }
@@ -207,42 +207,6 @@ export function selectSkillsForTask(args: {
   }
 
   return Array.from(picked.values());
-}
-
-/**
- * Minimal glob→regex: supports `*` (any non-slash), `**` (anything),
- * and `?` (single char). Nothing fancier. Skills that need real glob
- * semantics can use more specific patterns.
- */
-function globToRegex(glob: string): RegExp {
-  let re = "^";
-  let i = 0;
-  while (i < glob.length) {
-    const c = glob[i];
-    if (c === "*") {
-      if (glob[i + 1] === "*") {
-        re += ".*";
-        i += 2;
-      } else {
-        re += "[^/]*";
-        i += 1;
-      }
-      continue;
-    }
-    if (c === "?") {
-      re += "[^/]";
-      i += 1;
-      continue;
-    }
-    if (c !== undefined && /[.+^$|(){}[\]\\]/.test(c)) {
-      re += `\\${c}`;
-    } else if (c !== undefined) {
-      re += c;
-    }
-    i += 1;
-  }
-  re += "$";
-  return new RegExp(re);
 }
 
 /** Render activated skills as a block to paste into Coder's user turn. */

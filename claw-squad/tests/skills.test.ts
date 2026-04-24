@@ -144,6 +144,75 @@ describe("selectSkillsForTask", () => {
     });
     expect(picked).toEqual([]);
   });
+
+  // picomatch gives us full glob semantics (brace expansion, character
+  // classes, negation) that the hand-rolled globToRegex never supported.
+  describe("picomatch-backed apply_to", () => {
+    const braceSkill = [
+      {
+        name: "js-testing",
+        description: "d",
+        body: "b",
+        path: "x",
+        applyTo: ["**/*.{js,ts,tsx}"],
+      },
+    ];
+
+    it("matches brace expansion alternatives", () => {
+      for (const path of ["a.js", "src/b.ts", "src/ui/c.tsx"]) {
+        const picked = selectSkillsForTask({
+          allSkills: braceSkill,
+          contextFilePaths: [path],
+        });
+        expect(picked.map((s) => s.name)).toEqual(["js-testing"]);
+      }
+    });
+
+    it("rejects non-listed brace alternatives", () => {
+      const picked = selectSkillsForTask({
+        allSkills: braceSkill,
+        contextFilePaths: ["a.py"],
+      });
+      expect(picked).toEqual([]);
+    });
+
+    it("matches character classes", () => {
+      const s = [
+        {
+          name: "foo",
+          description: "d",
+          body: "b",
+          path: "x",
+          applyTo: ["file[0-9].txt"],
+        },
+      ];
+      expect(
+        selectSkillsForTask({ allSkills: s, contextFilePaths: ["file3.txt"] }),
+      ).toHaveLength(1);
+      expect(
+        selectSkillsForTask({ allSkills: s, contextFilePaths: ["fileA.txt"] }),
+      ).toHaveLength(0);
+    });
+
+    it("supports negation globs via picomatch", () => {
+      const s = [
+        {
+          name: "exclude-dist",
+          description: "d",
+          body: "b",
+          path: "x",
+          applyTo: ["!dist/**", "**/*.ts"],
+        },
+      ];
+      // src/app.ts matches **/*.ts
+      expect(
+        selectSkillsForTask({
+          allSkills: s,
+          contextFilePaths: ["src/app.ts"],
+        }),
+      ).toHaveLength(1);
+    });
+  });
 });
 
 describe("rendering", () => {

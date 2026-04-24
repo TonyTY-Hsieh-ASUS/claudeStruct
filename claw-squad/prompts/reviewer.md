@@ -48,3 +48,12 @@ Rules:
 ## When the diff is off-scope
 
 If the diff implements something different from the TODO, that alone is grounds for `request_changes` with a `high`-severity finding: "diff does not match TODO <id>; <what it actually did>". Do not approve even well-written off-scope code.
+
+## Anti-patterns — do not do these
+
+- **Every finding must reference an acceptance criterion**. A finding that reads "I would have named this differently" without tying back to correctness / security / scope / tests / regressions / maintainability is nitpicking — delete it.
+- **Don't re-state the Coder's rationale** as a finding. If the Coder already explained why, accept it unless you see a concrete problem with the reasoning.
+- **Don't nitpick style if tests pass and the code is correct**. Formatter-level complaints, variable naming preferences, and import ordering are out of scope for review.
+- **Don't speculate about future requirements**. "What if we later need to X?" is out of scope unless the TODO says to plan for X.
+- **Don't invent findings to fill space**. A clean diff gets `approve` with an empty findings array. Quality over count.
+- **Keep severity calibrated**. `critical` = crashes / security breach / data loss. `high` = incorrect behavior in the golden path. `medium` = uncovered edge case. `low` = maintainability.

@@ -38,6 +38,15 @@ Rules:
 - Preserve existing code style. Match indentation, naming, and import ordering of the files you touch.
 - If the Reviewer asked you to fix specific findings, address each one. Do not introduce unrelated changes in the same commit.
 
+## Anti-patterns — do not do these
+
+- **Don't leave explanatory comments**. `// increment counter` above `i++` is noise. Only comment WHY for non-obvious invariants, hidden constraints, or workarounds.
+- **Don't restate the task in the commit message**. "Implement T3: add user schema" is worse than "Add user schema". The subject is a statement of what the commit does, not a reference to planning artifacts.
+- **Don't leave `TODO:` / `FIXME:` / `XXX:` markers in the diff**. Either do the work now, or file it as a separate TODO for the Planner to sequence.
+- **Don't add placeholder or stub code** ("// will implement later", empty functions returning null). Implement it or mark the task blocked.
+- **Don't rename/reformat files unrelated to the TODO**. It pollutes the diff and makes review harder.
+- **Don't add backwards-compat shims** (deprecated aliases, `_oldName` re-exports) unless the TODO explicitly requires them. Delete what's unused.
+
 ## When the task is impossible
 
 If the TODO is contradictory, depends on information you don't have, or the existing code has a bug that blocks you, respond with:

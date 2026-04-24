@@ -21,12 +21,14 @@
     "ink": "^7.0.1",
     "openai": "^6.34.0",
     "picocolors": "^1.1.1",
+    "picomatch": "^4.0.4",
     "prompts": "^2.4.2",
     "react": "^19.2.5",
     "simple-git": "^3.27.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "@types/picomatch": "^4.0.3",
     "@types/prompts": "^2.4.9",
     "@types/react": "^19.2.14",
     "tsx": "^4.19.2",

@@ -64,14 +64,16 @@ import {
 } from "./github/octokit.js";
 import { detectDefaultBranch } from "./git.js";
 import type { AgentConfig } from "./config.js";
-import { createProvider, estimateCost } from "./providers/registry.js";
+import { createProvider } from "./providers/registry.js";
 import type { InvokeResult, Provider } from "./providers/types.js";
 import {
   type ReviewVerdict,
+  type RoleBucket,
   type RunConfig,
   type SquadState,
   type TodoItem,
 } from "./types.js";
+import { addUsage, emptyRunTotals, type RunTotals } from "./totals.js";
 
 export interface UserInterface {
   /** Prompt the user for answers to Planner's questions. */
@@ -86,14 +88,7 @@ export interface UserInterface {
 
 export interface OrchestratorResult {
   state: SquadState;
-  totals: {
-    inputTokens: number;
-    outputTokens: number;
-    cacheReadTokens: number;
-    cacheCreationTokens: number;
-    costUsd: number;
-    calls: number;
-  };
+  totals: RunTotals;
   reason: "complete" | "max_loops" | "blocked" | "aborted";
 }
 
@@ -181,7 +176,7 @@ export async function runOrchestrator(args: {
           prompt: r.prompt,
           requestedBy: "planner",
         });
-        track(resp.usage);
+        track("subagent", resp.usage);
         pendingSubagentAnswers.push(resp);
         dispatched += 1;
       } catch (err) {
@@ -222,39 +217,27 @@ export async function runOrchestrator(args: {
     loopCount: 0,
   };
 
-  const totals = args.resumeTotals ?? {
-    inputTokens: 0,
-    outputTokens: 0,
-    cacheReadTokens: 0,
-    cacheCreationTokens: 0,
-    costUsd: 0,
-    calls: 0,
-  };
+  const totals: RunTotals = args.resumeTotals ?? emptyRunTotals();
 
   const persist = () => saveSnapshot(config.repoRoot, state, totals);
   let budgetExceeded: string | undefined;
-  const track = (u: InvokeResult) => {
-    totals.inputTokens += u.inputTokens;
-    totals.outputTokens += u.outputTokens;
-    totals.cacheReadTokens += u.cacheReadTokens;
-    totals.cacheCreationTokens += u.cacheCreationTokens;
-    totals.costUsd += estimateCost(u);
-    totals.calls += 1;
+  const track = (role: RoleBucket, u: InvokeResult) => {
+    addUsage(totals, role, u);
 
     // Hard caps — checked AFTER each call so we trip as soon as we're
-    // over. The orchestrator polls `budgetExceeded` between stages and
-    // aborts with reason=aborted if set.
+    // over. Budget is a run-wide concern, so we consult `overall`.
+    const overall = totals.overall;
     if (
       config.maxCostUsd !== undefined &&
-      totals.costUsd > config.maxCostUsd
+      overall.costUsd > config.maxCostUsd
     ) {
-      budgetExceeded = `cost cap $${config.maxCostUsd.toFixed(4)} exceeded (used $${totals.costUsd.toFixed(4)})`;
+      budgetExceeded = `cost cap $${config.maxCostUsd.toFixed(4)} exceeded (used $${overall.costUsd.toFixed(4)})`;
     }
     const totalTokens =
-      totals.inputTokens +
-      totals.outputTokens +
-      totals.cacheReadTokens +
-      totals.cacheCreationTokens;
+      overall.inputTokens +
+      overall.outputTokens +
+      overall.cacheReadTokens +
+      overall.cacheCreationTokens;
     if (config.maxTokens !== undefined && totalTokens > config.maxTokens) {
       budgetExceeded = `token cap ${config.maxTokens.toLocaleString()} exceeded (used ${totalTokens.toLocaleString()})`;
     }
@@ -314,7 +297,7 @@ export async function runOrchestrator(args: {
       provider: providers.planner,
       onText: (c) => ui.streamAgent("planner", c),
     });
-    track(outcome.usage);
+    track("planner", outcome.usage);
     if (!checkBudget()) return { state, totals, reason: "aborted" };
 
     // If Planner delegated any work, run it now — answers feed into
@@ -359,7 +342,7 @@ export async function runOrchestrator(args: {
       provider: providers.planner,
       onText: (c) => ui.streamAgent("planner", c),
     });
-    track(outcome.usage);
+    track("planner", outcome.usage);
     if (!checkBudget()) return { state, totals, reason: "aborted" };
     await dispatchDelegates(outcome.message);
     if (outcome.todos && outcome.todos.length > 0) {
@@ -424,7 +407,7 @@ export async function runOrchestrator(args: {
       provider: providers.planner,
       onText: (c) => ui.streamAgent("planner", c),
     });
-    track(plannerReview.usage);
+    track("planner", plannerReview.usage);
     if (!checkBudget()) return { state, totals, reason: "aborted" };
     await dispatchDelegates(plannerReview.message);
     if (plannerReview.phase === "complete") {
@@ -455,7 +438,7 @@ async function runTaskLoop(args: {
   ownerRepo?: { owner: string; repo: string };
   baseBranch: string;
   ui: UserInterface;
-  track: (u: InvokeResult) => void;
+  track: (role: RoleBucket, u: InvokeResult) => void;
   checkBudget: () => boolean;
   hooks: Hooks;
   allSkills: Skill[];
@@ -546,7 +529,7 @@ async function runTaskLoop(args: {
       provider: providers.coder,
       onText: (c) => ui.streamAgent("coder", c),
     });
-    track(coderOut.usage);
+    track("coder", coderOut.usage);
     if (!checkBudget()) return "aborted";
 
     if (coderOut.blocked) {
@@ -683,7 +666,7 @@ async function runTaskLoop(args: {
       provider: providers.reviewer,
       onText: (c) => ui.streamAgent("reviewer", c),
     });
-    track(reviewOut.usage);
+    track("reviewer", reviewOut.usage);
     if (!checkBudget()) return "aborted";
 
     state.reviewHistory.push(reviewOut.verdict);

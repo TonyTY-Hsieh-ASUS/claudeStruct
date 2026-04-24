@@ -72,6 +72,46 @@ export function createProvider(cfg: ProviderConfig): Provider {
  * estimate. Users who need exact accounting should check their provider
  * dashboard.
  */
+/**
+ * Per-provider $/1M token rates. Same table estimateCost consults —
+ * exported so helpers can reuse it without duplicating numbers.
+ *
+ * Note: `cacheRead`/`cacheWrite` are undefined for every non-Anthropic
+ * provider today. That's deliberate: OpenAI's auto-caching is a free
+ * server-side optimization we don't bill for separately, Gemini/MiniMax
+ * don't expose caching metrics through their OpenAI-compat shims, and
+ * the local backends are $0 flat.
+ */
+export const PROVIDER_RATES: Record<
+  ProviderName,
+  { input: number; output: number; cacheRead?: number; cacheWrite?: number }
+> = {
+  anthropic: { input: 5.0, output: 25.0, cacheRead: 0.5, cacheWrite: 10.0 },
+  openai: { input: 2.5, output: 10.0 },
+  gemini: { input: 1.25, output: 5.0 },
+  minimax: { input: 1.0, output: 4.0 },
+  ollama: { input: 0, output: 0 },
+  vllm: { input: 0, output: 0 },
+  sglang: { input: 0, output: 0 },
+  "openai-compat": { input: 0, output: 0 },
+};
+
+/**
+ * Dollars saved vs. a hypothetical no-cache baseline. When cache read
+ * tokens land at ~10% of input rate, the delta (input - cacheRead) per
+ * token read is the concrete savings. Zero for providers that don't
+ * charge cache rates separately (OpenAI, Gemini, local) — they either
+ * don't cache or don't bill for it.
+ */
+export function cacheSavings(args: {
+  provider: ProviderName;
+  cacheReadTokens: number;
+}): number {
+  const r = PROVIDER_RATES[args.provider];
+  if (r.cacheRead === undefined) return 0;
+  return (args.cacheReadTokens / 1_000_000) * (r.input - r.cacheRead);
+}
+
 export function estimateCost(args: {
   provider: ProviderName;
   inputTokens: number;
@@ -79,21 +119,9 @@ export function estimateCost(args: {
   cacheReadTokens: number;
   cacheCreationTokens: number;
 }): number {
-  // Rates in $/1M tokens. Approximate as of 2026-04; will drift.
-  const rates: Record<
-    ProviderName,
-    { input: number; output: number; cacheRead?: number; cacheWrite?: number }
-  > = {
-    anthropic: { input: 5.0, output: 25.0, cacheRead: 0.5, cacheWrite: 10.0 },
-    openai: { input: 2.5, output: 10.0 }, // GPT-4o-class
-    gemini: { input: 1.25, output: 5.0 }, // Gemini 2.5-class
-    minimax: { input: 1.0, output: 4.0 },
-    ollama: { input: 0, output: 0 },
-    vllm: { input: 0, output: 0 },
-    sglang: { input: 0, output: 0 },
-    "openai-compat": { input: 0, output: 0 }, // unknown — treat as local
-  };
-  const r = rates[args.provider];
+  // Rates live in PROVIDER_RATES above; see cacheSavings() for the other
+  // reader.
+  const r = PROVIDER_RATES[args.provider];
   const input = (args.inputTokens / 1_000_000) * r.input;
   const output = (args.outputTokens / 1_000_000) * r.output;
   const cr = (args.cacheReadTokens / 1_000_000) * (r.cacheRead ?? 0);

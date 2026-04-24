@@ -10,7 +10,12 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createProvider, estimateCost, resolveConfig } from "../src/providers/registry.js";
+import {
+  cacheSavings,
+  createProvider,
+  estimateCost,
+  resolveConfig,
+} from "../src/providers/registry.js";
 import { AnthropicProvider } from "../src/providers/anthropic.js";
 import { OpenAICompatProvider } from "../src/providers/openai-compat.js";
 
@@ -129,5 +134,43 @@ describe("estimateCost", () => {
       cacheCreationTokens: 0,
     });
     expect(cost).toBeGreaterThan(0);
+  });
+});
+
+describe("cacheSavings", () => {
+  it("is zero for providers with no cache rate", () => {
+    expect(
+      cacheSavings({ provider: "openai", cacheReadTokens: 1_000_000 }),
+    ).toBe(0);
+    expect(
+      cacheSavings({ provider: "ollama", cacheReadTokens: 1_000_000 }),
+    ).toBe(0);
+  });
+
+  it("is (input - cacheRead) * tokens/1M for Anthropic", () => {
+    // Registry rates: input=$5/M, cacheRead=$0.50/M → $4.50 saved per 1M reads.
+    const saved = cacheSavings({
+      provider: "anthropic",
+      cacheReadTokens: 1_000_000,
+    });
+    expect(saved).toBeCloseTo(4.5, 6);
+  });
+
+  it("scales linearly with token count", () => {
+    const half = cacheSavings({
+      provider: "anthropic",
+      cacheReadTokens: 500_000,
+    });
+    const full = cacheSavings({
+      provider: "anthropic",
+      cacheReadTokens: 1_000_000,
+    });
+    expect(half * 2).toBeCloseTo(full, 6);
+  });
+
+  it("is zero when no cache reads", () => {
+    expect(
+      cacheSavings({ provider: "anthropic", cacheReadTokens: 0 }),
+    ).toBe(0);
   });
 });
