@@ -7,6 +7,21 @@
 
 export type AgentRole = "planner" | "coder" | "reviewer";
 
+/**
+ * Buckets used for per-role token/cost attribution. Subagents are all
+ * folded under a single "subagent" bucket regardless of their named
+ * identity — per-name breakdown can be derived from per-run logs if
+ * we need it later.
+ */
+export type RoleBucket = AgentRole | "subagent";
+
+export const ROLE_BUCKETS: readonly RoleBucket[] = [
+  "planner",
+  "coder",
+  "reviewer",
+  "subagent",
+];
+
 export interface TodoItem {
   id: string;
   /** Short human-readable title. */

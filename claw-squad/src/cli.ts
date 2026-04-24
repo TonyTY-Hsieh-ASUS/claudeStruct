@@ -23,7 +23,11 @@ import { loadAgentConfig, type AgentCliOverride } from "./config.js";
 import { loadSnapshot } from "./snapshot.js";
 import { loadHooksFromFile, NO_HOOKS, type Hooks } from "./hooks.js";
 import { detectTestCommand } from "./test-runner.js";
-import type { AgentRole, RunConfig } from "./types.js";
+import { ROLE_BUCKETS, type AgentRole, type RunConfig } from "./types.js";
+import {
+  isSilentCacheInvalidator,
+  type RunTotals,
+} from "./totals.js";
 
 const program = new Command();
 
@@ -189,7 +193,7 @@ runCmd.action(async (requirement: string, opts: Record<string, unknown>) => {
       resumeTotals = snap.totals;
       console.log(
         pc.cyan(
-          `Resuming from ${snap.savedAt} — ${snap.state.todos.length} todos, loopCount=${snap.state.loopCount}, prior spend $${snap.totals.costUsd.toFixed(4)}`,
+          `Resuming from ${snap.savedAt} — ${snap.state.todos.length} todos, loopCount=${snap.state.loopCount}, prior spend $${snap.totals.overall.costUsd.toFixed(4)}`,
         ),
       );
     }
@@ -365,25 +369,74 @@ function buildUI(): UserInterface {
 }
 
 function printSummary(result: {
-  totals: {
-    inputTokens: number;
-    outputTokens: number;
-    cacheReadTokens: number;
-    cacheCreationTokens: number;
-    costUsd: number;
-    calls: number;
-  };
+  totals: RunTotals;
   reason: string;
 }): void {
   const t = result.totals;
-  console.log(pc.dim("\n" + "─".repeat(60)));
+  const overall = t.overall;
+  console.log(pc.dim("\n" + "─".repeat(72)));
   console.log(pc.bold("Usage summary"));
-  console.log(`  LLM calls:            ${t.calls}`);
-  console.log(`  input tokens:         ${t.inputTokens.toLocaleString()}`);
-  console.log(`  output tokens:        ${t.outputTokens.toLocaleString()}`);
-  console.log(`  cache reads (~10%):   ${t.cacheReadTokens.toLocaleString()}`);
-  console.log(`  cache writes:         ${t.cacheCreationTokens.toLocaleString()}`);
-  console.log(`  estimated cost:       $${t.costUsd.toFixed(4)}`);
+
+  // Per-role table. Only show rows with actual traffic so the output
+  // stays readable for short runs.
+  const col = (s: string, w: number) => s.padEnd(w);
+  const num = (n: number, w: number) => n.toLocaleString().padStart(w);
+  const dollars = (n: number, w: number) => ("$" + n.toFixed(4)).padStart(w);
+  const header =
+    col("  role", 14) +
+    col("calls", 8) +
+    col("in", 12) +
+    col("out", 12) +
+    col("cacheR", 12) +
+    col("cost", 12);
+  console.log(pc.dim(header));
+  for (const role of ROLE_BUCKETS) {
+    const r = t.perRole[role];
+    if (r.calls === 0) continue;
+    console.log(
+      col(`  ${role}`, 14) +
+        num(r.calls, 8).padEnd(8) +
+        num(r.inputTokens, 12).padEnd(12) +
+        num(r.outputTokens, 12).padEnd(12) +
+        num(r.cacheReadTokens, 12).padEnd(12) +
+        dollars(r.costUsd, 12).padEnd(12),
+    );
+  }
+  console.log(
+    pc.bold(
+      col("  total", 14) +
+        num(overall.calls, 8).padEnd(8) +
+        num(overall.inputTokens, 12).padEnd(12) +
+        num(overall.outputTokens, 12).padEnd(12) +
+        num(overall.cacheReadTokens, 12).padEnd(12) +
+        dollars(overall.costUsd, 12).padEnd(12),
+    ),
+  );
+
+  // Cache ROI. cacheSavedUsd is computed per-call in totals.ts using
+  // the provider rate table — only Anthropic contributes today.
+  if (overall.cacheSavedUsd > 0) {
+    const baseline = overall.costUsd + overall.cacheSavedUsd;
+    const pct =
+      baseline > 0 ? ((overall.cacheSavedUsd / baseline) * 100).toFixed(1) : "0.0";
+    console.log(
+      pc.green(
+        `  cache savings:        $${overall.cacheSavedUsd.toFixed(4)} (${pct}% vs. no-cache)`,
+      ),
+    );
+  }
+
+  // Silent-cache-invalidator detector: many Anthropic calls, zero
+  // reads. Either a nondeterministic prefix (timestamp/UUID) or the
+  // tool set / system prompt is shifting between calls.
+  if (isSilentCacheInvalidator(overall)) {
+    console.log(
+      pc.yellow(
+        `  warning:              ${overall.anthropicCalls} Anthropic calls, 0 cache reads — prompt prefix may be invalidating the cache`,
+      ),
+    );
+  }
+
   console.log(`  outcome:              ${result.reason}`);
 }
 

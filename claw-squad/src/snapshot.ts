@@ -7,29 +7,30 @@
  * long run hits a budget cap, a network blip, or the user just closes
  * the terminal.
  *
- * What's persisted:
- *   - The full SquadState (requirement, clarifications, todos,
- *     reviewHistory, loopCount).
- *   - Run totals (tokens, cost) for accurate end-of-run reporting after
- *     a resume.
- *   - A schema version so future breaking changes to SquadState can be
- *     migrated or rejected cleanly.
+ * Schema versions:
+ *   v1 — flat totals (one bucket). Pre-observability.
+ *   v2 — per-role totals via `RunTotals`. Current.
  *
- * NOT persisted:
- *   - The provider/model config. That's by design — a user might want
- *     to resume with a different provider (e.g. the cloud model after
- *     the local Ollama server went down). Resume loads state only; the
- *     CLI re-resolves config from file + flags.
+ * v1 snapshots auto-migrate on load: the flat totals fold into
+ * `overall`, per-role buckets stay empty (since we can't retroactively
+ * attribute spend). We warn so the user knows the migrated snapshot's
+ * per-role view is incomplete, not that data vanished.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { SquadState } from "./types.js";
+import {
+  emptyRoleTotals,
+  emptyRunTotals,
+  type RunTotals,
+} from "./totals.js";
 
-const SCHEMA_VERSION = 1;
+const CURRENT_SCHEMA_VERSION = 2;
 const SNAPSHOT_FILE = ".claw-squad/state.json";
 
-export interface SnapshotTotals {
+/** Legacy v1 totals shape — only used by the migration path. */
+interface LegacyV1Totals {
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
@@ -42,7 +43,7 @@ export interface Snapshot {
   schemaVersion: number;
   savedAt: string;
   state: SquadState;
-  totals: SnapshotTotals;
+  totals: RunTotals;
 }
 
 export function snapshotPath(repoRoot: string): string {
@@ -52,12 +53,12 @@ export function snapshotPath(repoRoot: string): string {
 export function saveSnapshot(
   repoRoot: string,
   state: SquadState,
-  totals: SnapshotTotals,
+  totals: RunTotals,
 ): void {
   const path = snapshotPath(repoRoot);
   mkdirSync(dirname(path), { recursive: true });
   const snap: Snapshot = {
-    schemaVersion: SCHEMA_VERSION,
+    schemaVersion: CURRENT_SCHEMA_VERSION,
     savedAt: new Date().toISOString(),
     state,
     totals,
@@ -65,20 +66,64 @@ export function saveSnapshot(
   writeFileSync(path, JSON.stringify(snap, null, 2) + "\n", "utf-8");
 }
 
-export function loadSnapshot(repoRoot: string): Snapshot | undefined {
+export interface LoadSnapshotOptions {
+  onMigrate?: (from: number, to: number) => void;
+}
+
+export function loadSnapshot(
+  repoRoot: string,
+  options: LoadSnapshotOptions = {},
+): Snapshot | undefined {
   const path = snapshotPath(repoRoot);
   if (!existsSync(path)) return undefined;
   const raw = readFileSync(path, "utf-8");
-  let parsed: Snapshot;
+  let parsed: unknown;
   try {
-    parsed = JSON.parse(raw) as Snapshot;
+    parsed = JSON.parse(raw);
   } catch (err) {
     throw new Error(`failed to parse ${path}: ${(err as Error).message}`);
   }
-  if (parsed.schemaVersion !== SCHEMA_VERSION) {
-    throw new Error(
-      `snapshot schema mismatch: file=${parsed.schemaVersion} expected=${SCHEMA_VERSION}`,
-    );
+  return normalizeSnapshot(parsed, options);
+}
+
+/** Exposed for unit tests. */
+export function normalizeSnapshot(
+  raw: unknown,
+  options: LoadSnapshotOptions = {},
+): Snapshot {
+  if (!raw || typeof raw !== "object") {
+    throw new Error("snapshot: root must be an object");
   }
-  return parsed;
+  const s = raw as Partial<Snapshot> & { totals?: unknown };
+  const version = typeof s.schemaVersion === "number" ? s.schemaVersion : 1;
+
+  if (version === CURRENT_SCHEMA_VERSION) {
+    return s as Snapshot;
+  }
+  if (version === 1) {
+    options.onMigrate?.(1, CURRENT_SCHEMA_VERSION);
+    const legacy = s.totals as LegacyV1Totals | undefined;
+    const migrated = emptyRunTotals();
+    if (legacy) {
+      migrated.overall = {
+        ...emptyRoleTotals(),
+        inputTokens: legacy.inputTokens ?? 0,
+        outputTokens: legacy.outputTokens ?? 0,
+        cacheReadTokens: legacy.cacheReadTokens ?? 0,
+        cacheCreationTokens: legacy.cacheCreationTokens ?? 0,
+        costUsd: legacy.costUsd ?? 0,
+        calls: legacy.calls ?? 0,
+        // v1 didn't track anthropicCalls or cacheSavedUsd — leave zero.
+      };
+    }
+    return {
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      savedAt: s.savedAt ?? new Date().toISOString(),
+      state: s.state as SquadState,
+      totals: migrated,
+    };
+  }
+  throw new Error(
+    `snapshot schema mismatch: file=${version} expected=${CURRENT_SCHEMA_VERSION} (no migration path)`,
+  );
 }
