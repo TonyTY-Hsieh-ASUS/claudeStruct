@@ -25,6 +25,7 @@ import {
   type AgentCliOverride,
 } from "./config.js";
 import { loadSnapshot } from "./snapshot.js";
+import { formatTable, loadSummaries } from "./dashboard.js";
 import { loadHooksFromFile, NO_HOOKS, type Hooks } from "./hooks.js";
 import { detectTestCommand } from "./test-runner.js";
 import { ROLE_BUCKETS, type AgentRole, type RunConfig } from "./types.js";
@@ -483,6 +484,17 @@ function printSummary(result: {
 
   console.log(`  outcome:              ${result.reason}`);
 }
+
+program
+  .command("dashboard")
+  .description(
+    "Print a cost/outcome table for every run logged under .claw-squad/runs/",
+  )
+  .option("--root <path>", "repo root", process.cwd())
+  .action((opts: { root: string }) => {
+    const summaries = loadSummaries(opts.root);
+    console.log(formatTable(summaries));
+  });
 
 program.parseAsync().catch((err) => {
   console.error(pc.red((err as Error).message));
