@@ -118,6 +118,24 @@ export function lessonFromCompletedTask(
   todo: TodoItem,
   reviews: ReviewVerdict[],
 ): string {
+  // Rolled-back tasks get a different shape. We want the next Planner
+  // run to notice "last time we tried something like this, it got
+  // abandoned" so it can either simplify the scope or flag the risk
+  // up-front. Don't emit findings/counts — those belong to merged PRs.
+  if (todo.rolledBack) {
+    const lines: string[] = [
+      `Task: ${todo.id} — ${todo.title} (ROLLED BACK)`,
+      `Rounds attempted: ${reviews.length}`,
+    ];
+    if (todo.rollbackReason) {
+      lines.push(`Reason: ${todo.rollbackReason}`);
+    }
+    lines.push(
+      "Next Planner: consider smaller scope or split this into sub-tasks before retrying.",
+    );
+    return lines.join("\n");
+  }
+
   const rounds = reviews.length;
   const lines: string[] = [];
   lines.push(`Task: ${todo.id} — ${todo.title}`);

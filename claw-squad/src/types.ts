@@ -39,6 +39,37 @@ export interface TodoItem {
    * touched files, so this list isn't exhaustive.
    */
   skills?: string[];
+  /**
+   * Multi-repo runs only. The repo alias from `RunConfig.repos`. When
+   * unset the orchestrator falls back to the first repo in the list.
+   * Single-repo runs never populate this.
+   */
+  repoAlias?: string;
+  /**
+   * Set by the orchestrator when a task was aborted mid-flight and its
+   * branch got reverted. Feeds into the lesson writer so future Planner
+   * runs can learn from the failure.
+   */
+  rolledBack?: boolean;
+  /**
+   * Reason the task was rolled back. Short free-form string — gets
+   * surfaced in lessons.md and the CLI summary.
+   */
+  rollbackReason?: string;
+}
+
+/**
+ * One target repository. Multi-repo runs list several of these under
+ * `RunConfig.repos`; single-repo runs synthesize a default spec from
+ * the legacy `repoRoot` + `githubRepo` fields.
+ */
+export interface RepoSpec {
+  /** Short identifier the Planner uses to tag TODOs. */
+  alias: string;
+  /** Absolute path to the repo root on disk. */
+  root: string;
+  /** `owner/repo`. Optional — only needed if githubEnabled. */
+  githubRepo?: string;
 }
 
 export interface ClarificationTurn {
@@ -107,6 +138,24 @@ export interface RunConfig {
   githubEnabled: boolean;
   /** GitHub repo, e.g. "tonyandclaw/claudeStruct". Required if githubEnabled. */
   githubRepo?: string;
+  /**
+   * Multi-repo runs. When set, the Planner is told about these aliases
+   * and TODOs can be tagged with `repoAlias`. When unset, a single
+   * default spec is synthesized from `repoRoot` + `githubRepo` so
+   * legacy configs keep working unchanged.
+   */
+  repos?: RepoSpec[];
+  /**
+   * Revert the task's branch (and close its PR, if any) when the
+   * Coder↔Reviewer loop blows through `maxReviewRounds` without
+   * landing an approved change. Default true.
+   */
+  rollbackOnMaxRounds?: boolean;
+  /**
+   * Revert the task's branch on a hard failure (preCommit HookAbort,
+   * corrupt sandbox state, etc.). Default true.
+   */
+  rollbackOnHardFail?: boolean;
   /**
    * Hard cap on estimated USD spent on LLM calls before the run aborts.
    * Undefined = no cap. Checked after every LLM invocation. The estimate

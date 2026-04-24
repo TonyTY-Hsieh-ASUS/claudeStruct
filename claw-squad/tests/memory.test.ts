@@ -65,4 +65,24 @@ describe("memory", () => {
     expect(lesson).toContain("Iterations to approve: 2");
     expect(lesson).toContain("empty input not handled");
   });
+
+  it("lessonFromCompletedTask emits a distinct shape for rolled-back tasks", () => {
+    const todo: TodoItem = {
+      id: "T9",
+      title: "rewrite parser",
+      description: "...",
+      status: "abandoned",
+      iterations: 3,
+      rolledBack: true,
+      rollbackReason: "exceeded 3 Coder↔Reviewer rounds",
+    };
+    const lesson = lessonFromCompletedTask(todo, [
+      { decision: "request_changes", summary: "nope", findings: [] },
+    ]);
+    expect(lesson).toContain("ROLLED BACK");
+    expect(lesson).toContain("exceeded 3");
+    expect(lesson).toContain("smaller scope");
+    // Don't pollute with "Iterations to approve:" — that's for merged tasks.
+    expect(lesson).not.toContain("Iterations to approve");
+  });
 });

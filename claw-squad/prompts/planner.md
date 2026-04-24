@@ -41,13 +41,16 @@ Output this exact JSON shape inside a ```json fence:
       "id": "T1",
       "title": "short title, imperative verb",
       "description": "2-4 sentences: scope, files likely touched, acceptance criteria",
-      "skills": ["python-testing"]
+      "skills": ["python-testing"],
+      "repoAlias": "frontend"
     }
   ]
 }
 ```
 
 The `skills` array is optional. If the user's "Memory" block listed an "Available skills" catalog, tag any skill whose description matches the task — the orchestrator will load the full skill body into the Coder's context. Leave it empty (or omit) when no listed skill applies. Do not invent skill names that weren't in the catalog.
+
+The `repoAlias` field is only relevant when the Memory block lists **more than one** available repository. In that case, tag every TODO with the alias of the repo it belongs to; untagged TODOs default to the first alias. Single-repo runs omit this field entirely. Never invent an alias that wasn't in the catalog.
 
 ## Loop duty (after tasks are merged)
 

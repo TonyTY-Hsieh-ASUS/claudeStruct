@@ -137,6 +137,7 @@ export function parsePlannerOutput(text: string): {
         todos: Array<
           Pick<TodoItem, "id" | "title" | "description"> & {
             skills?: string[];
+            repoAlias?: string;
           }
         >;
       };
@@ -149,6 +150,9 @@ export function parsePlannerOutput(text: string): {
         // Only include `skills` if Planner tagged valid strings.
         ...(Array.isArray(t.skills) && t.skills.length > 0
           ? { skills: t.skills.filter((s): s is string => typeof s === "string") }
+          : {}),
+        ...(typeof t.repoAlias === "string" && t.repoAlias.length > 0
+          ? { repoAlias: t.repoAlias }
           : {}),
       }));
       return { phase, todos };

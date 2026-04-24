@@ -53,6 +53,15 @@ export interface ApplyResult {
   diff: string;
   commitMessage: string;
   filesApplied: string[];
+  /**
+   * HEAD sha *before* we switched to the task branch. If the
+   * orchestrator later needs to abandon this task (max rounds exceeded,
+   * hook abort), it resets the branch to this ref and deletes it so
+   * no trace is left. Captured once per applyAndCommit — the first
+   * call establishes it; later calls on the same branch reuse the
+   * value the orchestrator already has.
+   */
+  startingRef: string;
 }
 
 /**
@@ -71,6 +80,12 @@ export function applyAndCommit(args: {
   const { repoRoot, branch, edits, commitMessage, sandboxEnabled } = args;
 
   const gitOpts = { repoRoot, sandboxEnabled };
+
+  // Capture the pre-checkout HEAD so a later rollback knows what to
+  // reset to. `checkout -B` silently discards the old branch state,
+  // which is the whole point, but we still want a well-defined
+  // "before" ref for `revertBranch`.
+  const startingRef = runGit(gitOpts, ["rev-parse", "HEAD"]).trim();
 
   // Ensure we are on the branch (create if needed, from current HEAD).
   runGit(gitOpts, ["checkout", "-B", branch]);
@@ -114,7 +129,41 @@ export function applyAndCommit(args: {
     diff,
     commitMessage,
     filesApplied: applied,
+    startingRef,
   };
+}
+
+/**
+ * Abandon a task's branch. Checks out `startingRef` on whatever branch
+ * the caller was on (usually the repo default branch we branched from)
+ * and deletes the task branch so repeated runs don't accumulate dead
+ * branches.
+ *
+ * Intentionally best-effort: if the branch was never created (e.g.
+ * rollback requested in round 1 before any commit landed), the
+ * `branch -D` step will fail loudly — callers should catch and log.
+ */
+export function revertBranch(args: {
+  repoRoot: string;
+  branch: string;
+  startingRef: string;
+  sandboxEnabled: boolean;
+}): void {
+  const { repoRoot, branch, startingRef, sandboxEnabled } = args;
+  const gitOpts = { repoRoot, sandboxEnabled };
+
+  // Step off the task branch first — can't delete the branch you're on.
+  runGit(gitOpts, ["checkout", startingRef]);
+
+  // Drop the task branch. Use -D (force) because it's likely divergent
+  // from any base — that's the whole reason we're reverting.
+  try {
+    runGit(gitOpts, ["branch", "-D", branch]);
+  } catch {
+    // Branch might not exist yet (rollback in round 1 before any
+    // commit). Swallow — being on startingRef is the only outcome
+    // that matters.
+  }
 }
 
 /**

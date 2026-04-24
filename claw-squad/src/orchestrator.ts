@@ -32,7 +32,11 @@ import {
   lessonFromCompletedTask,
   readMemorySnippet,
 } from "./memory/memory.js";
-import { applyAndCommit, readFileSnapshots } from "./sandbox/applier.js";
+import {
+  applyAndCommit,
+  readFileSnapshots,
+  revertBranch,
+} from "./sandbox/applier.js";
 import { gatherInitialContext } from "./context-gather.js";
 import {
   HookAbort,
@@ -62,11 +66,12 @@ import {
   parseOwnerRepo,
   type GithubClient,
 } from "./github/octokit.js";
-import { detectDefaultBranch } from "./git.js";
-import type { AgentConfig } from "./config.js";
+import { detectDefaultBranch, headSha } from "./git.js";
+import { resolveRepos, type AgentConfig } from "./config.js";
 import { createProvider } from "./providers/registry.js";
 import type { InvokeResult, Provider } from "./providers/types.js";
 import {
+  type RepoSpec,
   type ReviewVerdict,
   type RoleBucket,
   type RunConfig,
@@ -96,6 +101,20 @@ interface Providers {
   planner: Provider;
   coder: Provider;
   reviewer: Provider;
+}
+
+/**
+ * Pre-resolved per-repo handles used by runTaskLoop. One of these is
+ * built for every entry in `RepoConfig.resolveRepos()` at orchestrator
+ * startup so the inner loop never re-parses owner/repo or re-detects
+ * the default branch.
+ */
+interface RepoContext {
+  spec: RepoSpec;
+  /** Parsed owner/name; undefined when githubEnabled is false. */
+  ownerRepo?: { owner: string; repo: string };
+  /** Branch to base PRs against. Falls back to "main" when github is off. */
+  baseBranch: string;
 }
 
 function buildProviders(
@@ -141,6 +160,10 @@ export async function runOrchestrator(args: {
     provider: wrapWithHooks(createProvider(s.provider), hooks, ui.log),
   }));
   const subagentCatalog = renderSubagentCatalog(subagents);
+
+  // Repo catalog for the Planner — only non-empty when more than one
+  // repo is configured, so single-repo prompts stay unchanged.
+  const repoCatalog = renderRepoCatalog(resolveRepos(config));
 
   // Answers from subagents accumulate here between Planner turns. The
   // next Planner invocation folds them into its user message and the
@@ -191,21 +214,42 @@ export async function runOrchestrator(args: {
     return dispatched;
   };
 
+  // Resolve the multi-repo spec. Single-repo configs synthesize a
+  // one-entry list via resolveRepos() so downstream code is uniform.
+  const repoSpecs = resolveRepos(config);
+  const defaultRepoAlias = repoSpecs[0]!.alias;
+
   // GitHub client is optional. When disabled, runTaskLoop simply skips
   // the push/PR/merge calls — the local commit still happens.
   let github: GithubClient | undefined;
-  let ownerRepo: { owner: string; repo: string } | undefined;
-  let baseBranch = "main";
   if (config.githubEnabled) {
-    if (!config.githubRepo) {
-      throw new Error("githubEnabled=true requires githubRepo (owner/name)");
+    const missing = repoSpecs.filter((r) => !r.githubRepo);
+    if (missing.length > 0) {
+      throw new Error(
+        `githubEnabled=true but no githubRepo on repo alias(es): ${missing
+          .map((r) => r.alias)
+          .join(", ")}`,
+      );
     }
     github = makeGithubClient();
-    ownerRepo = parseOwnerRepo(config.githubRepo);
-    baseBranch = detectDefaultBranch({
-      repoRoot: config.repoRoot,
-      sandboxEnabled: config.sandboxEnabled,
-    });
+  }
+
+  // Build a per-alias lookup table. Each entry knows the absolute repo
+  // root, the parsed owner/repo (if github is on), and the detected
+  // default branch — the three things runTaskLoop needs per task.
+  const repoContextByAlias = new Map<string, RepoContext>();
+  for (const spec of repoSpecs) {
+    const ctx: RepoContext = {
+      spec,
+      ownerRepo: spec.githubRepo ? parseOwnerRepo(spec.githubRepo) : undefined,
+      baseBranch: config.githubEnabled
+        ? detectDefaultBranch({
+            repoRoot: spec.root,
+            sandboxEnabled: config.sandboxEnabled,
+          })
+        : "main",
+    };
+    repoContextByAlias.set(spec.alias, ctx);
   }
 
   const state: SquadState = args.resumeFrom ?? {
@@ -286,6 +330,7 @@ export async function runOrchestrator(args: {
       memory: config.selfLearning ? readMemorySnippet(config.repoRoot) : undefined,
       skillCatalog,
       subagentCatalog,
+      repoCatalog,
       subagentAnswers: pendingSubagentAnswers,
     });
     pendingSubagentAnswers = [];
@@ -363,14 +408,36 @@ export async function runOrchestrator(args: {
     next.status = "in_progress";
     state.reviewHistory = [];
 
+    // Resolve the repo for this task. Planner-tagged alias wins; an
+    // untagged TODO falls back to the first repo (with a one-line
+    // warning, so multi-repo users notice drift). Single-repo runs
+    // never hit the warning because there's only one alias.
+    const taskAlias = next.repoAlias ?? defaultRepoAlias;
+    const repoCtx = repoContextByAlias.get(taskAlias);
+    if (!repoCtx) {
+      ui.log(
+        pc.red(
+          `\n[Orchestrator] task ${next.id} references unknown repo alias "${taskAlias}". Available: ${[...repoContextByAlias.keys()].join(", ")}`,
+        ),
+      );
+      next.status = "abandoned";
+      return { state, totals, reason: "blocked" };
+    }
+    if (!next.repoAlias && repoSpecs.length > 1) {
+      ui.log(
+        pc.yellow(
+          `\n[Orchestrator] task ${next.id} has no repoAlias; defaulting to "${defaultRepoAlias}"`,
+        ),
+      );
+    }
+
     const reason = await runTaskLoop({
       task: next,
       state,
       config,
       providers,
       github,
-      ownerRepo,
-      baseBranch,
+      repo: repoCtx,
       ui,
       track,
       checkBudget,
@@ -379,6 +446,12 @@ export async function runOrchestrator(args: {
     });
 
     if (reason === "blocked" || reason === "aborted") {
+      // Rolled-back tasks still write a lesson — the Planner wants to
+      // know "we tried and it didn't land" on the next run.
+      if (config.selfLearning && next.rolledBack) {
+        const lesson = lessonFromCompletedTask(next, state.reviewHistory);
+        appendLesson(config.repoRoot, lesson);
+      }
       return { state, totals, reason };
     }
     if (!checkBudget()) return { state, totals, reason: "aborted" };
@@ -435,8 +508,7 @@ async function runTaskLoop(args: {
   config: RunConfig;
   providers: Providers;
   github?: GithubClient;
-  ownerRepo?: { owner: string; repo: string };
-  baseBranch: string;
+  repo: RepoContext;
   ui: UserInterface;
   track: (role: RoleBucket, u: InvokeResult) => void;
   checkBudget: () => boolean;
@@ -449,16 +521,77 @@ async function runTaskLoop(args: {
     config,
     providers,
     github,
-    ownerRepo,
-    baseBranch,
+    repo,
     ui,
     track,
     checkBudget,
     hooks,
     allSkills,
   } = args;
+  const { spec: repoSpec, ownerRepo, baseBranch } = repo;
+  const repoRoot = repoSpec.root;
   let lastVerdict: ReviewVerdict | undefined;
   let prNumber: number | undefined;
+  const branch = `claw-squad/${task.id.toLowerCase()}`;
+
+  // Capture the ref we'll revert to if this task gets abandoned. Taking
+  // this up-front (rather than reading from applyAndCommit) covers the
+  // HookAbort-in-round-1 case where no commit ever lands.
+  const taskStartingRef = headSha({
+    repoRoot,
+    sandboxEnabled: config.sandboxEnabled,
+  });
+
+  /**
+   * Abandon this task: reset the branch, close the PR (if one exists),
+   * mark the task `rolledBack` so the lesson writer can surface the
+   * failure, and return "blocked" from the caller.
+   *
+   * Best-effort — surface errors to the UI but never throw. A failed
+   * rollback shouldn't swallow the original reason we got here.
+   */
+  const rollbackTask = async (reason: string): Promise<void> => {
+    ui.log(pc.yellow(`\n[Rollback] ${task.id}: ${reason}`));
+    try {
+      revertBranch({
+        repoRoot,
+        branch,
+        startingRef: taskStartingRef,
+        sandboxEnabled: config.sandboxEnabled,
+      });
+      ui.log(
+        pc.dim(
+          `[Rollback] reset to ${taskStartingRef.slice(0, 8)}, deleted ${branch}`,
+        ),
+      );
+    } catch (err) {
+      ui.log(
+        pc.red(
+          `[Rollback] git revert failed: ${(err as Error).message}`,
+        ),
+      );
+    }
+    if (github && ownerRepo && prNumber !== undefined) {
+      try {
+        await github.closePr({
+          owner: ownerRepo.owner,
+          repo: ownerRepo.repo,
+          prNumber,
+          reason,
+        });
+        ui.log(pc.dim(`[Rollback] closed PR #${prNumber}`));
+      } catch (err) {
+        ui.log(
+          pc.red(
+            `[Rollback] GitHub close failed: ${(err as Error).message}`,
+          ),
+        );
+      }
+    }
+    task.status = "abandoned";
+    task.rolledBack = true;
+    task.rollbackReason = reason;
+  };
 
   for (let round = 0; round < config.maxReviewRounds; round++) {
     task.iterations += 1;
@@ -483,11 +616,11 @@ async function runTaskLoop(args: {
             .filter((f): f is string => !!f),
         ),
       );
-      fileContext = readFileSnapshots(config.repoRoot, contextPaths);
+      fileContext = readFileSnapshots(repoRoot, contextPaths);
     } else {
       const gathered = gatherInitialContext({
         git: {
-          repoRoot: config.repoRoot,
+          repoRoot,
           sandboxEnabled: config.sandboxEnabled,
         },
         todoTitle: task.title,
@@ -543,7 +676,6 @@ async function runTaskLoop(args: {
     }
 
     // Apply to working tree + commit.
-    const branch = `claw-squad/${task.id.toLowerCase()}`;
     try {
       await runHook("preCommit", ui.log, () =>
         hooks.preCommit?.(
@@ -554,13 +686,17 @@ async function runTaskLoop(args: {
     } catch (err) {
       if (err instanceof HookAbort) {
         ui.log(pc.red(`\n[hook] ${err.reason} — aborting task`));
-        task.status = "abandoned";
+        if (config.rollbackOnHardFail !== false) {
+          await rollbackTask(`preCommit hook aborted: ${err.reason}`);
+        } else {
+          task.status = "abandoned";
+        }
         return "blocked";
       }
       throw err;
     }
     const applied = applyAndCommit({
-      repoRoot: config.repoRoot,
+      repoRoot,
       branch,
       edits: coderOut.files,
       commitMessage: coderOut.commitMessage ?? `chore: ${task.title}`,
@@ -589,7 +725,7 @@ async function runTaskLoop(args: {
     if (config.testCommand) {
       ui.log(pc.cyan(`\n[Tests] running: ${config.testCommand}`));
       const testResult = runTests({
-        repoRoot: config.repoRoot,
+        repoRoot,
         command: config.testCommand,
         timeoutMs: config.testTimeoutMs,
         sandboxEnabled: config.sandboxEnabled,
@@ -630,7 +766,7 @@ async function runTaskLoop(args: {
       try {
         await github.pushBranch({
           git: {
-            repoRoot: config.repoRoot,
+            repoRoot,
             sandboxEnabled: config.sandboxEnabled,
           },
           branch,
@@ -804,7 +940,13 @@ async function runTaskLoop(args: {
       `\n[Orchestrator] max review rounds exceeded on ${task.id}. Marking abandoned.`,
     ),
   );
-  task.status = "abandoned";
+  if (config.rollbackOnMaxRounds !== false) {
+    await rollbackTask(
+      `exceeded ${config.maxReviewRounds} Coder↔Reviewer rounds without an approved change`,
+    );
+  } else {
+    task.status = "abandoned";
+  }
   return "blocked";
 }
 
@@ -841,9 +983,13 @@ function composePlannerSnippet(args: {
   skillCatalog: string;
   subagentCatalog: string;
   subagentAnswers: SubagentResponse[];
+  repoCatalog?: string;
 }): string | undefined {
   const parts: string[] = [];
   if (args.memory && args.memory.trim().length > 0) parts.push(args.memory.trim());
+  if (args.repoCatalog && args.repoCatalog.trim().length > 0) {
+    parts.push(args.repoCatalog.trim());
+  }
   if (args.skillCatalog && args.skillCatalog.trim().length > 0) {
     parts.push(args.skillCatalog.trim());
   }
@@ -853,6 +999,27 @@ function composePlannerSnippet(args: {
   const answers = renderSubagentAnswers(args.subagentAnswers);
   if (answers.trim().length > 0) parts.push(answers.trim());
   return parts.length > 0 ? parts.join("\n\n") : undefined;
+}
+
+/**
+ * Render a multi-repo alias catalog for the Planner. Only emitted when
+ * more than one repo is configured — single-repo runs omit this block
+ * entirely so the Planner prompt stays unchanged.
+ */
+function renderRepoCatalog(repos: RepoSpec[]): string {
+  if (repos.length <= 1) return "";
+  const lines = [
+    "## Available repositories (tag each TODO with `repoAlias`)",
+  ];
+  for (const r of repos) {
+    const gh = r.githubRepo ? ` — github:${r.githubRepo}` : "";
+    lines.push(`- \`${r.alias}\`: ${r.root}${gh}`);
+  }
+  lines.push("");
+  lines.push(
+    "Untagged TODOs default to the first alias; prefer explicit tags when a task touches a non-default repo.",
+  );
+  return lines.join("\n");
 }
 
 /** Render the compact catalog the Planner sees for subagents. */
