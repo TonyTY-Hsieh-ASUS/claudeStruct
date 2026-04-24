@@ -134,12 +134,22 @@ export function parsePlannerOutput(text: string): {
     if (!jsonMatch?.[1]) return { phase: "ready" };
     try {
       const parsed = JSON.parse(jsonMatch[1]) as {
-        todos: Array<Pick<TodoItem, "id" | "title" | "description">>;
+        todos: Array<
+          Pick<TodoItem, "id" | "title" | "description"> & {
+            skills?: string[];
+          }
+        >;
       };
       const todos: TodoItem[] = parsed.todos.map((t) => ({
-        ...t,
+        id: t.id,
+        title: t.title,
+        description: t.description,
         status: "pending",
         iterations: 0,
+        // Only include `skills` if Planner tagged valid strings.
+        ...(Array.isArray(t.skills) && t.skills.length > 0
+          ? { skills: t.skills.filter((s): s is string => typeof s === "string") }
+          : {}),
       }));
       return { phase, todos };
     } catch {

@@ -18,6 +18,12 @@ export interface TodoItem {
   mergedPrNumber?: number;
   /** Iterations spent by Coder+Reviewer on this task (for budget visibility). */
   iterations: number;
+  /**
+   * Skill names the Planner tagged for this task. Orchestrator also
+   * auto-activates skills whose `apply_to` globs match the Coder's
+   * touched files, so this list isn't exhaustive.
+   */
+  skills?: string[];
 }
 
 export interface ClarificationTurn {
@@ -94,6 +100,21 @@ export interface RunConfig {
   maxCostUsd?: number;
   /** Hard cap on total tokens (input + output + cache). Undefined = no cap. */
   maxTokens?: number;
+  /**
+   * Shell command to run after each Coder commit. If it exits non-zero,
+   * the failure output is fed into the Coder's next round as Reviewer
+   * feedback. Undefined = skip the test step entirely.
+   */
+  testCommand?: string;
+  /** Wall clock for the test command. Default 5 min. */
+  testTimeoutMs?: number;
+  /**
+   * After Reviewer approves, block on GitHub CI before merging. Only
+   * takes effect when githubEnabled=true. Default false.
+   */
+  waitForCi?: boolean;
+  /** Wall clock for waiting on CI. Default 15 min. */
+  ciTimeoutMs?: number;
 }
 
 // Per-agent provider config now lives in ./config.ts as AgentConfig.

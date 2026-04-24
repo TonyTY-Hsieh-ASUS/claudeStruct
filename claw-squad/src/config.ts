@@ -21,7 +21,20 @@ import type { ProviderConfig, ProviderName } from "./providers/types.js";
  * Per-agent provider config. One entry per role; each entry is a full
  * ProviderConfig the registry can hand to a concrete provider.
  */
-export type AgentConfig = Record<AgentRole, ProviderConfig>;
+export type AgentConfig = Record<AgentRole, ProviderConfig> & {
+  /**
+   * Optional catalog of subagents. Primary agents (currently only
+   * Planner) can delegate to these via `## Delegate <name>` directives.
+   * Each subagent has its own ProviderConfig + a system prompt. Empty
+   * or missing means the feature is off for this run.
+   */
+  subagents?: Array<{
+    name: string;
+    description: string;
+    systemPrompt: string;
+    provider: ProviderConfig;
+  }>;
+};
 
 /**
  * Built-in defaults. All Anthropic — matches what the orchestrator did
@@ -75,15 +88,38 @@ export interface ConfigInput {
 }
 
 export function loadAgentConfig(input: ConfigInput): AgentConfig {
-  const fromFile = readConfigFile(input.configPath ?? autoConfigPath(input.repoRoot));
+  const parsed = readConfigFile(
+    input.configPath ?? autoConfigPath(input.repoRoot),
+  );
+  const fromFile = parsed?.agents;
   // Layer defaults -> file -> CLI, then validate.
   const merged: AgentConfig = {
     planner: mergeOne("planner", fromFile?.planner, input.cliOverrides?.planner),
     coder: mergeOne("coder", fromFile?.coder, input.cliOverrides?.coder),
     reviewer: mergeOne("reviewer", fromFile?.reviewer, input.cliOverrides?.reviewer),
   };
-  for (const role of Object.keys(merged) as AgentRole[]) {
+  for (const role of (["planner", "coder", "reviewer"] as AgentRole[])) {
     validateConfig(role, merged[role]);
+  }
+  // Subagents come from the config file verbatim. Validate each one's
+  // provider slice the same way.
+  if (parsed?.subagents && Array.isArray(parsed.subagents)) {
+    merged.subagents = parsed.subagents.map((s, i) => {
+      if (!s || typeof s.name !== "string" || s.name.length === 0) {
+        throw new Error(`subagents[${i}]: missing name`);
+      }
+      if (!s.provider || typeof s.provider !== "object") {
+        throw new Error(`subagents[${s.name}]: missing provider config`);
+      }
+      validateConfig(`subagent:${s.name}`, s.provider as ProviderConfig);
+      return {
+        name: s.name,
+        description: typeof s.description === "string" ? s.description : "",
+        systemPrompt:
+          typeof s.systemPrompt === "string" ? s.systemPrompt : "",
+        provider: s.provider as ProviderConfig,
+      };
+    });
   }
   return merged;
 }
@@ -110,7 +146,7 @@ function mergeOne(
   return merged;
 }
 
-function validateConfig(role: AgentRole, cfg: ProviderConfig): void {
+function validateConfig(role: string, cfg: ProviderConfig): void {
   if (!VALID_PROVIDERS.includes(cfg.name)) {
     throw new Error(
       `${role}: invalid provider "${cfg.name}". Valid: ${VALID_PROVIDERS.join(", ")}`,
@@ -136,9 +172,15 @@ interface ConfigFile {
     coder?: Partial<ProviderConfig>;
     reviewer?: Partial<ProviderConfig>;
   };
+  subagents?: Array<{
+    name: string;
+    description?: string;
+    systemPrompt?: string;
+    provider: ProviderConfig;
+  }>;
 }
 
-function readConfigFile(path: string): ConfigFile["agents"] | undefined {
+function readConfigFile(path: string): ConfigFile | undefined {
   if (!existsSync(path)) return undefined;
   const raw = readFileSync(path, "utf-8");
   let parsed: ConfigFile;
@@ -147,5 +189,5 @@ function readConfigFile(path: string): ConfigFile["agents"] | undefined {
   } catch (err) {
     throw new Error(`failed to parse ${path}: ${(err as Error).message}`);
   }
-  return parsed.agents;
+  return parsed;
 }

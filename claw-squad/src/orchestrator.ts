@@ -41,6 +41,22 @@ import {
   type Hooks,
 } from "./hooks.js";
 import { saveSnapshot } from "./snapshot.js";
+import { runTests, type TestRunResult } from "./test-runner.js";
+import {
+  loadSkills,
+  renderSkillCatalog,
+  renderSkillsForCoder,
+  selectSkillsForTask,
+  type Skill,
+} from "./skills.js";
+import { summarizeChecks } from "./github/octokit.js";
+import {
+  parseDelegates,
+  renderSubagentAnswers,
+  runSubagent,
+  type SubagentResponse,
+  type SubagentSpec,
+} from "./agents/subagent.js";
 import {
   makeGithubClient,
   parseOwnerRepo,
@@ -113,6 +129,72 @@ export async function runOrchestrator(args: {
   const { config, requirement, ui, agentConfig } = args;
   const hooks: Hooks = args.hooks ?? {};
   const providers = buildProviders(agentConfig, hooks, ui.log);
+
+  // Skills catalog is loaded once up front. Planner sees compact
+  // (name, description) list; activated skills get pasted into Coder's
+  // user turn per task.
+  const allSkills: Skill[] = loadSkills(config.repoRoot, ui.log);
+  const skillCatalog = renderSkillCatalog(allSkills);
+
+  // Subagents (optional). Build providers for each declared subagent
+  // once up front — same approach as the three primaries, so hooks +
+  // caching apply uniformly.
+  const subagents: SubagentSpec[] = (agentConfig.subagents ?? []).map((s) => ({
+    name: s.name,
+    description: s.description,
+    systemPrompt: s.systemPrompt,
+    provider: wrapWithHooks(createProvider(s.provider), hooks, ui.log),
+  }));
+  const subagentCatalog = renderSubagentCatalog(subagents);
+
+  // Answers from subagents accumulate here between Planner turns. The
+  // next Planner invocation folds them into its user message and the
+  // buffer is cleared.
+  let pendingSubagentAnswers: SubagentResponse[] = [];
+
+  /**
+   * After a Planner response, scan for `## Delegate <name>` directives
+   * and run the matching subagents. Their answers are queued for the
+   * *next* Planner turn. Returns the number of delegations actually
+   * executed (for logging).
+   */
+  const dispatchDelegates = async (plannerText: string): Promise<number> => {
+    if (subagents.length === 0) return 0;
+    const requested = parseDelegates(plannerText);
+    if (requested.length === 0) return 0;
+    const byName = new Map(subagents.map((s) => [s.name, s]));
+    let dispatched = 0;
+    for (const r of requested) {
+      const spec = byName.get(r.name);
+      if (!spec) {
+        ui.log(
+          pc.yellow(
+            `  [subagent] Planner asked for "${r.name}" which isn't in the catalog — ignoring`,
+          ),
+        );
+        continue;
+      }
+      ui.log(pc.cyan(`\n[subagent:${r.name}] answering…`));
+      try {
+        const resp = await runSubagent(spec, {
+          name: r.name,
+          prompt: r.prompt,
+          requestedBy: "planner",
+        });
+        track(resp.usage);
+        pendingSubagentAnswers.push(resp);
+        dispatched += 1;
+      } catch (err) {
+        ui.log(
+          pc.red(
+            `  [subagent:${r.name}] failed: ${(err as Error).message}`,
+          ),
+        );
+      }
+      if (!checkBudget()) break;
+    }
+    return dispatched;
+  };
 
   // GitHub client is optional. When disabled, runTaskLoop simply skips
   // the push/PR/merge calls — the local commit still happens.
@@ -217,9 +299,13 @@ export async function runOrchestrator(args: {
     }
 
     ui.log(pc.cyan("\n[Planner] thinking…"));
-    const memorySnippet = config.selfLearning
-      ? readMemorySnippet(config.repoRoot)
-      : undefined;
+    const memorySnippet = composePlannerSnippet({
+      memory: config.selfLearning ? readMemorySnippet(config.repoRoot) : undefined,
+      skillCatalog,
+      subagentCatalog,
+      subagentAnswers: pendingSubagentAnswers,
+    });
+    pendingSubagentAnswers = [];
 
     const outcome = await runPlanner({
       state,
@@ -230,6 +316,10 @@ export async function runOrchestrator(args: {
     });
     track(outcome.usage);
     if (!checkBudget()) return { state, totals, reason: "aborted" };
+
+    // If Planner delegated any work, run it now — answers feed into
+    // the next Planner turn via pendingSubagentAnswers.
+    await dispatchDelegates(outcome.message);
 
     if (outcome.phase === "clarification" && outcome.questions?.length) {
       const answers = await ui.askClarifications(outcome.questions);
@@ -260,14 +350,18 @@ export async function runOrchestrator(args: {
     const outcome = await runPlanner({
       state,
       mode: "initial",
-      memorySnippet: config.selfLearning
-        ? readMemorySnippet(config.repoRoot)
-        : undefined,
+      memorySnippet: composePlannerSnippet({
+        memory: config.selfLearning ? readMemorySnippet(config.repoRoot) : undefined,
+        skillCatalog,
+        subagentCatalog,
+        subagentAnswers: pendingSubagentAnswers,
+      }),
       provider: providers.planner,
       onText: (c) => ui.streamAgent("planner", c),
     });
     track(outcome.usage);
     if (!checkBudget()) return { state, totals, reason: "aborted" };
+    await dispatchDelegates(outcome.message);
     if (outcome.todos && outcome.todos.length > 0) {
       state.todos = outcome.todos;
     } else {
@@ -298,6 +392,7 @@ export async function runOrchestrator(args: {
       track,
       checkBudget,
       hooks,
+      allSkills,
     });
 
     if (reason === "blocked" || reason === "aborted") {
@@ -319,15 +414,19 @@ export async function runOrchestrator(args: {
     const plannerReview = await runPlanner({
       state,
       mode: "loop",
-      memorySnippet: config.selfLearning
-        ? readMemorySnippet(config.repoRoot)
-        : undefined,
+      memorySnippet: composePlannerSnippet({
+        memory: config.selfLearning ? readMemorySnippet(config.repoRoot) : undefined,
+        skillCatalog,
+        subagentCatalog,
+        subagentAnswers: pendingSubagentAnswers,
+      }),
       completedTaskSummary: summarizeTask(next, state.reviewHistory),
       provider: providers.planner,
       onText: (c) => ui.streamAgent("planner", c),
     });
     track(plannerReview.usage);
     if (!checkBudget()) return { state, totals, reason: "aborted" };
+    await dispatchDelegates(plannerReview.message);
     if (plannerReview.phase === "complete") {
       return { state, totals, reason: "complete" };
     }
@@ -359,6 +458,7 @@ async function runTaskLoop(args: {
   track: (u: InvokeResult) => void;
   checkBudget: () => boolean;
   hooks: Hooks;
+  allSkills: Skill[];
 }): Promise<"complete" | "blocked" | "aborted"> {
   const {
     task,
@@ -372,6 +472,7 @@ async function runTaskLoop(args: {
     track,
     checkBudget,
     hooks,
+    allSkills,
   } = args;
   let lastVerdict: ReviewVerdict | undefined;
   let prNumber: number | undefined;
@@ -419,11 +520,29 @@ async function runTaskLoop(args: {
       }
     }
 
+    // Select skills: explicit tags from Planner plus apply_to globs
+    // matching any file in the Coder's context. Rendered once per
+    // round so the Coder sees current context-derived activations.
+    const activeSkills = selectSkillsForTask({
+      allSkills,
+      taggedNames: task.skills,
+      contextFilePaths: fileContext.map((f) => f.path),
+    });
+    const skillsBlock = renderSkillsForCoder(activeSkills);
+    if (activeSkills.length > 0) {
+      ui.log(
+        pc.dim(
+          `  [skills] active: ${activeSkills.map((s) => s.name).join(", ")}`,
+        ),
+      );
+    }
+
     const coderOut = await runCoder({
       requirement: state.requirement,
       todo: task,
       fileContext,
       reviewerFeedback: lastVerdict,
+      skillsBlock,
       provider: providers.coder,
       onText: (c) => ui.streamAgent("coder", c),
     });
@@ -478,6 +597,47 @@ async function runTaskLoop(args: {
     if (applied.diff.trim().length === 0) {
       ui.log(pc.yellow("[Coder] no effective changes after apply."));
       continue;
+    }
+
+    // Test runner — between Coder and Reviewer. Cheap bug-catcher:
+    // if the tests already fail, we skip Reviewer entirely (saves
+    // real money on the Reviewer LLM call) and send Coder back to
+    // fix the failure.
+    if (config.testCommand) {
+      ui.log(pc.cyan(`\n[Tests] running: ${config.testCommand}`));
+      const testResult = runTests({
+        repoRoot: config.repoRoot,
+        command: config.testCommand,
+        timeoutMs: config.testTimeoutMs,
+        sandboxEnabled: config.sandboxEnabled,
+      });
+      if (testResult && !testResult.passed) {
+        ui.log(
+          pc.red(
+            `[Tests] FAILED (exit=${testResult.exitCode ?? "?"}${testResult.timedOut ? ", timed out" : ""}, ${testResult.durationMs}ms)`,
+          ),
+        );
+        // Synthesize a Reviewer-style verdict so the next Coder round
+        // has concrete fix instructions. Marked as `critical` so it
+        // jumps the Coder's attention.
+        const synthetic: ReviewVerdict = {
+          decision: "request_changes",
+          summary: `Automated tests failed (${config.testCommand}). Fix the failures before requesting review.`,
+          findings: [
+            {
+              severity: "critical",
+              issue: "Test suite failed after this commit",
+              suggestion: `Read the output below and fix the failing assertions. Do not mask failures.\n\n\`\`\`\n${testResult.output}\n\`\`\``,
+            },
+          ],
+        };
+        state.reviewHistory.push(synthetic);
+        lastVerdict = synthetic;
+        continue;
+      }
+      if (testResult) {
+        ui.log(pc.green(`[Tests] passed in ${testResult.durationMs}ms`));
+      }
     }
 
     // Push to GitHub + ensure PR exists (first round) or just push (later
@@ -549,6 +709,70 @@ async function runTaskLoop(args: {
 
     if (reviewOut.verdict.decision === "approve") {
       ui.log(pc.green(`\n[Reviewer] APPROVED ${task.id}.`));
+
+      // CI wait — block until GitHub checks are green before merging.
+      // Only active when we have a PR AND --wait-for-ci is set. On CI
+      // failure we loop back to Coder with the failure summary as
+      // Reviewer feedback, exactly like the test-runner path.
+      if (
+        config.waitForCi &&
+        github &&
+        ownerRepo &&
+        prNumber !== undefined
+      ) {
+        ui.log(pc.cyan(`\n[CI] waiting for checks on PR #${prNumber}…`));
+        try {
+          const ci = await github.waitForCi({
+            owner: ownerRepo.owner,
+            repo: ownerRepo.repo,
+            prNumber,
+            timeoutMs: config.ciTimeoutMs,
+            onProgress: (checks) =>
+              ui.log(pc.dim(`  [CI] ${summarizeChecks(checks)}`)),
+          });
+          if (ci.outcome === "failed") {
+            const failed = ci.checks
+              .filter(
+                (c) =>
+                  c.status === "completed" &&
+                  (c.conclusion === "failure" ||
+                    c.conclusion === "timed_out" ||
+                    c.conclusion === "cancelled"),
+              )
+              .map((c) => `- ${c.name} (${c.conclusion}) ${c.detailsUrl ?? ""}`)
+              .join("\n");
+            ui.log(pc.red(`[CI] failed:\n${failed}`));
+            const synthetic: ReviewVerdict = {
+              decision: "request_changes",
+              summary: `CI failed on PR #${prNumber}. Address the failing checks before approval.`,
+              findings: [
+                {
+                  severity: "critical",
+                  issue: "GitHub CI reported failures",
+                  suggestion: `Fix these checks:\n${failed}`,
+                },
+              ],
+            };
+            state.reviewHistory.push(synthetic);
+            lastVerdict = synthetic;
+            continue;
+          }
+          if (ci.outcome === "pending_timeout") {
+            ui.log(
+              pc.yellow(
+                `[CI] still pending after ${Math.round(ci.elapsedMs / 1000)}s — not merging`,
+              ),
+            );
+            return "blocked";
+          }
+          ui.log(pc.green(`[CI] passed (${ci.checks.length} checks)`));
+        } catch (err) {
+          ui.log(pc.red(`[CI] wait failed: ${(err as Error).message}`));
+          // Don't merge if we couldn't verify CI — surface and stop.
+          return "blocked";
+        }
+      }
+
       if (github && ownerRepo && prNumber !== undefined) {
         if (config.requireHumanApproval) {
           const ok = await ui.confirm(
@@ -621,4 +845,41 @@ function summarizeTask(task: TodoItem, reviews: ReviewVerdict[]): string {
   const rounds = reviews.length;
   const lastSummary = reviews.at(-1)?.summary ?? "<no review>";
   return `Task ${task.id} (${task.title}): ${rounds} review round(s). Final: ${lastSummary}`;
+}
+
+/**
+ * Join memory + skill catalog + subagent catalog + last-turn delegate
+ * answers into the Planner's memorySnippet slot. Everything here is
+ * volatile relative to the cached system prompt, so it lives in the
+ * user turn. Any subset can be empty.
+ */
+function composePlannerSnippet(args: {
+  memory?: string;
+  skillCatalog: string;
+  subagentCatalog: string;
+  subagentAnswers: SubagentResponse[];
+}): string | undefined {
+  const parts: string[] = [];
+  if (args.memory && args.memory.trim().length > 0) parts.push(args.memory.trim());
+  if (args.skillCatalog && args.skillCatalog.trim().length > 0) {
+    parts.push(args.skillCatalog.trim());
+  }
+  if (args.subagentCatalog && args.subagentCatalog.trim().length > 0) {
+    parts.push(args.subagentCatalog.trim());
+  }
+  const answers = renderSubagentAnswers(args.subagentAnswers);
+  if (answers.trim().length > 0) parts.push(answers.trim());
+  return parts.length > 0 ? parts.join("\n\n") : undefined;
+}
+
+/** Render the compact catalog the Planner sees for subagents. */
+function renderSubagentCatalog(subagents: SubagentSpec[]): string {
+  if (subagents.length === 0) return "";
+  const lines = [
+    "## Available subagents (delegate via `## Delegate <name>` followed by your prompt)",
+  ];
+  for (const s of subagents) {
+    lines.push(`- \`${s.name}\`: ${s.description || "<no description>"}`);
+  }
+  return lines.join("\n");
 }

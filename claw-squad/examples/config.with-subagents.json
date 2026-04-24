@@ -1,0 +1,40 @@
+{
+  "agents": {
+    "planner": {
+      "name": "anthropic",
+      "model": "claude-opus-4-7",
+      "effort": "max"
+    },
+    "coder": {
+      "name": "anthropic",
+      "model": "claude-sonnet-4-6",
+      "effort": "high"
+    },
+    "reviewer": {
+      "name": "anthropic",
+      "model": "claude-opus-4-7",
+      "effort": "xhigh"
+    }
+  },
+  "subagents": [
+    {
+      "name": "research",
+      "description": "Read files, summarize architecture. Use for 'how does X work?' questions.",
+      "systemPrompt": "You are a research assistant. Given a focused question about a codebase or API, answer in under 300 words with concrete references (file paths, function names, line numbers when possible). Do not speculate — if you don't know, say so explicitly.",
+      "provider": {
+        "name": "anthropic",
+        "model": "claude-sonnet-4-6",
+        "effort": "medium"
+      }
+    },
+    {
+      "name": "grep-summarize",
+      "description": "Run a grep-style search and return a bulleted summary. Cheap and fast.",
+      "systemPrompt": "You summarize search results. Given text output from a grep or ripgrep, return a compact bulleted list: `path:line -> one-line description of match`. Drop noise and near-duplicates. Max 20 bullets.",
+      "provider": {
+        "name": "anthropic",
+        "model": "claude-haiku-4-5"
+      }
+    }
+  ]
+}
