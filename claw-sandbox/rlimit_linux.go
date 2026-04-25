@@ -7,6 +7,20 @@ import (
 	"syscall"
 )
 
+// isolationCapabilities reports what this build can actually enforce.
+// Linux has rlimits; --no-network needs CAP_SYS_ADMIN we don't assume.
+func isolationCapabilities() capabilities {
+	return capabilities{
+		rlimit:  statusEnforced,
+		network: statusUnsupported,
+	}
+}
+
+type capabilities struct {
+	rlimit  string
+	network string
+}
+
 // applyRLimits sets process resource limits that the child inherits.
 //
 // These are setrlimit() calls; the child kernel enforces them. For a child

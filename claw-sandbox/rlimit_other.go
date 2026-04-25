@@ -3,17 +3,26 @@
 package main
 
 import (
-	"fmt"
-	"os"
 	"os/exec"
 )
 
-// On non-Linux platforms rlimit semantics differ. Print a warning once
-// so users know sandboxing is not enforced and continue without isolation.
-func applyRLimits(_ *exec.Cmd) {
-	fmt.Fprintln(os.Stderr, "[sandbox] warning: rlimit enforcement only implemented on Linux; running without isolation")
+// On non-Linux platforms rlimit semantics differ. The structured
+// isolation report (printed at startup) carries the "unsupported"
+// status so callers know without parsing free-text warnings.
+func applyRLimits(_ *exec.Cmd) {}
+
+func tryDisableNetwork(_ *exec.Cmd) {}
+
+// isolationCapabilities reports what this build can actually enforce.
+// Non-Linux: rlimits + namespace network isolation are both off.
+func isolationCapabilities() capabilities {
+	return capabilities{
+		rlimit:  statusUnsupported,
+		network: statusUnsupported,
+	}
 }
 
-func tryDisableNetwork(_ *exec.Cmd) {
-	fmt.Fprintln(os.Stderr, "[sandbox] warning: --no-network only implemented on Linux")
+type capabilities struct {
+	rlimit  string
+	network string
 }
