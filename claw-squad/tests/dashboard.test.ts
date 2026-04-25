@@ -9,10 +9,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  diffRuns,
+  formatDiff,
+  formatDiffJson,
   formatJson,
   formatTable,
   loadSummaries,
+  loadSummaryById,
   summarizeRun,
+  watchSummaries,
 } from "../src/dashboard.js";
 import {
   appendEvent,
@@ -352,5 +357,200 @@ describe("formatTable + loadSummaries", () => {
     const summary = summarizeRun(events, "/path");
     const table = formatTable([summary]);
     expect(table).toContain("expensive-one");
+  });
+});
+
+describe("diffRuns + formatDiff (PR-B)", () => {
+  function fakeSummary(opts: {
+    runId: string;
+    requirement?: string;
+    reason?: string;
+    perRoleCost?: Partial<Record<"planner" | "coder" | "reviewer" | "subagent", number>>;
+    bySubagent?: Record<string, number>;
+    todosDone?: number;
+    todosRolledBack?: number;
+  }) {
+    const perRole = {
+      planner: { calls: 0, costUsd: opts.perRoleCost?.planner ?? 0 },
+      coder: { calls: 0, costUsd: opts.perRoleCost?.coder ?? 0 },
+      reviewer: { calls: 0, costUsd: opts.perRoleCost?.reviewer ?? 0 },
+      subagent: { calls: 0, costUsd: opts.perRoleCost?.subagent ?? 0 },
+    };
+    const bySubagent: Record<string, { calls: number; costUsd: number }> = {};
+    for (const [k, v] of Object.entries(opts.bySubagent ?? {})) {
+      bySubagent[k] = { calls: 1, costUsd: v };
+    }
+    const overallCost =
+      (opts.perRoleCost?.planner ?? 0) +
+      (opts.perRoleCost?.coder ?? 0) +
+      (opts.perRoleCost?.reviewer ?? 0) +
+      (opts.perRoleCost?.subagent ?? 0);
+    return {
+      path: `/runs/${opts.runId}.jsonl`,
+      requirement: opts.requirement,
+      reason: opts.reason,
+      overall: { costUsd: overallCost, cacheSavedUsd: 0, calls: 0 },
+      perRole,
+      bySubagent,
+      todosDone: opts.todosDone ?? 0,
+      todosRolledBack: opts.todosRolledBack ?? 0,
+    };
+  }
+
+  it("computes overall + per-role + per-subagent deltas (b - a)", () => {
+    const a = fakeSummary({
+      runId: "A",
+      reason: "complete",
+      perRoleCost: { planner: 0.1, coder: 0.2 },
+      bySubagent: { research: 0.05 },
+    });
+    const b = fakeSummary({
+      runId: "B",
+      reason: "complete",
+      perRoleCost: { planner: 0.15, coder: 0.5 },
+      bySubagent: { research: 0.1, "doc-writer": 0.04 },
+    });
+    const r = diffRuns(a, b);
+    expect(r.overallCostDeltaUsd).toBeCloseTo(0.35, 4);
+    expect(r.perRoleDelta.planner).toBeCloseTo(0.05, 4);
+    expect(r.perRoleDelta.coder).toBeCloseTo(0.3, 4);
+    expect(r.bySubagentDelta.research).toBeCloseTo(0.05, 4);
+    expect(r.bySubagentDelta["doc-writer"]).toBeCloseTo(0.04, 4);
+    expect(r.outcomeChange).toBeUndefined();
+  });
+
+  it("flags an outcome change", () => {
+    const a = fakeSummary({ runId: "A", reason: "complete" });
+    const b = fakeSummary({ runId: "B", reason: "blocked" });
+    const r = diffRuns(a, b);
+    expect(r.outcomeChange).toBe("complete → blocked");
+  });
+
+  it("identical runs produce zero deltas", () => {
+    const a = fakeSummary({
+      runId: "A",
+      reason: "complete",
+      perRoleCost: { coder: 0.1 },
+      bySubagent: { research: 0.05 },
+    });
+    const r = diffRuns(a, a);
+    expect(r.overallCostDeltaUsd).toBe(0);
+    expect(r.perRoleDelta.coder).toBe(0);
+    expect(r.bySubagentDelta.research).toBe(0);
+    expect(r.outcomeChange).toBeUndefined();
+  });
+
+  it("counts subagents that exist on only one side", () => {
+    const a = fakeSummary({
+      runId: "A",
+      bySubagent: { gone: 0.5 },
+    });
+    const b = fakeSummary({
+      runId: "B",
+      bySubagent: { added: 0.3 },
+    });
+    const r = diffRuns(a, b);
+    expect(r.bySubagentDelta.gone).toBeCloseTo(-0.5, 4);
+    expect(r.bySubagentDelta.added).toBeCloseTo(0.3, 4);
+  });
+
+  it("formatDiff includes the regression headlines", () => {
+    const a = fakeSummary({
+      runId: "A",
+      reason: "complete",
+      perRoleCost: { coder: 0.1 },
+      todosDone: 1,
+    });
+    const b = fakeSummary({
+      runId: "B",
+      reason: "blocked",
+      perRoleCost: { coder: 0.4 },
+      todosDone: 0,
+      todosRolledBack: 1,
+    });
+    const out = formatDiff(diffRuns(a, b));
+    expect(out).toContain("complete → blocked");
+    expect(out).toContain("overall cost:");
+    expect(out).toContain("coder");
+  });
+
+  it("formatDiffJson is parseable JSON", () => {
+    const a = fakeSummary({ runId: "A" });
+    const b = fakeSummary({ runId: "B" });
+    const parsed = JSON.parse(formatDiffJson(diffRuns(a, b)));
+    expect(parsed.a.runId).toBe("A");
+    expect(parsed.b.runId).toBe("B");
+  });
+});
+
+describe("loadSummaryById + watchSummaries (PR-B)", () => {
+  let root: string;
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "claw-watch-"));
+  });
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("loadSummaryById returns undefined for unknown runs", () => {
+    expect(loadSummaryById(root, "nope")).toBeUndefined();
+  });
+
+  it("loadSummaryById round-trips a synthetic run", () => {
+    const h = startRun(root);
+    appendEvent(h, {
+      type: "run-start",
+      ts: "2026-01-01T00:00:00Z",
+      requirement: "test req",
+      config: {
+        repoRoot: root,
+        githubEnabled: false,
+        sandboxEnabled: false,
+        maxLoops: 1,
+        maxReviewRounds: 1,
+      },
+    });
+    const id = (h.path.split("/").pop() ?? "").replace(/\.jsonl$/, "");
+    const summary = loadSummaryById(root, id);
+    expect(summary?.requirement).toBe("test req");
+  });
+
+  it("watchSummaries fires the sink immediately and again after a tick", async () => {
+    const sinkCalls: number[] = [];
+    const handle = watchSummaries(root, 50, (s) => {
+      sinkCalls.push(s.length);
+    });
+    // Immediate fire — empty initial state.
+    expect(sinkCalls.length).toBe(1);
+    expect(sinkCalls[0]).toBe(0);
+
+    // Add a run and wait for the next interval.
+    const h = startRun(root);
+    appendEvent(h, {
+      type: "run-start",
+      ts: "t",
+      requirement: "added mid-watch",
+      config: {
+        repoRoot: root,
+        githubEnabled: false,
+        sandboxEnabled: false,
+        maxLoops: 1,
+        maxReviewRounds: 1,
+      },
+    });
+    await new Promise((r) => setTimeout(r, 120));
+    handle.stop();
+    expect(sinkCalls[sinkCalls.length - 1]).toBeGreaterThanOrEqual(1);
+  });
+
+  it("watchSummaries.stop() prevents further sink calls", async () => {
+    let calls = 0;
+    const handle = watchSummaries(root, 30, () => {
+      calls += 1;
+    });
+    handle.stop();
+    const before = calls;
+    await new Promise((r) => setTimeout(r, 100));
+    expect(calls).toBe(before);
   });
 });

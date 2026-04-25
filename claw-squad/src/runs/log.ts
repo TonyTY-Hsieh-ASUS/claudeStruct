@@ -118,6 +118,20 @@ export function appendEvent(handle: RunLogHandle, event: RunLogEvent): void {
  * parsed events keyed by path. Malformed lines are skipped with a
  * warning — one bad line shouldn't hide the rest of history.
  */
+/**
+ * The basename (without extension) of a run log file. We use ISO
+ * timestamps with `:` and `.` flattened to `-`, so a runId is both
+ * URL-safe and chronologically sortable.
+ */
+export function runIdFromPath(path: string): string {
+  const base = path.split("/").pop() ?? path;
+  return base.replace(/\.jsonl$/, "");
+}
+
+export function pathFromRunId(repoRoot: string, runId: string): string {
+  return join(repoRoot, ".claw-squad", "runs", `${runId}.jsonl`);
+}
+
 export function loadAllRuns(
   repoRoot: string,
   log?: (msg: string) => void,

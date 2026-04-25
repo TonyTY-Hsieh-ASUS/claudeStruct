@@ -11,9 +11,13 @@
  * background (later: `--watch`) without worrying about races.
  */
 
+import { existsSync, watch } from "node:fs";
+import { join } from "node:path";
 import pc from "picocolors";
 import {
   loadAllRuns,
+  loadOneRun,
+  pathFromRunId,
   type RunLogEvent,
 } from "./runs/log.js";
 import { ROLE_BUCKETS, type RoleBucket } from "./types.js";
@@ -214,4 +218,209 @@ function formatTimestamp(iso?: string): string {
   if (!iso) return "—";
   // Short human form: "2026-04-24 05:27:03"
   return iso.replace("T", " ").slice(0, 19);
+}
+
+// ---------- Run-vs-run diff (PR-B) ----------
+
+/**
+ * Load a single run by its ID (filename without `.jsonl`). Returns
+ * undefined if not found — callers can decide whether that's an
+ * error or a stale reference.
+ */
+export function loadSummaryById(
+  repoRoot: string,
+  runId: string,
+): RunSummary | undefined {
+  const path = pathFromRunId(repoRoot, runId);
+  if (!existsSync(path)) return undefined;
+  return summarizeRun(loadOneRun(path), path);
+}
+
+export interface DiffReport {
+  /** The run we measured against (older / baseline). */
+  a: { runId: string; startedAt?: string; requirement?: string; reason?: string };
+  /** The run we're comparing (newer / candidate). */
+  b: { runId: string; startedAt?: string; requirement?: string; reason?: string };
+  /** Cost delta on the overall bucket (b - a). Positive = regression. */
+  overallCostDeltaUsd: number;
+  /** Per-role deltas keyed by RoleBucket. */
+  perRoleDelta: Record<RoleBucket, number>;
+  /** Per-named-subagent deltas. Keys appearing in either run land here. */
+  bySubagentDelta: Record<string, number>;
+  /** Outcome change, e.g. "complete → blocked", or undefined when same. */
+  outcomeChange?: string;
+  /** Diff in TODO completion counts. */
+  todosDoneDelta: number;
+  todosRolledBackDelta: number;
+}
+
+/** Build a structured diff between two runs. b is the "newer" side. */
+export function diffRuns(a: RunSummary, b: RunSummary): DiffReport {
+  const perRoleDelta = {} as Record<RoleBucket, number>;
+  for (const r of ROLE_BUCKETS) {
+    perRoleDelta[r] = b.perRole[r].costUsd - a.perRole[r].costUsd;
+  }
+  const bySubagentDelta: Record<string, number> = {};
+  const subagentNames = new Set<string>([
+    ...Object.keys(a.bySubagent),
+    ...Object.keys(b.bySubagent),
+  ]);
+  for (const name of subagentNames) {
+    bySubagentDelta[name] =
+      (b.bySubagent[name]?.costUsd ?? 0) - (a.bySubagent[name]?.costUsd ?? 0);
+  }
+  return {
+    a: {
+      runId: runIdFromSummary(a),
+      startedAt: a.startedAt,
+      requirement: a.requirement,
+      reason: a.reason,
+    },
+    b: {
+      runId: runIdFromSummary(b),
+      startedAt: b.startedAt,
+      requirement: b.requirement,
+      reason: b.reason,
+    },
+    overallCostDeltaUsd: b.overall.costUsd - a.overall.costUsd,
+    perRoleDelta,
+    bySubagentDelta,
+    outcomeChange:
+      a.reason !== b.reason ? `${a.reason ?? "—"} → ${b.reason ?? "—"}` : undefined,
+    todosDoneDelta: b.todosDone - a.todosDone,
+    todosRolledBackDelta: b.todosRolledBack - a.todosRolledBack,
+  };
+}
+
+function runIdFromSummary(s: RunSummary): string {
+  const base = s.path.split("/").pop() ?? s.path;
+  return base.replace(/\.jsonl$/, "");
+}
+
+export function formatDiff(report: DiffReport): string {
+  const lines: string[] = [];
+  lines.push(pc.bold(`A: ${report.a.runId}`));
+  lines.push(pc.dim(`   ${report.a.requirement ?? ""}  (${report.a.reason ?? "—"})`));
+  lines.push(pc.bold(`B: ${report.b.runId}`));
+  lines.push(pc.dim(`   ${report.b.requirement ?? ""}  (${report.b.reason ?? "—"})`));
+  lines.push("");
+  if (report.outcomeChange) {
+    lines.push(pc.yellow(`outcome: ${report.outcomeChange}`));
+  }
+  lines.push(
+    `overall cost: ${signedDollars(report.overallCostDeltaUsd)}`,
+  );
+  lines.push(`todos done:   ${signedInt(report.todosDoneDelta)}`);
+  lines.push(`rolled back:  ${signedInt(report.todosRolledBackDelta)}`);
+  lines.push("");
+  lines.push(pc.bold("per-role cost delta"));
+  for (const r of ROLE_BUCKETS) {
+    const d = report.perRoleDelta[r];
+    if (d === 0) continue;
+    lines.push(`  ${r.padEnd(10)} ${signedDollars(d)}`);
+  }
+  const subNames = Object.keys(report.bySubagentDelta).filter(
+    (n) => report.bySubagentDelta[n] !== 0,
+  );
+  if (subNames.length > 0) {
+    lines.push("");
+    lines.push(pc.bold("per-subagent cost delta"));
+    // Sort so the worst regression sits at the top — that's the row
+    // the operator actually wants to look at.
+    subNames.sort(
+      (a, b) =>
+        (report.bySubagentDelta[b] ?? 0) - (report.bySubagentDelta[a] ?? 0),
+    );
+    for (const n of subNames) {
+      lines.push(`  ${n.padEnd(20)} ${signedDollars(report.bySubagentDelta[n]!)}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+export function formatDiffJson(report: DiffReport): string {
+  return JSON.stringify(report, null, 2);
+}
+
+function signedDollars(n: number): string {
+  const sign = n > 0 ? pc.red("+") : n < 0 ? pc.green("-") : " ";
+  return `${sign}$${Math.abs(n).toFixed(4)}`;
+}
+
+function signedInt(n: number): string {
+  if (n > 0) return pc.red(`+${n}`);
+  if (n < 0) return pc.green(`${n}`);
+  return ` ${n}`;
+}
+
+// ---------- Watch mode (PR-B) ----------
+
+export interface WatchHandle {
+  /** Stop the watcher and clear any pending interval. */
+  stop: () => void;
+}
+
+/**
+ * Re-fold the runs directory on a regular cadence and call `sink`
+ * with the latest summaries. Combines `fs.watch` (for low-latency
+ * reaction to new files) with a polling interval (for in-flight
+ * append-only writes that don't trigger a directory event).
+ *
+ * Returns a `stop()` handle so the CLI can clean up on Ctrl-C.
+ */
+export function watchSummaries(
+  repoRoot: string,
+  intervalMs: number,
+  sink: (summaries: RunSummary[]) => void,
+): WatchHandle {
+  const dir = join(repoRoot, ".claw-squad", "runs");
+  let stopped = false;
+
+  const tick = () => {
+    if (stopped) return;
+    try {
+      sink(loadSummariesSafe(repoRoot));
+    } catch {
+      // The dashboard view should never crash the watcher — a
+      // half-written line will be picked up on the next tick.
+    }
+  };
+
+  // Fire once immediately so the user sees current state without
+  // waiting a full interval.
+  tick();
+  const timer = setInterval(tick, intervalMs);
+  // Keep timer from blocking process exit when the orchestrator finishes.
+  timer.unref?.();
+
+  // fs.watch is best-effort across platforms; some return ENOENT
+  // until the directory exists. Wrap in try/catch.
+  let fsWatcher: ReturnType<typeof watch> | undefined;
+  try {
+    if (existsSync(dir)) {
+      fsWatcher = watch(dir, { persistent: false }, () => tick());
+    }
+  } catch {
+    // Polling alone is sufficient — fs.watch is a latency optimization.
+  }
+
+  return {
+    stop: () => {
+      stopped = true;
+      clearInterval(timer);
+      try {
+        fsWatcher?.close();
+      } catch {
+        /* ignore */
+      }
+    },
+  };
+}
+
+function loadSummariesSafe(repoRoot: string): RunSummary[] {
+  try {
+    return loadAllRuns(repoRoot).map((r) => summarizeRun(r.events, r.path));
+  } catch {
+    return [];
+  }
 }
