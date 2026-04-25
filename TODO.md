@@ -89,8 +89,16 @@ Legend: `[ ]` pending · `[~]` in progress · `[x]` done
   - `BUDGETS_PER_TASK` in `src/claudestruct/context.py`: review 200k, dev 600k (=`DEFAULT_MAX_TOTAL_BYTES`), debug 400k, plan 800k
   - Each gatherer now defaults to its task-specific budget; CLI flag `--max-bytes` overrides
   - Tests: `tests/test_budgets.py` (5 cases) — pins per-task ordering and unknown-task fallback
-- [ ] **W3.3 — Cross-run agent memory v2** (D2)
-- [ ] **W3.4 — OpenTelemetry / Prometheus exporter** (B2)
+- [x] **W3.3 — Cross-run agent memory v2** (D2)
+  - Verified: `src/memory/memory.ts` already wired (Planner reads tail before each run, lessons accumulate after each task) — base behavior was working
+  - Added `readRelevantMemorySnippet(repoRoot, query, budgetBytes?)`: keyword-overlap scoring (stopword-filtered, ≥3-char tokens) over per-lesson blocks; selects highest-scoring lessons within budget, falls back to chronological tail when query/lessons empty or all-zero scores
+  - Orchestrator now passes `requirement` as the query at all three Planner call sites
+  - Tests: `claw-squad/tests/memory.test.ts` (+5 cases for ranking, fallback, byte budget, stopword filtering)
+- [x] **W3.4 — Metrics export (Prometheus text format)** (B2)
+  - Chose Prometheus textfile collector over OTel SDK to keep the dep footprint at zero
+  - `src/claudestruct/metrics.py` aggregates `<root>/.claudestruct/runs/*.jsonl` into Prometheus exposition: `claudestruct_runs_total`, `claudestruct_tokens_total{direction}`, `claudestruct_cost_usd_total`, `claudestruct_cache_warnings_total`, plus `claudestruct_last_run_*` gauges
+  - New `cs metrics [--out <path>]` subcommand; suitable for node_exporter's textfile collector via cron
+  - Tests: `tests/test_metrics.py` (6 cases) — counter sums, last-run gauges, label escaping, format-grammar regex
 - [x] **W3.5 — Pre-commit / GitHub Actions integration** (D1)
   - `src/claudestruct/integrations/pre-commit-cs-review.sh` — staged-diff hook with diff-size cap, `CS_HOOK=0` bypass, critical-finding gating via `CS_HOOK_BLOCK`
   - `src/claudestruct/integrations/github-action-cs-review.yml` — drop-in workflow that runs `cs review` on PRs and posts verdict as a comment
@@ -98,16 +106,16 @@ Legend: `[ ]` pending · `[~]` in progress · `[x]` done
 - [ ] **W3.6 — Incremental context shrinking** (D3)
 - [ ] **W3.7 — Multi-repo conflict resolution** (D5)
 
-### Wave 3 (partial) verification
+### Wave 3 verification (cumulative)
 
 | Suite | Result |
 |---|---|
-| `pytest tests/` (Python) | 45 passed (12 new across dashboard + budgets) |
-| `npx vitest run` (claw-squad) | 248 passed (24 files; no regressions) |
+| `pytest tests/` (Python) | 51 passed (+6 new for metrics) |
+| `npx vitest run` (claw-squad) | 254 passed (+6 new for memory v2) |
 | `npx tsc --noEmit` | clean |
 
 ---
 
 ## Last Update
 
-- 2026-04-25 — Wave 1 shipped via [#11](https://github.com/tonyandclaw/claudeStruct/pull/11) (merged). Wave 2 shipped via [#13](https://github.com/tonyandclaw/claudeStruct/pull/13) (merged). Wave 3 partial (W3.1, W3.2, W3.5) ready for PR push. Remaining: W3.3 / W3.4 / W3.6 / W3.7.
+- 2026-04-25 — Wave 1 shipped via [#11](https://github.com/tonyandclaw/claudeStruct/pull/11) (merged). Wave 2 shipped via [#13](https://github.com/tonyandclaw/claudeStruct/pull/13) (merged). Wave 3 part 1 (W3.1, W3.2, W3.5) shipped via [#14](https://github.com/tonyandclaw/claudeStruct/pull/14) (merged). Wave 3 part 2 (W3.3, W3.4) ready for PR push. Remaining: W3.6 (incremental context shrinking — needs benefit quantification) and W3.7 (multi-repo conflict resolution — separate larger effort).
