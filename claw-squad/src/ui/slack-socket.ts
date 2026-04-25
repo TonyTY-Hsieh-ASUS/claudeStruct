@@ -37,6 +37,8 @@ const REPLY_HARD_CAP_MS = 1000 * 60 * 30;
  * `@slack/socket-mode` SDK so importing this file in tests doesn't
  * force the dep tree to resolve.
  */
+export type ConnectionState = "connecting" | "connected" | "disconnected" | "reconnecting";
+
 export class SocketReplyStrategy implements ReplyStrategy {
   private socket: { disconnect: () => Promise<void> | void } | undefined;
   private replyWaiters: PendingReply[] = [];
@@ -45,11 +47,41 @@ export class SocketReplyStrategy implements ReplyStrategy {
   private readonly replyBuffer: string[] = [];
   /** Button clicks that arrived before anyone was waiting. */
   private readonly buttonBuffer = new Map<string, string>();
+  private connectionListener?: (state: ConnectionState) => void;
+  private lastConnectionState: ConnectionState = "connecting";
 
   constructor(_args: { channel: string }) {
     // Real connection is established lazily on first nextReply/Button
     // so test imports never touch the network.
     void _args;
+  }
+
+  /**
+   * Register a callback for connection-state transitions. Called from
+   * `slack.ts` so the higher-level UI layer can log reconnects, repost
+   * banners, etc. Fire-and-forget — handler errors are swallowed.
+   */
+  onConnectionState(fn: (state: ConnectionState) => void): void {
+    this.connectionListener = fn;
+    // Replay the latest known state so a late-bound listener doesn't
+    // miss a transition that already happened during eager attach.
+    // Same try/catch as live deliveries — a misbehaving listener
+    // must not break the socket on bind.
+    try {
+      fn(this.lastConnectionState);
+    } catch {
+      /* swallow */
+    }
+  }
+
+  private onConnectionEvent(state: ConnectionState): void {
+    this.lastConnectionState = state;
+    if (!this.connectionListener) return;
+    try {
+      this.connectionListener(state);
+    } catch {
+      /* a misbehaving listener must not break the socket */
+    }
   }
 
   /**
@@ -63,6 +95,9 @@ export class SocketReplyStrategy implements ReplyStrategy {
     emitter.on("message", (text: string) => this.deliverReply(text));
     emitter.on("button", (promptId: string, value: string) =>
       this.deliverButton(promptId, value),
+    );
+    emitter.on("connectionState", (state: ConnectionState) =>
+      this.onConnectionEvent(state),
     );
   }
 
@@ -107,6 +142,15 @@ export class SocketReplyStrategy implements ReplyStrategy {
         const promptId = action.action_id.replace(/\.(yes|no)$/, "");
         this.deliverButton(promptId, action.value);
       });
+      // Connection lifecycle. The SDK auto-reconnects internally; we
+      // forward state transitions to a hook so the orchestrator can
+      // log them via the structured event log (W2.1) and surface a
+      // banner. Fires asynchronously — we never block on these.
+      client.on("disconnected", () => this.onConnectionEvent("disconnected"));
+      client.on("reconnecting", () =>
+        this.onConnectionEvent("reconnecting"),
+      );
+      client.on("connected", () => this.onConnectionEvent("connected"));
       void client.start();
     } catch (err) {
       console.error(
@@ -208,6 +252,10 @@ export interface SocketEventEmitter {
   on(
     event: "button",
     listener: (promptId: string, value: string) => void,
+  ): void;
+  on(
+    event: "connectionState",
+    listener: (state: ConnectionState) => void,
   ): void;
   disconnect?: () => void;
 }

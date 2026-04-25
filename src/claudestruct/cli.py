@@ -33,6 +33,8 @@ from claudestruct.context import (
     gather_plan_context,
     gather_review_context,
 )
+from claudestruct.cost import estimate_cost_usd
+from claudestruct import logging as event_log
 from claudestruct.prompts import TASK_PROMPT_VERSIONS
 
 console = Console()
@@ -97,7 +99,10 @@ def _run_common(
     dry_run: bool,
     show_context: bool,
     verbose: bool,
+    log_json: str | None,
 ) -> None:
+    import time
+
     explicit = [Path(p) for p in paths] if paths else None
     gatherer = GATHERERS[task]
     ctx = gatherer(root=root, explicit_paths=explicit)
@@ -130,18 +135,55 @@ def _run_common(
     def on_chunk(text: str) -> None:
         console.print(text, end="", markup=False, highlight=False)
 
-    try:
-        result = run_task(
-            task,
-            user_msg,
+    started = time.monotonic()
+    with event_log.event_log(log_json) as sink:
+        sink.write(event_log.run_start(
+            task=task,
             model=model,
-            max_tokens=max_tokens,
             effort=effort,
-            stream_callback=on_chunk,
+            prompt_version=TASK_PROMPT_VERSIONS.get(task),
+        ))
+        try:
+            result = run_task(
+                task,
+                user_msg,
+                model=model,
+                max_tokens=max_tokens,
+                effort=effort,
+                stream_callback=on_chunk,
+            )
+        except ClaudestructError as exc:
+            err.print(f"\n[red]{exc}[/red]")
+            sink.write(event_log.run_end(
+                reason="error",
+                duration_ms=int((time.monotonic() - started) * 1000),
+                total_cost_usd=0.0,
+            ))
+            sys.exit(1)
+        cost = estimate_cost_usd(
+            model=result.model,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            cache_read_tokens=result.cache_read_tokens,
+            cache_creation_tokens=result.cache_creation_tokens,
         )
-    except ClaudestructError as exc:
-        err.print(f"\n[red]{exc}[/red]")
-        sys.exit(1)
+        sink.write(event_log.agent_usage(
+            role="claudestruct",
+            provider="anthropic",
+            model=result.model,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            cache_read_tokens=result.cache_read_tokens,
+            cache_creation_tokens=result.cache_creation_tokens,
+            cost_usd=cost,
+        ))
+        if result.cache_warning:
+            sink.write(event_log.cache_warning(result.cache_warning))
+        sink.write(event_log.run_end(
+            reason=result.stop_reason or "complete",
+            duration_ms=int((time.monotonic() - started) * 1000),
+            total_cost_usd=cost,
+        ))
     console.print()
     _render_usage(result, task)
 
@@ -160,6 +202,9 @@ common_options = [
     click.option("--show-context", is_flag=True,
                  help="Print the collected context summary and exit."),
     click.option("-v", "--verbose", is_flag=True, help="Verbose logging."),
+    click.option("--log-json", type=click.Path(dir_okay=False), default=None,
+                 help="Append structured JSON-lines events (run.start, agent.usage, "
+                      "cache.warning, run.end) to this path. Stdout/Rich output unaffected."),
 ]
 
 
@@ -179,36 +224,36 @@ def main() -> None:
 @click.argument("description", required=True)
 @click.argument("paths", nargs=-1, type=click.Path())
 @_apply_options
-def dev_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose):
+def dev_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json):
     _run_common("dev", description, paths, _resolve_root(root), model, max_tokens,
-                effort, dry_run, show_context, verbose)
+                effort, dry_run, show_context, verbose, log_json)
 
 
 @main.command("review", help="Code review on the current branch diff, or specified files.")
 @click.argument("description", required=False, default="Review the code below for bugs, security issues, and maintainability concerns.")
 @click.argument("paths", nargs=-1, type=click.Path())
 @_apply_options
-def review_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose):
+def review_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json):
     _run_common("review", description, paths, _resolve_root(root), model, max_tokens,
-                effort, dry_run, show_context, verbose)
+                effort, dry_run, show_context, verbose, log_json)
 
 
 @main.command("plan", help="Architecture / planning mode.")
 @click.argument("description", required=True)
 @click.argument("paths", nargs=-1, type=click.Path())
 @_apply_options
-def plan_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose):
+def plan_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json):
     _run_common("plan", description, paths, _resolve_root(root), model, max_tokens,
-                effort, dry_run, show_context, verbose)
+                effort, dry_run, show_context, verbose, log_json)
 
 
 @main.command("debug", help="Debug an error, anchored on a failure description.")
 @click.argument("description", required=True)
 @click.argument("paths", nargs=-1, type=click.Path())
 @_apply_options
-def debug_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose):
+def debug_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json):
     _run_common("debug", description, paths, _resolve_root(root), model, max_tokens,
-                effort, dry_run, show_context, verbose)
+                effort, dry_run, show_context, verbose, log_json)
 
 
 @main.command("tokens", help="Count tokens for a given task + context without calling Claude.")

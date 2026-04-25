@@ -186,6 +186,13 @@ export interface RunConfig {
    * false. claudestruct's `--dry-run` is the analog.
    */
   dryRun?: boolean;
+  /**
+   * When set, every run-log event also lands at this path (in addition
+   * to the canonical `.claw-squad/runs/<ts>.jsonl`). Wired by the
+   * `--log-json` CLI flag for callers that want to pipe events into
+   * their own observability pipeline without scanning the runs dir.
+   */
+  logJsonPath?: string;
 }
 
 // Per-agent provider config now lives in ./config.ts as AgentConfig.

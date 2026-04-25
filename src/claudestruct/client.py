@@ -27,6 +27,36 @@ from claudestruct.prompts import TASK_EFFORT, TASK_PROMPTS
 DEFAULT_MODEL = "claude-opus-4-7"
 DEFAULT_MAX_TOKENS = 16000
 
+# HTTP timeout for the Anthropic SDK. The default is 600s; we tighten
+# it to 5 min because long agent-style tasks should still respond in
+# bursts, and a hung connection beyond that is almost certainly a
+# transport problem worth surfacing as a timeout error.
+DEFAULT_HTTP_TIMEOUT_SECONDS = 300.0
+# The Anthropic SDK retries 5xx + 429 with exponential backoff; this
+# is the cap. Default 2; we go to 3 to absorb a brief regional blip
+# without hand-coding our own retry loop.
+DEFAULT_MAX_RETRIES = 3
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
 
 class ClaudestructError(Exception):
     pass
@@ -56,7 +86,9 @@ def _make_client() -> anthropic.Anthropic:
         raise ClaudestructError(
             "ANTHROPIC_API_KEY is not set. Export it in your shell or put it in a .env."
         )
-    return anthropic.Anthropic()
+    timeout = _env_float("CLAUDESTRUCT_TIMEOUT", DEFAULT_HTTP_TIMEOUT_SECONDS)
+    max_retries = _env_int("CLAUDESTRUCT_MAX_RETRIES", DEFAULT_MAX_RETRIES)
+    return anthropic.Anthropic(timeout=timeout, max_retries=max_retries)
 
 
 def _system_blocks(task: str) -> list[dict]:

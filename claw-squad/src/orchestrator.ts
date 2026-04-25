@@ -314,7 +314,9 @@ export async function runOrchestrator(args: {
 
   // Per-run event log. JSONL on disk; dashboard folds it back into a
   // summary. Survives crashes (append-only, no trailing bracket).
-  const runLog: RunLogHandle = startRun(config.repoRoot);
+  const runLog: RunLogHandle = startRun(config.repoRoot, {
+    mirrorPath: config.logJsonPath,
+  });
   appendEvent(runLog, {
     type: "run-start",
     ts: new Date().toISOString(),

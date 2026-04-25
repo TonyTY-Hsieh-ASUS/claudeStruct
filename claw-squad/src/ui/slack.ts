@@ -201,7 +201,28 @@ export class SlackUi implements UserInterface {
         pollIntervalMs: opts.pollIntervalMs ?? POLL_INTERVAL_MS,
       });
     }
+
+    // Surface socket-mode reconnect transitions to the channel so
+    // operators see when a long run loses the socket and recovers.
+    // SDK auto-reconnects under the hood; this is just the UX layer.
+    const sub = (this.strategy as { onConnectionState?: (fn: (s: string) => void) => void })
+      .onConnectionState;
+    if (typeof sub === "function") {
+      sub.call(this.strategy, (state: string) => {
+        if (state === "disconnected") {
+          void this.safePost(":warning: lost Slack socket — reconnecting…");
+        } else if (state === "connected") {
+          // Don't spam on the initial connect; only post on recovery.
+          if (this.hasAnnouncedConnected) {
+            void this.safePost(":white_check_mark: Slack socket reconnected.");
+          }
+          this.hasAnnouncedConnected = true;
+        }
+      });
+    }
   }
+
+  private hasAnnouncedConnected = false;
 
   /** Wait for the opener to resolve. Tests call this before asserting. */
   async ready(): Promise<void> {

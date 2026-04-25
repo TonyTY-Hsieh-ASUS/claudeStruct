@@ -45,11 +45,37 @@ Legend: `[ ]` pending · `[~]` in progress · `[x]` done
 
 ## Wave 2 — Foundations
 
-- [ ] **W2.1 — Structured logging** (B1) ⚓ basis for B2/B3/D1
-- [ ] **W2.2 — API retry + timeout** (A1)
-- [ ] **W2.3 — Unified config schema + validation** (C3)
-- [ ] **W2.4 — Slack / Web UI reconnect** (A3)
-- [ ] **W2.5 — Architecture / contributor docs** (C2)
+- [x] **W2.1 — Structured logging** (B1) ⚓ basis for B2/B3/D1
+  - claudestruct: `src/claudestruct/logging.py` event sink (run.start / agent.usage / cache.warning / run.end), `src/claudestruct/cost.py` Anthropic rate table; new `--log-json <path>` flag
+  - claw-squad: `RunLogHandle.mirrorPath` extends `src/runs/log.ts`; `RunConfig.logJsonPath` threaded through orchestrator; new `--log-json <path>` CLI flag
+  - Tests: `tests/test_logging.py` (8 cases) + `claw-squad/tests/runs.test.ts` (+2 cases for mirror)
+- [x] **W2.2 — API retry + timeout** (A1)
+  - claudestruct: `_env_float` / `_env_int` helpers; `anthropic.Anthropic(timeout=, max_retries=)` with `CLAUDESTRUCT_TIMEOUT` / `CLAUDESTRUCT_MAX_RETRIES` env-var overrides (defaults 300s / 3)
+  - claw-squad: `src/providers/transport.ts` with `CLAW_SQUAD_TIMEOUT` / `CLAW_SQUAD_MAX_RETRIES`; both Anthropic and OpenAI-compat clients now pass `timeout`/`maxRetries` to their SDKs
+  - Tests: `tests/test_client_env.py` (6 cases) + `claw-squad/tests/transport.test.ts` (5 cases)
+- [x] **W2.3 — Unified config schema + validation** (C3)
+  - `claw-squad/src/config-schema.ts` with zod schemas for the full `.claw-squad/config.json` shape (strict objects → unknown-field rejection; field-path errors like `agents.planner.effort`)
+  - Hooked into `readConfigFile` so the file is gated before merge
+  - Added zod ^3.25 to package.json
+  - Tests: `claw-squad/tests/config-schema.test.ts` (9 cases)
+- [x] **W2.4 — Slack / Web UI reconnect** (A3)
+  - Slack Socket Mode: subscribe to SDK `disconnected` / `reconnecting` / `connected` events; expose `onConnectionState(fn)` on `SocketReplyStrategy`; `slack.ts` posts `:warning: lost socket — reconnecting…` and `:white_check_mark: reconnected` to the channel
+  - Web UI: client-side reconnect now uses jittered exponential backoff capped at 30s with retry counter shown in the connection banner
+  - Tests: `tests/slack-socket.test.ts` (+3 cases for connection state)
+- [x] **W2.5 — Architecture / contributor docs** (C2)
+  - `CLAUDE.md` at repo root: layout + how to run + key conventions
+  - `claw-squad/docs/agents.md` — orchestrator state machine diagram, agent contract, UI seam, adding a new agent role
+  - `claw-squad/docs/skills.md` — skill format, two activation paths (Planner-tagged vs `apply_to`), authoring tips
+  - `claw-squad/docs/hooks.md` — lifecycle hooks surface, `HookAbort`, recipes
+  - `claw-squad/docs/providers.md` — adding a new provider (OpenAI-compat path vs new client class)
+
+### Wave 2 verification
+
+| Suite | Result |
+|---|---|
+| `pytest tests/` (Python) | 25 passed (cache_state + prompts + logging + client_env) |
+| `npx vitest run` (claw-squad) | 239 passed (24 files; +19 new tests) |
+| `npx tsc --noEmit` | clean |
 
 ---
 
@@ -67,4 +93,4 @@ Legend: `[ ]` pending · `[~]` in progress · `[x]` done
 
 ## Last Update
 
-- 2026-04-25 — Wave 1 (W1.1–W1.5) shipped. 11 new Python tests + 18 new TS tests + 4 new Go tests. Ready for PR push.
+- 2026-04-25 — Wave 1 shipped via [#11](https://github.com/tonyandclaw/claudeStruct/pull/11) (merged). Wave 2 (W2.1–W2.5) ready for PR push.
