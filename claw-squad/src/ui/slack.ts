@@ -2,26 +2,31 @@
  * Slack UserInterface.
  *
  * Opens a thread in `--slack-channel` on construction and posts
- * activity as thread replies. Clarifications and confirms are posted
- * as questions; answers come back via polling `conversations.replies`
- * every 5 seconds — simpler setup than Socket Mode, at the cost of a
- * few seconds' lag.
+ * activity as thread replies. Two transports for receiving user
+ * answers (clarifications, confirms):
  *
- * Transport chosen per user's explicit decision: "Slack = Web API
- * polling" in the approved plan.
+ *   - **polling** (default) — `conversations.replies` every 5s.
+ *     Needs only `SLACK_BOT_TOKEN`. Default per the original PR-4
+ *     decision; works in any workspace with a bot token.
+ *   - **socket** (PR-C) — real-time `@slack/socket-mode` events plus
+ *     Block Kit buttons for confirm prompts. Needs `SLACK_APP_TOKEN`
+ *     in addition to the bot token. Auto-selected when both env vars
+ *     are present and `--slack-mode socket` is asked for (or left
+ *     to autodetect).
  *
- * Non-goals:
- *   - Block Kit buttons for confirm prompts. Free-text `yes`/`no` in
- *     the thread is dead simple to implement and plenty clear.
- *   - Socket Mode / real-time subscribe. Polling at 5s is a fine
- *     trade for a tool used by one operator per channel at a time.
+ * Architecture:
+ *   - `SlackUi` owns posting + the streamer.
+ *   - `ReplyStrategy` is the receiving side. PollingReplyStrategy and
+ *     SocketReplyStrategy both implement `nextReply()` and
+ *     `nextButton(promptId)`. Polling can't do buttons (no callback
+ *     URL), so it falls back to free-text yes/no.
  *
  * Reliability:
- *   - Every Slack API call is wrapped in a try/catch that logs to
+ *   - Every Slack API call is wrapped in try/catch that logs to
  *     stderr and does NOT propagate. A transient 429 or a revoked
  *     token must never abort the orchestrator.
  *   - Streamed model output is batched through BatchedStreamer at
- *     1500ms to stay comfortably under Slack's 1 msg/sec/channel cap.
+ *     1500ms to stay under Slack's 1 msg/sec/channel cap.
  */
 
 import type { WebClient as WebClientType } from "@slack/web-api";
@@ -34,6 +39,10 @@ import { BatchedStreamer } from "./throttle.js";
 
 const POLL_INTERVAL_MS = 5_000;
 const STREAM_BATCH_MS = 1_500;
+/** Cap on how long we'll wait for a single reply before giving up. */
+const REPLY_HARD_CAP_MS = 1000 * 60 * 30;
+
+export type SlackMode = "polling" | "socket";
 
 /**
  * Narrow subset of @slack/web-api we actually call. Lets tests swap in
@@ -45,6 +54,7 @@ export interface SlackClient {
       channel: string;
       text: string;
       thread_ts?: string;
+      blocks?: unknown[];
     }) => Promise<{ ts?: string }>;
   };
   conversations: {
@@ -63,6 +73,23 @@ export interface SlackClient {
   };
 }
 
+export interface ReplyStrategy {
+  /**
+   * Resolve when the next user message lands in the thread. Returns
+   * undefined on hard timeout — the orchestrator treats this as an
+   * empty answer rather than failing the run.
+   */
+  nextReply(threadTs: string): Promise<string | undefined>;
+  /**
+   * Resolve when the user clicks a button on the prompt with the
+   * given action_id. Returns the chosen `value` ("yes" / "no").
+   * Polling-mode strategies should fall back to free-text reply
+   * matching since they have no button channel.
+   */
+  nextButton(promptId: string): Promise<string | undefined>;
+  shutdown(): Promise<void> | void;
+}
+
 export interface SlackUiOptions {
   /** Channel ID, e.g. "C0123…". */
   channel: string;
@@ -73,6 +100,17 @@ export interface SlackUiOptions {
    * `@slack/web-api` WebClient from env `SLACK_BOT_TOKEN`.
    */
   client?: SlackClient;
+  /**
+   * Injected for tests. When absent, the constructor builds the
+   * strategy implied by `mode`. Tests pass a fake to assert routing
+   * without spinning up real Slack.
+   */
+  replyStrategy?: ReplyStrategy;
+  /**
+   * "polling" | "socket". Defaults to autodetect: socket when
+   * `SLACK_APP_TOKEN` is set, polling otherwise.
+   */
+  mode?: SlackMode;
   /** Defaults to POLL_INTERVAL_MS; overridable for tests. */
   pollIntervalMs?: number;
   /** Defaults to STREAM_BATCH_MS; overridable for tests. */
@@ -99,19 +137,28 @@ function defaultSlackClient(): SlackClient {
   return new WebClient(token) as unknown as SlackClient;
 }
 
+/**
+ * Decide the transport mode. Explicit `--slack-mode socket` wins;
+ * otherwise pick socket when both tokens are present, else polling.
+ */
+export function autodetectSlackMode(env: NodeJS.ProcessEnv = process.env): SlackMode {
+  return env.SLACK_APP_TOKEN ? "socket" : "polling";
+}
+
 export class SlackUi implements UserInterface {
   private readonly client: SlackClient;
   private readonly channel: string;
-  private readonly pollIntervalMs: number;
   private threadTs: string | undefined;
   private readonly readyPromise: Promise<void>;
   private readonly streamer: BatchedStreamer;
+  private readonly strategy: ReplyStrategy;
+  private readonly mode: SlackMode;
 
   constructor(opts: SlackUiOptions) {
     const client = opts.client ?? defaultSlackClient();
     this.client = client;
     this.channel = opts.channel;
-    this.pollIntervalMs = opts.pollIntervalMs ?? POLL_INTERVAL_MS;
+    this.mode = opts.mode ?? autodetectSlackMode();
 
     // Post the opener + capture thread ts. Everything else replies
     // into the same thread so the channel stays tidy.
@@ -123,9 +170,6 @@ export class SlackUi implements UserInterface {
         });
         this.threadTs = res.ts;
       } catch (err) {
-        // If we can't even post the opener, later log() calls still
-        // won't throw — they'll just be swallowed as no-ops. Surface
-        // the diagnostic to stderr so the operator notices.
         console.error(
           `[slack] failed to open thread: ${(err as Error).message}`,
         );
@@ -141,6 +185,22 @@ export class SlackUi implements UserInterface {
         await this.safePost(body);
       },
     );
+
+    // Pick the strategy. Tests inject one directly; real runs build
+    // it lazily from the env-determined mode.
+    if (opts.replyStrategy) {
+      this.strategy = opts.replyStrategy;
+    } else if (this.mode === "socket") {
+      this.strategy = createSocketReplyStrategy({
+        channel: opts.channel,
+      });
+    } else {
+      this.strategy = new PollingReplyStrategy({
+        client: this.client,
+        channel: opts.channel,
+        pollIntervalMs: opts.pollIntervalMs ?? POLL_INTERVAL_MS,
+      });
+    }
   }
 
   /** Wait for the opener to resolve. Tests call this before asserting. */
@@ -150,6 +210,7 @@ export class SlackUi implements UserInterface {
 
   async shutdown(): Promise<void> {
     await this.streamer.shutdown();
+    await this.strategy.shutdown();
   }
 
   // UserInterface implementation.
@@ -164,19 +225,33 @@ export class SlackUi implements UserInterface {
 
   async confirm(prompt: string): Promise<boolean> {
     await this.readyPromise;
-    await this.safePost(`:warning: ${prompt}\n_Reply \`yes\` or \`no\` in this thread._`);
-    const answer = await this.waitForReply();
+    if (this.mode === "socket") {
+      // Socket mode: post Block Kit buttons; the user clicks one and
+      // the strategy delivers the chosen value via nextButton().
+      const promptId = `claw-confirm-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      await this.safePost(prompt, blockKitConfirm(promptId, prompt));
+      const value = await this.strategy.nextButton(promptId);
+      if (value !== undefined) return value === "yes";
+      // Fall through to free-text in case Block Kit fails or the user
+      // replied with text instead of clicking.
+    }
+    if (this.mode === "polling" || this.mode === "socket") {
+      await this.safePost(`:warning: ${prompt}\n_Reply \`yes\` or \`no\` in this thread._`);
+    }
+    if (!this.threadTs) return false;
+    const answer = await this.strategy.nextReply(this.threadTs);
     return /^\s*y(es)?\s*$/i.test(answer ?? "");
   }
 
   async askClarifications(questions: string[]): Promise<string[]> {
     await this.readyPromise;
+    if (!this.threadTs) return questions.map(() => "");
     const answers: string[] = [];
     for (let i = 0; i < questions.length; i++) {
       await this.safePost(
         `:question: *${i + 1}/${questions.length}* ${questions[i]}\n_Reply in this thread._`,
       );
-      const answer = (await this.waitForReply()) ?? "";
+      const answer = (await this.strategy.nextReply(this.threadTs)) ?? "";
       answers.push(answer);
     }
     return answers;
@@ -186,28 +261,28 @@ export class SlackUi implements UserInterface {
     role: RoleBucket,
     delta: { costUsd: number },
   ): void {
-    // Usage is noisy; don't post each call. The run-end summary can
-    // be surfaced separately via log() when the orchestrator wants.
-    // Keep this method as a no-op sink so the orchestrator stays
-    // transport-agnostic. Unused params are fine.
+    // Usage is noisy; don't post each call. Same no-op as PR-4.
     void role;
     void delta;
   }
 
   updateState(_state: SquadState): void {
-    // Optional hook — not surfaced to Slack yet. Future: periodic
-    // TODO summary repost.
+    // Future hook — periodic TODO repost.
   }
 
   // --- internals ---
 
-  private async safePost(text: string): Promise<string | undefined> {
+  private async safePost(
+    text: string,
+    blocks?: unknown[],
+  ): Promise<string | undefined> {
     await this.readyPromise;
     try {
       const res = await this.client.chat.postMessage({
         channel: this.channel,
         text,
         thread_ts: this.threadTs,
+        ...(blocks ? { blocks } : {}),
       });
       return res.ts;
     } catch (err) {
@@ -215,33 +290,31 @@ export class SlackUi implements UserInterface {
       return undefined;
     }
   }
+}
 
-  /**
-   * Poll conversations.replies until a new reply arrives in the
-   * thread that isn't from us. Returns its text, or undefined after
-   * a soft timeout (never throws — the orchestrator can't usefully
-   * react to "user never answered" beyond treating it as empty).
-   */
-  private async waitForReply(): Promise<string | undefined> {
-    if (!this.threadTs) return undefined;
+// ---------- Polling strategy (PR-4 default) ----------
+
+class PollingReplyStrategy implements ReplyStrategy {
+  constructor(
+    private readonly opts: {
+      client: SlackClient;
+      channel: string;
+      pollIntervalMs: number;
+    },
+  ) {}
+
+  async nextReply(threadTs: string): Promise<string | undefined> {
     const startedAt = Date.now();
-    // Snapshot "last seen" so we only accept replies newer than the
-    // question we just posted. Use a timestamp-ish cursor.
     const oldest = (startedAt / 1000).toFixed(6);
-    // Hard cap so a run that lost its operator still terminates.
-    const hardCapMs = 1000 * 60 * 30;
-    while (Date.now() - startedAt < hardCapMs) {
-      await sleep(this.pollIntervalMs);
+    while (Date.now() - startedAt < REPLY_HARD_CAP_MS) {
+      await sleep(this.opts.pollIntervalMs);
       try {
-        const res = await this.client.conversations.replies({
-          channel: this.channel,
-          ts: this.threadTs,
+        const res = await this.opts.client.conversations.replies({
+          channel: this.opts.channel,
+          ts: threadTs,
           oldest,
         });
         const messages = res.messages ?? [];
-        // Take the first message that is (a) newer than the question
-        // and (b) not from the bot itself. Bot replies have bot_id
-        // set; user replies usually have user set and bot_id unset.
         for (const m of messages) {
           if (!m.text) continue;
           if (m.bot_id) continue;
@@ -256,6 +329,71 @@ export class SlackUi implements UserInterface {
     }
     return undefined;
   }
+
+  async nextButton(_promptId: string): Promise<string | undefined> {
+    // Polling mode has no callback URL → can't receive button payloads.
+    // Fall back: caller will follow up with `nextReply` for free-text.
+    return undefined;
+  }
+
+  shutdown(): void {
+    /* nothing held open */
+  }
+}
+
+// ---------- Socket strategy (PR-C) ----------
+
+/**
+ * Lazy-loaded factory so `@slack/socket-mode` doesn't get pulled in
+ * for polling-mode runs. The actual implementation lives in
+ * `slack-socket.ts` to keep this file from depending on the heavy
+ * SDK at import time.
+ */
+function createSocketReplyStrategy(args: { channel: string }): ReplyStrategy {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const mod = require("./slack-socket.js") as {
+    SocketReplyStrategy: new (args: { channel: string }) => ReplyStrategy;
+  };
+  return new mod.SocketReplyStrategy(args);
+}
+
+// ---------- Block Kit ----------
+
+/**
+ * Build a Block Kit payload for a confirm prompt. Two buttons share
+ * a stable `action_id` so the socket dispatcher can route any click
+ * back to the waiting `nextButton(promptId)` resolver.
+ */
+export function blockKitConfirm(
+  promptId: string,
+  prompt: string,
+): unknown[] {
+  return [
+    {
+      type: "section",
+      text: { type: "mrkdwn", text: `:warning: *${prompt}*` },
+    },
+    {
+      type: "actions",
+      block_id: promptId,
+      elements: [
+        {
+          type: "button",
+          style: "primary",
+          text: { type: "plain_text", text: "✓ Confirm" },
+          action_id: `${promptId}.yes`,
+          value: "yes",
+        },
+        {
+          type: "button",
+          style: "danger",
+          text: { type: "plain_text", text: "✗ Cancel" },
+          action_id: `${promptId}.no`,
+          value: "no",
+        },
+      ],
+    },
+  ];
 }
 
 function roleEmoji(role: string): string {

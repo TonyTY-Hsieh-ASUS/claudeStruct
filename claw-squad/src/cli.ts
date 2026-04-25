@@ -112,6 +112,10 @@ const runCmd = program
     "post activity to a Slack channel (thread) instead of stdout. Needs SLACK_BOT_TOKEN env.",
   )
   .option(
+    "--slack-mode <mode>",
+    "Slack receiving transport: 'polling' (default) or 'socket'. Socket needs SLACK_APP_TOKEN env and gives real-time replies + Block Kit confirm buttons.",
+  )
+  .option(
     "--web-ui [port]",
     "serve a localhost web UI on the given port (default 3737)",
   )
@@ -244,10 +248,30 @@ runCmd.action(async (requirement: string, opts: Record<string, unknown>) => {
       ui = tui;
       tuiInstance = tui;
     } else if (opts.slackChannel) {
-      const { SlackUi } = await import("./ui/slack.js");
+      const { SlackUi, autodetectSlackMode } = await import("./ui/slack.js");
+      // Honor --slack-mode if given; otherwise autodetect based on
+      // which env tokens are set.
+      let mode: "polling" | "socket";
+      if (opts.slackMode === "polling" || opts.slackMode === "socket") {
+        mode = opts.slackMode;
+      } else if (opts.slackMode !== undefined) {
+        console.error(
+          pc.red(`--slack-mode must be 'polling' or 'socket' (got ${opts.slackMode})`),
+        );
+        process.exit(1);
+      } else {
+        mode = autodetectSlackMode();
+      }
+      if (mode === "socket" && !process.env.SLACK_APP_TOKEN) {
+        console.error(
+          pc.red(`--slack-mode socket requires SLACK_APP_TOKEN env`),
+        );
+        process.exit(1);
+      }
       const slack = new SlackUi({
         channel: String(opts.slackChannel),
         openerText: `claw-squad starting: ${requirement.slice(0, 200)}`,
+        mode,
       });
       await slack.ready();
       ui = slack;
