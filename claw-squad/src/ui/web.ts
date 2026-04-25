@@ -23,6 +23,7 @@
  *     translates that into a clean exit message, not a hang.
  */
 
+import { randomUUID } from "node:crypto";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { URL } from "node:url";
@@ -216,7 +217,10 @@ export class WebUi implements UserInterface {
 
   async shutdown(): Promise<void> {
     await this.streamer.shutdown();
-    for (const c of this.clients) {
+    // Snapshot the Set: c.close() can synchronously trigger the
+    // "close" handler that calls this.clients.delete(c), and mutating
+    // the Set mid-iteration would skip clients.
+    for (const c of Array.from(this.clients)) {
       try {
         c.close();
       } catch {
@@ -355,7 +359,7 @@ export class WebUi implements UserInterface {
 
   private askPrompt(text: string): Promise<string> {
     return new Promise<string>((resolve) => {
-      const id = Math.random().toString(36).slice(2);
+      const id = randomUUID();
       this.pendingPrompt = { id, text, resolve };
       this.broadcast({ type: "prompt", prompt: { id, text } });
     });

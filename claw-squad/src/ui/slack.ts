@@ -29,6 +29,7 @@
  *     1500ms to stay under Slack's 1 msg/sec/channel cap.
  */
 
+import { randomUUID } from "node:crypto";
 import type { WebClient as WebClientType } from "@slack/web-api";
 import type {
   RoleBucket,
@@ -249,7 +250,7 @@ export class SlackUi implements UserInterface {
     if (this.mode === "socket") {
       // Socket mode: post Block Kit buttons; the user clicks one and
       // the strategy delivers the chosen value via nextButton().
-      const promptId = `claw-confirm-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      const promptId = `claw-confirm-${randomUUID()}`;
       await this.safePost(prompt, blockKitConfirm(promptId, prompt));
       const value = await this.strategy.nextButton(promptId);
       if (value !== undefined) return value === "yes";

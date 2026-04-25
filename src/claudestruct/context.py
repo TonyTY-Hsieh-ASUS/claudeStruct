@@ -134,7 +134,7 @@ def _load_gitignore(root: Path) -> pathspec.PathSpec:
     gitignore = root / ".gitignore"
     if gitignore.exists():
         patterns.extend(gitignore.read_text(encoding="utf-8", errors="replace").splitlines())
-    return pathspec.PathSpec.from_lines("gitwildmatch", patterns)
+    return pathspec.GitIgnoreSpec.from_lines(patterns)
 
 
 def _is_text_file(path: Path) -> bool:
