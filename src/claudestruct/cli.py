@@ -297,22 +297,7 @@ def context_cmd(task, paths, root, raw):
         _render_context_summary(ctx)
 
 
-@main.command("dashboard", help="Print a cost / outcome table for every run logged under .claudestruct/runs/.")
-@click.option("--root", type=click.Path(exists=True, file_okay=False), default=None,
-              help="Project root (defaults to cwd).")
-@click.option("--task", type=click.Choice(list(GATHERERS)), default=None,
-              help="Filter to a single task type.")
-@click.option("--json", "as_json", is_flag=True,
-              help="Emit machine-readable JSON instead of the human table.")
-@click.option("--limit", type=int, default=20, show_default=True,
-              help="Show only the most recent N runs (table view).")
-def dashboard_cmd(root, task, as_json, limit):
-    summaries = dashboard.load_summaries(_resolve_root(root))
-    if task:
-        summaries = dashboard.filter_summaries(summaries, task=task)
-    if as_json:
-        console.print(dashboard.to_json(summaries), markup=False, highlight=False)
-        return
+def _render_dashboard_table(summaries, limit: int) -> None:
     if not summaries:
         err.print("[dim]no runs logged yet[/dim]")
         return
@@ -344,6 +329,49 @@ def dashboard_cmd(root, task, as_json, limit):
     if any(s.cache_warnings for s in summaries):
         warned = sum(len(s.cache_warnings) for s in summaries)
         err.print(f"[yellow]{warned} cache warnings across runs (use --json to inspect)[/yellow]")
+
+
+@main.command("dashboard", help="Print a cost / outcome table for every run logged under .claudestruct/runs/.")
+@click.option("--root", type=click.Path(exists=True, file_okay=False), default=None,
+              help="Project root (defaults to cwd).")
+@click.option("--task", type=click.Choice(list(GATHERERS)), default=None,
+              help="Filter to a single task type.")
+@click.option("--json", "as_json", is_flag=True,
+              help="Emit machine-readable JSON instead of the human table.")
+@click.option("--limit", type=int, default=20, show_default=True,
+              help="Show only the most recent N runs (table view).")
+@click.option("--watch", "watch_seconds", type=float, default=None,
+              help="Re-render every N seconds. Ctrl-C to exit. Mirrors `claw-squad dashboard --watch`.")
+def dashboard_cmd(root, task, as_json, limit, watch_seconds):
+    import time
+    resolved_root = _resolve_root(root)
+
+    def render_once():
+        summaries = dashboard.load_summaries(resolved_root)
+        if task:
+            summaries = dashboard.filter_summaries(summaries, task=task)
+        if as_json:
+            console.print(dashboard.to_json(summaries), markup=False, highlight=False)
+        else:
+            _render_dashboard_table(summaries, limit)
+
+    if watch_seconds is None:
+        render_once()
+        return
+
+    if watch_seconds < 0.2:
+        err.print("[red]--watch interval must be ≥ 0.2 seconds[/red]")
+        sys.exit(1)
+    try:
+        while True:
+            # ANSI clear + cursor home; matches claw-squad's behavior so
+            # the two tools feel uniform when watched side-by-side.
+            console.print("\x1bc", end="")
+            render_once()
+            err.print(f"[dim]watching {resolved_root}/.claudestruct/runs/  •  Ctrl-C to exit[/dim]")
+            time.sleep(watch_seconds)
+    except KeyboardInterrupt:
+        sys.exit(0)
 
 
 @main.command("metrics", help="Emit Prometheus text-format metrics aggregated from .claudestruct/runs/.")

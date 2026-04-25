@@ -103,8 +103,14 @@ Legend: `[ ]` pending · `[~]` in progress · `[x]` done
   - `src/claudestruct/integrations/pre-commit-cs-review.sh` — staged-diff hook with diff-size cap, `CS_HOOK=0` bypass, critical-finding gating via `CS_HOOK_BLOCK`
   - `src/claudestruct/integrations/github-action-cs-review.yml` — drop-in workflow that runs `cs review` on PRs and posts verdict as a comment
   - `src/claudestruct/integrations/README.md` — install + env-var reference
-- [ ] **W3.6 — Incremental context shrinking** (D3)
-- [ ] **W3.7 — Multi-repo conflict resolution** (D5)
+- [~] **W3.6 — Incremental context shrinking** (D3) — DEFERRED
+  - **Status**: explicitly deferred per the original plan ("先量化收益再決定是否做")
+  - **Why**: Anthropic's 1h prompt cache already covers the common path. The marginal value of a hand-rolled file-hash cache only kicks in when (a) cache TTL has expired (>1h between calls) AND (b) files actually haven't changed. We don't yet have telemetry showing this case is hot.
+  - **Reopen criteria**: when the dashboard (`cs dashboard --json`) or the metrics export (`cs metrics`) shows >1h-elapsed call patterns dominating spend, revisit with concrete numbers.
+- [~] **W3.7 — Multi-repo conflict resolution** (D5) — DEFERRED
+  - **Status**: explicitly deferred per the original plan ("建議在前 6 項做完、有真實 multi-repo 使用 case 之後再 design")
+  - **Why**: cross-repo TODO routing already works (Planner tags `repoAlias`; orchestrator dispatches to the right `RepoCtx`). Conflict-resolution semantics — what to do when a TODO in repo A and a TODO in repo B both modify a shared API contract — depend on workflow conventions that vary per team. Designing without a real reproducer risks shipping the wrong abstraction.
+  - **Reopen criteria**: a concrete failure mode observed in production multi-repo runs, with the desired resolution behavior named.
 
 ### Wave 3 verification (cumulative)
 
@@ -116,6 +122,21 @@ Legend: `[ ]` pending · `[~]` in progress · `[x]` done
 
 ---
 
+## Roadmap status
+
+✅ **Wave 1** (5/5) — quick wins
+✅ **Wave 2** (5/5) — foundations
+✅ **Wave 3** (5/7 done; 2 explicitly deferred with reopen criteria)
+
+The roadmap is closed. Future work tracks against new asks rather than this file.
+
+---
+
 ## Last Update
 
-- 2026-04-25 — Wave 1 shipped via [#11](https://github.com/tonyandclaw/claudeStruct/pull/11) (merged). Wave 2 shipped via [#13](https://github.com/tonyandclaw/claudeStruct/pull/13) (merged). Wave 3 part 1 (W3.1, W3.2, W3.5) shipped via [#14](https://github.com/tonyandclaw/claudeStruct/pull/14) (merged). Wave 3 part 2 (W3.3, W3.4) ready for PR push. Remaining: W3.6 (incremental context shrinking — needs benefit quantification) and W3.7 (multi-repo conflict resolution — separate larger effort).
+- 2026-04-25 — All actionable roadmap items shipped:
+  - Wave 1 via [#11](https://github.com/tonyandclaw/claudeStruct/pull/11) (merged)
+  - Wave 2 via [#13](https://github.com/tonyandclaw/claudeStruct/pull/13) (merged)
+  - Wave 3 part 1 (W3.1, W3.2, W3.5) via [#14](https://github.com/tonyandclaw/claudeStruct/pull/14) (merged)
+  - Wave 3 part 2 (W3.3, W3.4) via [#15](https://github.com/tonyandclaw/claudeStruct/pull/15) (merged)
+  - Final cleanup (`cs dashboard --watch`, `.gitignore`, roadmap closeout) ready for PR push

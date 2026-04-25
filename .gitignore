@@ -11,3 +11,16 @@ build/
 .env
 .env.*
 !.env.example
+
+# Node tooling — claw-squad uses pnpm; npm-generated files are ignored
+# so a contributor accidentally running `npm install` doesn't drift the
+# canonical lockfile.
+claw-squad/node_modules/
+claw-squad/package-lock.json
+claw-squad/dist/
+
+# Per-run artifacts from local runs.
+.claudestruct/
+.claw-squad/state.json
+.claw-squad/runs/
+.claw-squad/memory/
