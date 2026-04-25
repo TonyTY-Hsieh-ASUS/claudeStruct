@@ -41,6 +41,16 @@ export interface RoleTotals {
 
 export interface RunTotals {
   perRole: Record<RoleBucket, RoleTotals>;
+  /**
+   * Per-named-subagent totals. Subagent calls also accumulate under
+   * `perRole.subagent` (the catch-all bucket from PR-1) and under
+   * `overall`, so this is purely additional detail — readers that
+   * don't care can keep using `perRole.subagent`.
+   *
+   * Keys are the subagent's `name` from AgentConfig.subagents[*].
+   * Empty for runs that don't use subagents.
+   */
+  bySubagent: Record<string, RoleTotals>;
   overall: RoleTotals;
 }
 
@@ -60,18 +70,33 @@ export function emptyRoleTotals(): RoleTotals {
 export function emptyRunTotals(): RunTotals {
   const perRole = {} as Record<RoleBucket, RoleTotals>;
   for (const b of ROLE_BUCKETS) perRole[b] = emptyRoleTotals();
-  return { perRole, overall: emptyRoleTotals() };
+  return { perRole, bySubagent: {}, overall: emptyRoleTotals() };
 }
 
-/** In-place accumulator. Mutates `totals`. */
+/**
+ * In-place accumulator. Mutates `totals`.
+ *
+ * @param subagentName when role is "subagent" and this is provided,
+ *   the call also lands in `bySubagent[name]` so the dashboard / TUI
+ *   can attribute spend to the specific subagent. Pass undefined for
+ *   role calls (planner/coder/reviewer) or for unnamed subagent
+ *   invocations.
+ */
 export function addUsage(
   totals: RunTotals,
   role: RoleBucket,
   u: InvokeResult,
+  subagentName?: string,
 ): void {
   const cost = estimateCost(u);
   const saved = cacheSavings(u);
   const buckets: RoleTotals[] = [totals.perRole[role], totals.overall];
+  if (role === "subagent" && subagentName && subagentName.length > 0) {
+    if (!totals.bySubagent[subagentName]) {
+      totals.bySubagent[subagentName] = emptyRoleTotals();
+    }
+    buckets.push(totals.bySubagent[subagentName]);
+  }
   for (const b of buckets) {
     b.inputTokens += u.inputTokens;
     b.outputTokens += u.outputTokens;

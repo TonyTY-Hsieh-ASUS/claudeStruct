@@ -46,14 +46,21 @@ describe("snapshot", () => {
     expect(snapshotPath(root)).toBe(join(root, ".claw-squad/state.json"));
   });
 
-  it("round-trips state and totals (v2)", () => {
+  it("round-trips state and totals (v3 — current)", () => {
+    totals.bySubagent["research-helper"] = {
+      ...emptyRunTotals().overall,
+      inputTokens: 50,
+      costUsd: 0.005,
+      calls: 1,
+    };
     saveSnapshot(root, state, totals);
     const loaded = loadSnapshot(root);
-    expect(loaded?.schemaVersion).toBe(2);
+    expect(loaded?.schemaVersion).toBe(3);
     expect(loaded?.state.requirement).toBe(state.requirement);
     expect(loaded?.state.todos[0]?.id).toBe("T1");
     expect(loaded?.totals.overall.costUsd).toBe(0.01);
     expect(loaded?.totals.perRole.coder.calls).toBe(1);
+    expect(loaded?.totals.bySubagent["research-helper"]?.calls).toBe(1);
     expect(loaded?.savedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
@@ -89,14 +96,53 @@ describe("snapshot", () => {
       },
     });
 
-    expect(migrated).toEqual({ from: 1, to: 2 });
-    expect(loaded?.schemaVersion).toBe(2);
+    // v1 snapshots now migrate two steps in one shot (1 → current).
+    expect(migrated).toEqual({ from: 1, to: 3 });
+    expect(loaded?.schemaVersion).toBe(3);
     expect(loaded?.totals.overall.inputTokens).toBe(500);
     expect(loaded?.totals.overall.costUsd).toBe(0.25);
     expect(loaded?.totals.overall.calls).toBe(7);
     // Per-role stays empty — we can't retroactively attribute.
     expect(loaded?.totals.perRole.planner.calls).toBe(0);
     expect(loaded?.totals.perRole.coder.calls).toBe(0);
+    // bySubagent is the new field added in v3.
+    expect(loaded?.totals.bySubagent).toEqual({});
+  });
+
+  it("migrates a v2 snapshot and adds an empty bySubagent", () => {
+    const path = snapshotPath(root);
+    mkdirSync(join(root, ".claw-squad"), { recursive: true });
+    writeFileSync(
+      path,
+      JSON.stringify({
+        schemaVersion: 2,
+        savedAt: "2026-04-01T00:00:00.000Z",
+        state,
+        totals: {
+          // v2 totals shape — no bySubagent field.
+          perRole: {
+            planner: { ...emptyRunTotals().perRole.planner, calls: 1, costUsd: 0.02 },
+            coder: emptyRunTotals().perRole.coder,
+            reviewer: emptyRunTotals().perRole.reviewer,
+            subagent: emptyRunTotals().perRole.subagent,
+          },
+          overall: { ...emptyRunTotals().overall, calls: 1, costUsd: 0.02 },
+        },
+      }),
+    );
+
+    let migrated: { from: number; to: number } | undefined;
+    const loaded = loadSnapshot(root, {
+      onMigrate: (from, to) => {
+        migrated = { from, to };
+      },
+    });
+
+    expect(migrated).toEqual({ from: 2, to: 3 });
+    expect(loaded?.schemaVersion).toBe(3);
+    expect(loaded?.totals.perRole.planner.calls).toBe(1);
+    expect(loaded?.totals.overall.costUsd).toBe(0.02);
+    expect(loaded?.totals.bySubagent).toEqual({});
   });
 
   it("rejects a snapshot from an unknown future schema version", () => {

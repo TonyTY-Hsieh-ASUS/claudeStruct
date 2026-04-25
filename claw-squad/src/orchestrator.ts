@@ -99,6 +99,10 @@ export interface UserInterface {
    * Optional. When implemented (e.g. by the TUI), the orchestrator
    * calls this per LLM invocation so the UI can update a live
    * header. Absent on simple UIs (plain CLI, tests).
+   *
+   * `subagentName` is set when role is "subagent" and the call
+   * targeted a named subagent. UIs that show per-subagent breakdown
+   * (TUI strip, Web UI panel) read it; others ignore.
    */
   trackUsage?: (
     role: RoleBucket,
@@ -109,6 +113,7 @@ export interface UserInterface {
       cacheWrite: number;
       costUsd: number;
     },
+    subagentName?: string,
   ) => void;
   /** Optional. Fired when the orchestrator dispatches a subagent call. */
   setInflightSubagent?: (name: string | undefined) => void;
@@ -234,7 +239,7 @@ export async function runOrchestrator(args: {
           prompt: r.prompt,
           requestedBy: "planner",
         });
-        track("subagent", resp.usage);
+        track("subagent", resp.usage, r.name);
         pendingSubagentAnswers.push(resp);
         dispatched += 1;
       } catch (err) {
@@ -337,19 +342,23 @@ export async function runOrchestrator(args: {
   ui.onQuit?.(() => {
     budgetExceeded = "user requested quit";
   });
-  const track = (role: RoleBucket, u: InvokeResult) => {
+  const track = (role: RoleBucket, u: InvokeResult, subagentName?: string) => {
     // Record the per-call cost up front — same estimate the run total
     // consumes — so the JSONL event matches the aggregate exactly.
     const callCost = estimateCost(u);
-    addUsage(totals, role, u);
+    addUsage(totals, role, u, subagentName);
     // Feed live per-role header updates to any UI that wants them.
-    ui.trackUsage?.(role, {
-      input: u.inputTokens,
-      output: u.outputTokens,
-      cacheRead: u.cacheReadTokens,
-      cacheWrite: u.cacheCreationTokens,
-      costUsd: callCost,
-    });
+    ui.trackUsage?.(
+      role,
+      {
+        input: u.inputTokens,
+        output: u.outputTokens,
+        cacheRead: u.cacheReadTokens,
+        cacheWrite: u.cacheCreationTokens,
+        costUsd: callCost,
+      },
+      subagentName,
+    );
     // Emit a usage event to the run log. Best-effort — swallow I/O
     // errors so run log problems never abort a run.
     try {
@@ -363,6 +372,7 @@ export async function runOrchestrator(args: {
         cacheReadTokens: u.cacheReadTokens,
         cacheCreationTokens: u.cacheCreationTokens,
         costUsd: callCost,
+        ...(subagentName ? { subagentName } : {}),
       });
     } catch {
       /* ignore */

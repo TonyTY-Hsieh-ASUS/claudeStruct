@@ -29,6 +29,12 @@ export interface RunSummary {
     calls: number;
   };
   perRole: Record<RoleBucket, { costUsd: number; calls: number }>;
+  /**
+   * Per-named-subagent rollup. Keys are subagent names from
+   * AgentConfig.subagents[*].name. Empty for runs that didn't use
+   * subagents or that predate the per-name attribution (PR-A).
+   */
+  bySubagent: Record<string, { costUsd: number; calls: number }>;
   todosDone: number;
   todosRolledBack: number;
 }
@@ -48,6 +54,7 @@ export function summarizeRun(
     path,
     overall: { costUsd: 0, cacheSavedUsd: 0, calls: 0 },
     perRole: emptyPerRole(),
+    bySubagent: {},
     todosDone: 0,
     todosRolledBack: 0,
   };
@@ -62,6 +69,13 @@ export function summarizeRun(
         out.overall.calls += 1;
         out.perRole[e.role].costUsd += e.costUsd;
         out.perRole[e.role].calls += 1;
+        if (e.subagentName) {
+          const cur = out.bySubagent[e.subagentName] ?? { costUsd: 0, calls: 0 };
+          out.bySubagent[e.subagentName] = {
+            costUsd: cur.costUsd + e.costUsd,
+            calls: cur.calls + 1,
+          };
+        }
         break;
       case "todo-complete":
         if (e.rolledBack) out.todosRolledBack += 1;
@@ -79,8 +93,53 @@ export function summarizeRun(
   return out;
 }
 
-export function loadSummaries(repoRoot: string): RunSummary[] {
-  return loadAllRuns(repoRoot).map((r) => summarizeRun(r.events, r.path));
+export interface LoadSummariesOptions {
+  /**
+   * Case-insensitive substring filter applied to `requirement`. Runs
+   * with no requirement (interrupted before run-start landed) are
+   * always excluded when this is set.
+   */
+  filter?: string;
+}
+
+export function loadSummaries(
+  repoRoot: string,
+  opts: LoadSummariesOptions = {},
+): RunSummary[] {
+  const all = loadAllRuns(repoRoot).map((r) => summarizeRun(r.events, r.path));
+  if (!opts.filter) return all;
+  const needle = opts.filter.toLowerCase();
+  return all.filter(
+    (s) => s.requirement && s.requirement.toLowerCase().includes(needle),
+  );
+}
+
+/**
+ * Machine-readable rendering. Stable shape: an array of RunSummary in
+ * the same order as the human table. Consumers can pipe it into jq /
+ * a spreadsheet / a regression script.
+ */
+export function formatJson(summaries: RunSummary[]): string {
+  return JSON.stringify(summaries, null, 2);
+}
+
+/**
+ * Build the "top N subagents by cost" string we tuck into the human
+ * table. Returns "" when no subagents ran.
+ */
+function topSubagentsHint(s: RunSummary, n = 2): string {
+  const names = Object.keys(s.bySubagent);
+  if (names.length === 0) return "";
+  const sorted = names
+    .map((name) => ({ name, ...s.bySubagent[name]! }))
+    .sort((a, b) => b.costUsd - a.costUsd);
+  return (
+    " · " +
+    sorted
+      .slice(0, n)
+      .map((r) => `${r.name}:$${r.costUsd.toFixed(3)}`)
+      .join(",")
+  );
 }
 
 /**
@@ -110,6 +169,8 @@ export function formatTable(summaries: RunSummary[]): string {
   lines.push(pc.dim("─".repeat(100)));
   const totals = { costUsd: 0, cacheSavedUsd: 0, calls: 0, done: 0, rolled: 0 };
   for (const s of summaries) {
+    const reqWithSubagents =
+      (s.requirement ?? "").slice(0, 50) + topSubagentsHint(s);
     lines.push(
       fmtRow(
         formatTimestamp(s.startedAt),
@@ -118,7 +179,7 @@ export function formatTable(summaries: RunSummary[]): string {
         "$" + s.overall.cacheSavedUsd.toFixed(4),
         String(s.overall.calls),
         `${s.todosDone}✓ ${s.todosRolledBack}↺`,
-        (s.requirement ?? "").slice(0, 50),
+        reqWithSubagents,
       ),
     );
     totals.costUsd += s.overall.costUsd;

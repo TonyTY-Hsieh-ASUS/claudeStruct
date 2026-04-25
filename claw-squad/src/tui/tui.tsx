@@ -69,6 +69,12 @@ interface TuiState {
     costUsd: number;
   };
   perRole: Record<RoleBucket, PerRoleTotal>;
+  /**
+   * Per-named-subagent rollup (PR-A). Lights up the subagent strip
+   * below the per-role row when any subagent has run. Empty for
+   * runs that don't use subagents.
+   */
+  bySubagent: Record<string, PerRoleTotal>;
   squadState?: SquadState;
   pendingPrompt?: PendingPrompt;
   /** Filter applied to the activity pane. undefined = show all. */
@@ -111,6 +117,7 @@ class Store {
     activeSkills: [],
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 },
     perRole: emptyPerRole(),
+    bySubagent: {},
     scrollOffset: 0,
     helpVisible: false,
     quitRequested: false,
@@ -190,6 +197,7 @@ class Store {
       cacheWrite: number;
       costUsd: number;
     },
+    subagentName?: string,
   ): void {
     const t = this.state.tokens;
     const existing = this.state.perRole[role];
@@ -200,6 +208,17 @@ class Store {
         costUsd: existing.costUsd + delta.costUsd,
       },
     };
+    let bySubagent = this.state.bySubagent;
+    if (role === "subagent" && subagentName) {
+      const cur = bySubagent[subagentName] ?? { calls: 0, costUsd: 0 };
+      bySubagent = {
+        ...bySubagent,
+        [subagentName]: {
+          calls: cur.calls + 1,
+          costUsd: cur.costUsd + delta.costUsd,
+        },
+      };
+    }
     this.state = {
       ...this.state,
       tokens: {
@@ -210,6 +229,7 @@ class Store {
         costUsd: t.costUsd + delta.costUsd,
       },
       perRole,
+      bySubagent,
     };
     this.notify();
   }
@@ -319,6 +339,18 @@ const Header: React.FC<{ state: TuiState }> = ({ state }) => {
     const r = state.perRole[b];
     return `${b}:${r.calls}×/$${r.costUsd.toFixed(3)}`;
   }).join("  ");
+  // Per-subagent strip — only render when at least one subagent has
+  // actually run, so single-agent runs don't get a wasted line.
+  const subagentNames = Object.keys(state.bySubagent);
+  const subagentCells =
+    subagentNames.length > 0
+      ? subagentNames
+          .map((n) => {
+            const r = state.bySubagent[n]!;
+            return `${n}:${r.calls}×/$${r.costUsd.toFixed(3)}`;
+          })
+          .join("  ")
+      : undefined;
   return React.createElement(
     Box,
     { borderStyle: "round", padding: 1, marginBottom: 1 },
@@ -336,6 +368,13 @@ const Header: React.FC<{ state: TuiState }> = ({ state }) => {
         `in ${t.input.toLocaleString()}  out ${t.output.toLocaleString()}  cache ${t.cacheRead.toLocaleString()}↓/${t.cacheWrite.toLocaleString()}↑  total ${totalTokens.toLocaleString()}  $${t.costUsd.toFixed(4)}`,
       ),
       React.createElement(Text, { dimColor: true }, cells),
+      subagentCells
+        ? React.createElement(
+            Text,
+            { color: "magenta" },
+            `subagents: ${subagentCells}`,
+          )
+        : null,
     ),
   );
 };
@@ -581,8 +620,9 @@ export class TuiUi implements UserInterface {
       cacheWrite: number;
       costUsd: number;
     },
+    subagentName?: string,
   ): void {
-    this.store.addUsage(role, delta);
+    this.store.addUsage(role, delta, subagentName);
   }
 
   updateState(s: SquadState): void {
