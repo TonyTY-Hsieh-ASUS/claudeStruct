@@ -33,6 +33,7 @@ from claudestruct.context import (
     gather_plan_context,
     gather_review_context,
 )
+from claudestruct.prompts import TASK_PROMPT_VERSIONS
 
 console = Console()
 err = Console(stderr=True)
@@ -52,7 +53,7 @@ def _resolve_root(root_opt: str | None) -> Path:
     return Path.cwd()
 
 
-def _render_usage(result) -> None:
+def _render_usage(result, task: str) -> None:
     table = Table(title="Token usage", show_header=True, header_style="bold")
     table.add_column("metric", style="cyan")
     table.add_column("tokens", justify="right")
@@ -64,6 +65,9 @@ def _render_usage(result) -> None:
     err.print(table)
     err.print(f"[dim]cached fraction of input: {pct:.1f}%[/dim]")
     err.print(f"[dim]model: {result.model} | stop: {result.stop_reason}[/dim]")
+    err.print(f"[dim]prompt: {_prompt_label(task)}[/dim]")
+    if result.cache_warning:
+        err.print(f"[yellow]warning:[/yellow] {result.cache_warning}")
 
 
 def _render_context_summary(ctx) -> None:
@@ -76,6 +80,10 @@ def _render_context_summary(ctx) -> None:
     err.print(f"[dim]total: {ctx.total_bytes:,} bytes across {len(ctx.files)} files[/dim]")
     if ctx.skipped:
         err.print(f"[dim]skipped {len(ctx.skipped)} files (use --verbose to see)[/dim]")
+
+
+def _prompt_label(task: str) -> str:
+    return f"{task} v={TASK_PROMPT_VERSIONS[task]}"
 
 
 def _run_common(
@@ -135,7 +143,7 @@ def _run_common(
         err.print(f"\n[red]{exc}[/red]")
         sys.exit(1)
     console.print()
-    _render_usage(result)
+    _render_usage(result, task)
 
 
 common_options = [

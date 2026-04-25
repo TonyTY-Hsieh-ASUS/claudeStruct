@@ -179,6 +179,13 @@ export interface RunConfig {
   waitForCi?: boolean;
   /** Wall clock for waiting on CI. Default 15 min. */
   ciTimeoutMs?: number;
+  /**
+   * Stop after the Planner produces its TODO list and emit a cost
+   * estimate for what the rest of the run would spend. The orchestrator
+   * returns reason="dry_run" before any Coder / Reviewer call. Default
+   * false. claudestruct's `--dry-run` is the analog.
+   */
+  dryRun?: boolean;
 }
 
 // Per-agent provider config now lives in ./config.ts as AgentConfig.

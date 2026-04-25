@@ -19,6 +19,7 @@ import prompts from "prompts";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { runOrchestrator, type UserInterface } from "./orchestrator.js";
+import { installAbortSignal } from "./abort-signal.js";
 import {
   loadAgentConfig,
   loadReposFromFile,
@@ -38,6 +39,7 @@ import {
 import { loadHooksFromFile, NO_HOOKS, type Hooks } from "./hooks.js";
 import { detectTestCommand } from "./test-runner.js";
 import { ROLE_BUCKETS, type AgentRole, type RunConfig } from "./types.js";
+import { loadPromptVersion } from "./prompts.js";
 import {
   isSilentCacheInvalidator,
   type RunTotals,
@@ -120,12 +122,24 @@ const runCmd = program
     "serve a localhost web UI on the given port (default 3737)",
   )
   .option(
+    "--web-ui-bind <host>",
+    "host/interface for the web UI to bind. Default 127.0.0.1. Anything else (0.0.0.0, a LAN IP) requires --web-ui-token.",
+  )
+  .option(
+    "--web-ui-token <token>",
+    "shared secret required to connect to the web UI socket. May also be supplied via CLAW_WEB_TOKEN env.",
+  )
+  .option(
     "--no-rollback-on-max-rounds",
     "keep the task branch + PR when the Coder↔Reviewer loop hits max rounds (default: revert + close)",
   )
   .option(
     "--no-rollback-on-hard-fail",
     "keep the task branch on a preCommit hook abort (default: revert to starting ref)",
+  )
+  .option(
+    "--dry-run",
+    "stop after Planner finishes its TODO list and print a cost estimate; no Coder/Reviewer calls",
   );
 
 // Per-role provider flags. Commander can't easily do templated option
@@ -172,6 +186,7 @@ runCmd.action(async (requirement: string, opts: Record<string, unknown>) => {
       // is passed. Default is undefined → treated as "on" by the orchestrator.
       rollbackOnMaxRounds: opts.rollbackOnMaxRounds !== false,
       rollbackOnHardFail: opts.rollbackOnHardFail !== false,
+      dryRun: Boolean(opts.dryRun),
     };
 
     // Pull multi-repo spec out of the config file if present. When
@@ -281,12 +296,25 @@ runCmd.action(async (requirement: string, opts: Record<string, unknown>) => {
       // Commander hands us "8080" as a string.
       const portArg =
         typeof opts.webUi === "string" ? Number(opts.webUi) : undefined;
+      const hostArg =
+        typeof opts.webUiBind === "string" ? opts.webUiBind : undefined;
+      // CLI flag wins over env, both optional. The Web UI's
+      // start() will hard-fail if hostArg is non-loopback without a
+      // token, so we don't need to duplicate that check here.
+      const tokenArg =
+        (typeof opts.webUiToken === "string" ? opts.webUiToken : undefined) ??
+        process.env.CLAW_WEB_TOKEN;
       const { WebUi } = await import("./ui/web.js");
-      const web = new WebUi({ port: portArg });
+      const web = new WebUi({
+        port: portArg,
+        host: hostArg,
+        authToken: tokenArg,
+      });
       try {
         const addr = await web.start();
+        const hashHint = tokenArg ? `#token=${encodeURIComponent(tokenArg)}` : "";
         console.log(
-          pc.cyan(`web UI listening on http://${addr.host}:${addr.port}`),
+          pc.cyan(`web UI listening on http://${addr.host}:${addr.port}/${hashHint}`),
         );
       } catch (err) {
         console.error(
@@ -329,12 +357,13 @@ runCmd.action(async (requirement: string, opts: Record<string, unknown>) => {
       );
     }
 
+    const abort = installAbortSignal({ ui });
     try {
       const result = await runOrchestrator({
         config,
         agentConfig,
         requirement,
-        ui,
+        ui: abort.ui,
         hooks,
         resumeFrom,
         resumeTotals,
@@ -342,7 +371,8 @@ runCmd.action(async (requirement: string, opts: Record<string, unknown>) => {
       tuiInstance?.unmount();
       await remoteUi?.shutdown();
       printSummary(result);
-      if (result.reason === "complete") process.exit(0);
+      if (result.reason === "complete" || result.reason === "dry_run")
+        process.exit(0);
       if (result.reason === "blocked" || result.reason === "aborted")
         process.exit(2);
       process.exit(3);
@@ -351,6 +381,8 @@ runCmd.action(async (requirement: string, opts: Record<string, unknown>) => {
       await remoteUi?.shutdown();
       console.error(pc.red(`\nFatal: ${(err as Error).message}`));
       process.exit(1);
+    } finally {
+      abort.dispose();
     }
   });
 
@@ -569,6 +601,18 @@ function printSummary(result: {
       ),
     );
   }
+
+  // Prompt versions — content hash of each role's system prompt,
+  // shown so a cache regression or behavior shift can be tied to a
+  // specific prompt revision.
+  const planner = loadPromptVersion("planner");
+  const coder = loadPromptVersion("coder");
+  const reviewer = loadPromptVersion("reviewer");
+  console.log(
+    pc.dim(
+      `  prompts:              planner=${planner} coder=${coder} reviewer=${reviewer}`,
+    ),
+  );
 
   console.log(`  outcome:              ${result.reason}`);
 }

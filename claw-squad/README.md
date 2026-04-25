@@ -188,7 +188,9 @@ See `examples/config.with-subagents.json` and `examples/skills/typescript-conven
 - **GitHub integration** (`--github`): push branch, find-or-create draft PR, post Reviewer verdict as inline PR review, mark-ready + squash-merge on approve. PR description includes the TODO and original requirement.
 - **Coder round-1 file context**: `src/context-gather.ts` uses keyword + path matching against `git ls-files` so round 1 starts with relevant files preloaded, not a blank slate
 - **Local file apply + git commit** with always-on path deny-list (`.git/`, `.env`, `.ssh/`)
-- **Go sandbox** (`--sandbox`, opt-in): rlimits + path validation + env scrubbing
+- **Go sandbox** (`--sandbox`, opt-in): rlimits + path validation + env scrubbing. On startup the sandbox emits a single JSON line on stderr (`[sandbox] {"event":"isolation",...}`) declaring per-control status (`enforced` / `unsupported` / `off`). Platform caveats:
+  - **Linux**: rlimits enforced. `--no-network` is `unsupported` (real isolation needs CAP_SYS_ADMIN / unprivileged user namespace; we don't assume root).
+  - **macOS / other**: rlimits and `--no-network` both `unsupported`. Path validation, env scrubbing, and wall-clock kill still enforced. Treat the sandbox as defense-in-depth, not isolation — a motivated adversary with code execution is not blocked by env scrub alone. Use a VM, container, or firejail wrapper around `claw-sandbox` for stronger guarantees.
 - **Self-learning memory** (`--no-self-learning` to disable): lessons.md + patterns.md per repo, Planner reads recent 8 KB
 - **Budget caps**: `--max-cost <usd>` and `--max-tokens-total <n>` abort the run as soon as the cumulative cost/tokens cross the threshold
 - **Lifecycle hooks** (`--hooks <path>`): `preAgent` / `postAgent` / `preCommit` / `postCommit` / `onBudgetExceeded`. Throw `HookAbort` to cancel a step. See `examples/hooks.sample.mjs`.
