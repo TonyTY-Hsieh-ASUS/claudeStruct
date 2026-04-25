@@ -165,4 +165,27 @@ describe("run log", () => {
     writeFileSync(join(root, ".claw-squad/runs/notes.txt"), "hi");
     expect(loadAllRuns(root)).toEqual([]);
   });
+
+  it("preserves the optional subagentName field on usage events", () => {
+    const h = startRun(root);
+    appendEvent(h, {
+      type: "usage",
+      ts: "t",
+      role: "subagent",
+      provider: "anthropic",
+      inputTokens: 1,
+      outputTokens: 1,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      costUsd: 0.01,
+      subagentName: "research-helper",
+    });
+    const events = loadOneRun(h.path);
+    expect(events).toHaveLength(1);
+    const u = events[0]!;
+    expect(u.type).toBe("usage");
+    if (u.type === "usage") {
+      expect(u.subagentName).toBe("research-helper");
+    }
+  });
 });

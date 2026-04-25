@@ -9,12 +9,17 @@
  *
  * Schema versions:
  *   v1 — flat totals (one bucket). Pre-observability.
- *   v2 — per-role totals via `RunTotals`. Current.
+ *   v2 — per-role totals via `RunTotals.perRole` + `overall`.
+ *   v3 — adds `RunTotals.bySubagent` for per-named-subagent attribution.
  *
- * v1 snapshots auto-migrate on load: the flat totals fold into
- * `overall`, per-role buckets stay empty (since we can't retroactively
- * attribute spend). We warn so the user knows the migrated snapshot's
- * per-role view is incomplete, not that data vanished.
+ * v1 → v3 and v2 → v3 auto-migrate on load:
+ *   - v1: flat totals fold into `overall`, per-role + bySubagent stay
+ *     empty (we can't retroactively split historical data).
+ *   - v2: totals shape is intact; we just initialize `bySubagent` to
+ *     an empty record. Past runs that used subagents will show zero
+ *     per-name attribution but everything else is preserved.
+ * We warn once on load so the user knows the migrated view is
+ * incomplete, not that data vanished.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -23,10 +28,11 @@ import type { SquadState } from "./types.js";
 import {
   emptyRoleTotals,
   emptyRunTotals,
+  type RoleTotals,
   type RunTotals,
 } from "./totals.js";
 
-const CURRENT_SCHEMA_VERSION = 2;
+const CURRENT_SCHEMA_VERSION = 3;
 const SNAPSHOT_FILE = ".claw-squad/state.json";
 
 /** Legacy v1 totals shape — only used by the migration path. */
@@ -37,6 +43,12 @@ interface LegacyV1Totals {
   cacheCreationTokens: number;
   costUsd: number;
   calls: number;
+}
+
+/** Legacy v2 RunTotals — same as current minus `bySubagent`. */
+interface LegacyV2RunTotals {
+  perRole: Record<string, RoleTotals>;
+  overall: RoleTotals;
 }
 
 export interface Snapshot {
@@ -99,6 +111,20 @@ export function normalizeSnapshot(
 
   if (version === CURRENT_SCHEMA_VERSION) {
     return s as Snapshot;
+  }
+  if (version === 2) {
+    options.onMigrate?.(2, CURRENT_SCHEMA_VERSION);
+    // v2 → v3: only `bySubagent` is new. Keep totals intact.
+    const legacy = s.totals as LegacyV2RunTotals | undefined;
+    const migrated: RunTotals = legacy
+      ? { ...legacy, bySubagent: {} }
+      : emptyRunTotals();
+    return {
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      savedAt: s.savedAt ?? new Date().toISOString(),
+      state: s.state as SquadState,
+      totals: migrated,
+    };
   }
   if (version === 1) {
     options.onMigrate?.(1, CURRENT_SCHEMA_VERSION);

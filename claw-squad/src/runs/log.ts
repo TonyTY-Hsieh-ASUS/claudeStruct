@@ -61,6 +61,12 @@ export type RunLogEvent =
       cacheReadTokens: number;
       cacheCreationTokens: number;
       costUsd: number;
+      /**
+       * Set when role is "subagent" and the call targeted a named
+       * subagent. The dashboard uses this to attribute spend per
+       * subagent. Omitted for role calls (planner/coder/reviewer).
+       */
+      subagentName?: string;
     }
   | {
       type: "phase";

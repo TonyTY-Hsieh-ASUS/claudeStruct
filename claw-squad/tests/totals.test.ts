@@ -73,6 +73,48 @@ describe("addUsage", () => {
   });
 });
 
+describe("addUsage with subagent name", () => {
+  it("populates bySubagent[name] in addition to perRole.subagent and overall", () => {
+    const t = emptyRunTotals();
+    addUsage(
+      t,
+      "subagent",
+      makeUsage({ inputTokens: 100, outputTokens: 50 }),
+      "research-helper",
+    );
+    expect(t.perRole.subagent.calls).toBe(1);
+    expect(t.overall.calls).toBe(1);
+    expect(t.bySubagent["research-helper"]?.calls).toBe(1);
+    expect(t.bySubagent["research-helper"]?.inputTokens).toBe(100);
+  });
+
+  it("keeps separate buckets per subagent name", () => {
+    const t = emptyRunTotals();
+    addUsage(t, "subagent", makeUsage({ inputTokens: 10 }), "alpha");
+    addUsage(t, "subagent", makeUsage({ inputTokens: 30 }), "beta");
+    addUsage(t, "subagent", makeUsage({ inputTokens: 20 }), "alpha");
+    expect(t.bySubagent.alpha?.inputTokens).toBe(30);
+    expect(t.bySubagent.beta?.inputTokens).toBe(30);
+    expect(t.bySubagent.alpha?.calls).toBe(2);
+    expect(t.perRole.subagent.calls).toBe(3);
+  });
+
+  it("ignores subagentName when role is not 'subagent'", () => {
+    const t = emptyRunTotals();
+    addUsage(t, "coder", makeUsage({ inputTokens: 5 }), "should-be-ignored");
+    expect(t.bySubagent).toEqual({});
+    expect(t.perRole.coder.inputTokens).toBe(5);
+  });
+
+  it("falls back to subagent bucket only when name is empty", () => {
+    const t = emptyRunTotals();
+    addUsage(t, "subagent", makeUsage({ inputTokens: 7 }), "");
+    addUsage(t, "subagent", makeUsage({ inputTokens: 7 }));
+    expect(t.bySubagent).toEqual({});
+    expect(t.perRole.subagent.calls).toBe(2);
+  });
+});
+
 describe("isSilentCacheInvalidator", () => {
   it("fires when enough Anthropic calls landed but zero were cached", () => {
     const t = emptyRoleTotals();

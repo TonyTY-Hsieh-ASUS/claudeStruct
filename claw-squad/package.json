@@ -25,13 +25,15 @@
     "picomatch": "^4.0.4",
     "prompts": "^2.4.2",
     "react": "^19.2.5",
-    "simple-git": "^3.27.0"
+    "simple-git": "^3.27.0",
+    "ws": "^8.20.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
     "@types/picomatch": "^4.0.3",
     "@types/prompts": "^2.4.9",
     "@types/react": "^19.2.14",
+    "@types/ws": "^8.18.1",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"
