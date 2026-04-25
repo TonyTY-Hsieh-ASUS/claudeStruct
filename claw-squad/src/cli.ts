@@ -122,6 +122,14 @@ const runCmd = program
     "serve a localhost web UI on the given port (default 3737)",
   )
   .option(
+    "--web-ui-bind <host>",
+    "host/interface for the web UI to bind. Default 127.0.0.1. Anything else (0.0.0.0, a LAN IP) requires --web-ui-token.",
+  )
+  .option(
+    "--web-ui-token <token>",
+    "shared secret required to connect to the web UI socket. May also be supplied via CLAW_WEB_TOKEN env.",
+  )
+  .option(
     "--no-rollback-on-max-rounds",
     "keep the task branch + PR when the Coder↔Reviewer loop hits max rounds (default: revert + close)",
   )
@@ -288,12 +296,25 @@ runCmd.action(async (requirement: string, opts: Record<string, unknown>) => {
       // Commander hands us "8080" as a string.
       const portArg =
         typeof opts.webUi === "string" ? Number(opts.webUi) : undefined;
+      const hostArg =
+        typeof opts.webUiBind === "string" ? opts.webUiBind : undefined;
+      // CLI flag wins over env, both optional. The Web UI's
+      // start() will hard-fail if hostArg is non-loopback without a
+      // token, so we don't need to duplicate that check here.
+      const tokenArg =
+        (typeof opts.webUiToken === "string" ? opts.webUiToken : undefined) ??
+        process.env.CLAW_WEB_TOKEN;
       const { WebUi } = await import("./ui/web.js");
-      const web = new WebUi({ port: portArg });
+      const web = new WebUi({
+        port: portArg,
+        host: hostArg,
+        authToken: tokenArg,
+      });
       try {
         const addr = await web.start();
+        const hashHint = tokenArg ? `#token=${encodeURIComponent(tokenArg)}` : "";
         console.log(
-          pc.cyan(`web UI listening on http://${addr.host}:${addr.port}`),
+          pc.cyan(`web UI listening on http://${addr.host}:${addr.port}/${hashHint}`),
         );
       } catch (err) {
         console.error(
