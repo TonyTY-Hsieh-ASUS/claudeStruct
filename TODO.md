@@ -81,16 +81,33 @@ Legend: `[ ]` pending · `[~]` in progress · `[x]` done
 
 ## Wave 3 — Advanced Capabilities
 
-- [ ] **W3.1 — claudestruct dashboard parity** (B3)
-- [ ] **W3.2 — Per-task token budget tuning** (D4)
+- [x] **W3.1 — claudestruct dashboard parity** (B3)
+  - `src/claudestruct/dashboard.py` folds JSONL events into `RunSummary`; new `cs dashboard` subcommand renders a Rich table with `--task` / `--json` / `--limit` filters
+  - Run logs now auto-write to `<root>/.claudestruct/runs/<ts>.jsonl` via the new `MultiSink` / `fanout_log` helpers in `logging.py` (preserves the `--log-json` mirror)
+  - Tests: `tests/test_dashboard.py` (7 cases) — round-trips writer → reader, malformed-line skipping, `--task` / `--since` filters, JSON shape parity
+- [x] **W3.2 — Per-task token budget tuning** (D4)
+  - `BUDGETS_PER_TASK` in `src/claudestruct/context.py`: review 200k, dev 600k (=`DEFAULT_MAX_TOTAL_BYTES`), debug 400k, plan 800k
+  - Each gatherer now defaults to its task-specific budget; CLI flag `--max-bytes` overrides
+  - Tests: `tests/test_budgets.py` (5 cases) — pins per-task ordering and unknown-task fallback
 - [ ] **W3.3 — Cross-run agent memory v2** (D2)
 - [ ] **W3.4 — OpenTelemetry / Prometheus exporter** (B2)
-- [ ] **W3.5 — Pre-commit / GitHub Actions integration** (D1)
+- [x] **W3.5 — Pre-commit / GitHub Actions integration** (D1)
+  - `src/claudestruct/integrations/pre-commit-cs-review.sh` — staged-diff hook with diff-size cap, `CS_HOOK=0` bypass, critical-finding gating via `CS_HOOK_BLOCK`
+  - `src/claudestruct/integrations/github-action-cs-review.yml` — drop-in workflow that runs `cs review` on PRs and posts verdict as a comment
+  - `src/claudestruct/integrations/README.md` — install + env-var reference
 - [ ] **W3.6 — Incremental context shrinking** (D3)
 - [ ] **W3.7 — Multi-repo conflict resolution** (D5)
+
+### Wave 3 (partial) verification
+
+| Suite | Result |
+|---|---|
+| `pytest tests/` (Python) | 45 passed (12 new across dashboard + budgets) |
+| `npx vitest run` (claw-squad) | 248 passed (24 files; no regressions) |
+| `npx tsc --noEmit` | clean |
 
 ---
 
 ## Last Update
 
-- 2026-04-25 — Wave 1 shipped via [#11](https://github.com/tonyandclaw/claudeStruct/pull/11) (merged). Wave 2 (W2.1–W2.5) ready for PR push.
+- 2026-04-25 — Wave 1 shipped via [#11](https://github.com/tonyandclaw/claudeStruct/pull/11) (merged). Wave 2 shipped via [#13](https://github.com/tonyandclaw/claudeStruct/pull/13) (merged). Wave 3 partial (W3.1, W3.2, W3.5) ready for PR push. Remaining: W3.3 / W3.4 / W3.6 / W3.7.
