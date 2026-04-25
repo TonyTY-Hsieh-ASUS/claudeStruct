@@ -8,8 +8,15 @@ Volatile content (the task description, user's question, current files) is
 placed AFTER the cached prefix, inside the user turn. See the Anthropic prompt
 caching guide: cache is a prefix match; any byte change in the prefix
 invalidates everything after it.
+
+Each task has a `prompt_version(task)` derived from a sha256 of its frozen
+text. The CLI prints this with the usage summary so changes are traceable
+across releases. A bumped version is also a hint that any cached prefix
+under that task is now invalidated — see cache_state.py.
 """
 from __future__ import annotations
+
+import hashlib
 
 SYSTEM_DEV = """You are a senior software engineer collaborating on a code change.
 
@@ -124,4 +131,16 @@ TASK_EFFORT: dict[str, str] = {
     "review": "high",
     "plan": "xhigh",
     "debug": "xhigh",
+}
+
+
+def prompt_version(task: str) -> str:
+    """Short content-hash of the system prompt. Bumps automatically on any
+    edit to the prompt text — cheaper than asking humans to maintain
+    version strings, and bytes-accurate (matches the cache key)."""
+    return hashlib.sha256(TASK_PROMPTS[task].encode("utf-8")).hexdigest()[:8]
+
+
+TASK_PROMPT_VERSIONS: dict[str, str] = {
+    task: prompt_version(task) for task in TASK_PROMPTS
 }

@@ -109,6 +109,12 @@ func main() {
 		tryDisableNetwork(cmd)
 	}
 
+	// Always emit the structured isolation report, regardless of
+	// --verbose. The whole point is that callers (humans and
+	// claw-squad) shouldn't have to opt in to learning whether the
+	// controls they asked for are actually enforced.
+	emitIsolationReport(buildIsolationReport(absRepo, noNetwork))
+
 	if verbose {
 		fmt.Fprintf(os.Stderr, "[sandbox] repo=%s cpu=%ds wall=%ds mem=%dMB no-network=%v\n",
 			absRepo, cpuSec, wallSec, memMB, noNetwork)

@@ -21,6 +21,7 @@ from typing import Iterator
 
 import anthropic
 
+from claudestruct import cache_state
 from claudestruct.prompts import TASK_EFFORT, TASK_PROMPTS
 
 DEFAULT_MODEL = "claude-opus-4-7"
@@ -40,6 +41,7 @@ class RunResult:
     cache_read_tokens: int
     stop_reason: str | None
     model: str
+    cache_warning: str | None = None
 
     @property
     def cached_fraction(self) -> float:
@@ -122,14 +124,31 @@ def run_task(
         final = stream.get_final_message()
 
     usage = final.usage
+    cache_creation = getattr(usage, "cache_creation_input_tokens", 0) or 0
+    cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+    p_hash = cache_state.prompt_hash(TASK_PROMPTS[task])
+    warning = cache_state.check_for_silent_miss(
+        task=task,
+        model=model,
+        current_prompt_hash=p_hash,
+        cache_read_tokens=cache_read,
+    )
+    cache_state.record_cache_write(
+        task=task,
+        model=model,
+        current_prompt_hash=p_hash,
+        cache_creation_tokens=cache_creation,
+        cache_read_tokens=cache_read,
+    )
     return RunResult(
         text="".join(collected),
         input_tokens=usage.input_tokens,
         output_tokens=usage.output_tokens,
-        cache_creation_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0,
-        cache_read_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
+        cache_creation_tokens=cache_creation,
+        cache_read_tokens=cache_read,
         stop_reason=final.stop_reason,
         model=final.model,
+        cache_warning=warning,
     )
 
 

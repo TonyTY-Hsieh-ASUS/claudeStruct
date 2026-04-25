@@ -46,6 +46,11 @@ import {
 } from "./hooks.js";
 import { saveSnapshot } from "./snapshot.js";
 import {
+  estimateRemainingCost,
+  formatDryRunReport,
+  plannerSoFarUsd,
+} from "./dry-run.js";
+import {
   appendEvent,
   startRun,
   type RunLogEvent,
@@ -133,7 +138,9 @@ export interface UserInterface {
 export interface OrchestratorResult {
   state: SquadState;
   totals: RunTotals;
-  reason: "complete" | "max_loops" | "blocked" | "aborted";
+  reason: "complete" | "max_loops" | "blocked" | "aborted" | "dry_run";
+  /** Populated when reason="dry_run". Pre-formatted report for the CLI. */
+  dryRunReport?: string;
 }
 
 interface Providers {
@@ -524,6 +531,25 @@ export async function runOrchestrator(args: {
     } else {
       return { state, totals, reason: "blocked" };
     }
+  }
+
+  // --- Dry-run short-circuit: report estimate and exit before any
+  // Coder / Reviewer call. Placed AFTER Phase 2 so the report includes
+  // the actual TODO list the Planner produced. ---
+  if (config.dryRun) {
+    const estimate = estimateRemainingCost({
+      todoCount: state.todos.length,
+      maxReviewRounds: config.maxReviewRounds,
+      coderProvider: agentConfig.coder.name,
+      reviewerProvider: agentConfig.reviewer.name,
+      plannerSoFarUsd: plannerSoFarUsd(totals),
+    });
+    const report = formatDryRunReport(
+      estimate,
+      state.todos.map((t) => `${t.id}: ${t.title}`),
+    );
+    ui.log(report);
+    return { state, totals, reason: "dry_run", dryRunReport: report };
   }
 
   // --- Phase 3: Per-task loop ---

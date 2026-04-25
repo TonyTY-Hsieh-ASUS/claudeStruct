@@ -86,7 +86,7 @@ export type RunLogEvent =
   | {
       type: "run-end";
       ts: string;
-      reason: "complete" | "max_loops" | "blocked" | "aborted";
+      reason: "complete" | "max_loops" | "blocked" | "aborted" | "dry_run";
       overall: {
         costUsd: number;
         cacheSavedUsd: number;
