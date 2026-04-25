@@ -37,6 +37,7 @@ from claudestruct.context import (
 from claudestruct.cost import estimate_cost_usd
 from claudestruct import dashboard
 from claudestruct import logging as event_log
+from claudestruct import metrics
 from claudestruct.prompts import TASK_PROMPT_VERSIONS
 
 console = Console()
@@ -343,6 +344,22 @@ def dashboard_cmd(root, task, as_json, limit):
     if any(s.cache_warnings for s in summaries):
         warned = sum(len(s.cache_warnings) for s in summaries)
         err.print(f"[yellow]{warned} cache warnings across runs (use --json to inspect)[/yellow]")
+
+
+@main.command("metrics", help="Emit Prometheus text-format metrics aggregated from .claudestruct/runs/.")
+@click.option("--root", type=click.Path(exists=True, file_okay=False), default=None,
+              help="Project root (defaults to cwd).")
+@click.option("--out", "out_path", type=click.Path(dir_okay=False), default=None,
+              help="Write to this file instead of stdout. Useful for node_exporter's textfile collector.")
+def metrics_cmd(root, out_path):
+    summaries = dashboard.load_summaries(_resolve_root(root))
+    text = metrics.render_prometheus(summaries)
+    if out_path:
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(out_path).write_text(text, encoding="utf-8")
+        err.print(f"[dim]wrote {len(text)} bytes to {out_path}[/dim]")
+    else:
+        console.print(text, markup=False, highlight=False, end="")
 
 
 if __name__ == "__main__":
