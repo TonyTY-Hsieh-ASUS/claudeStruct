@@ -72,6 +72,27 @@ class NullSink:
     def close(self) -> None: ...
 
 
+class MultiSink:
+    """Fan-out sink: every event lands at every wrapped sink. Used by
+    the CLI to write both the auto-emitted dashboard log and an
+    optional user-supplied `--log-json` path in one pass."""
+
+    def __init__(self, sinks: list[EventSink | NullSink]):
+        self._sinks = sinks
+
+    def open(self) -> None:
+        for s in self._sinks:
+            s.open()
+
+    def write(self, event: dict[str, Any]) -> None:
+        for s in self._sinks:
+            s.write(event)
+
+    def close(self) -> None:
+        for s in self._sinks:
+            s.close()
+
+
 def make_sink(path: str | None) -> EventSink | NullSink:
     if not path:
         return NullSink()
@@ -86,6 +107,22 @@ def event_log(path: str | None) -> Iterator[EventSink | NullSink]:
         yield sink
     finally:
         sink.close()
+
+
+@contextmanager
+def fanout_log(
+    paths: list[str | None],
+) -> Iterator[MultiSink]:
+    """Open multiple JSONL sinks at once. Empty/None entries are
+    silently dropped. Useful when the CLI writes both the auto-log
+    and a user-supplied --log-json target."""
+    sinks = [make_sink(p) for p in paths]
+    multi = MultiSink(sinks)
+    multi.open()
+    try:
+        yield multi
+    finally:
+        multi.close()
 
 
 # ---- Event constructors ---------------------------------------------
