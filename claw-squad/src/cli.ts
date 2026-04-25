@@ -25,7 +25,16 @@ import {
   type AgentCliOverride,
 } from "./config.js";
 import { loadSnapshot } from "./snapshot.js";
-import { formatJson, formatTable, loadSummaries } from "./dashboard.js";
+import {
+  diffRuns,
+  formatDiff,
+  formatDiffJson,
+  formatJson,
+  formatTable,
+  loadSummaries,
+  loadSummaryById,
+  watchSummaries,
+} from "./dashboard.js";
 import { loadHooksFromFile, NO_HOOKS, type Hooks } from "./hooks.js";
 import { detectTestCommand } from "./test-runner.js";
 import { ROLE_BUCKETS, type AgentRole, type RunConfig } from "./types.js";
@@ -540,7 +549,7 @@ function printSummary(result: {
   console.log(`  outcome:              ${result.reason}`);
 }
 
-program
+const dashboardCmd = program
   .command("dashboard")
   .description(
     "Print a cost/outcome table for every run logged under .claw-squad/runs/",
@@ -554,14 +563,98 @@ program
     "--json",
     "emit machine-readable JSON instead of the human table (good for jq / spreadsheets)",
   )
-  .action((opts: { root: string; filter?: string; json?: boolean }) => {
-    const summaries = loadSummaries(opts.root, { filter: opts.filter });
-    if (opts.json) {
-      console.log(formatJson(summaries));
-    } else {
-      console.log(formatTable(summaries));
-    }
-  });
+  .option(
+    "--watch [interval]",
+    "re-render every N seconds (default 5). Ctrl-C to exit.",
+  )
+  .action(
+    (opts: {
+      root: string;
+      filter?: string;
+      json?: boolean;
+      watch?: string | boolean;
+    }) => {
+      // --watch [interval] is a Commander variadic-ish optional arg.
+      // Boolean true means the flag was passed without a value.
+      if (opts.watch !== undefined) {
+        const intervalMs =
+          typeof opts.watch === "string" ? Number(opts.watch) * 1000 : 5_000;
+        if (Number.isNaN(intervalMs) || intervalMs < 200) {
+          console.error(pc.red(`--watch interval must be ≥ 0.2 seconds`));
+          process.exit(1);
+        }
+        const handle = watchSummaries(opts.root, intervalMs, (summaries) => {
+          // Clear screen + move cursor home; portable enough for any
+          // ANSI-aware terminal. Plain stdout if NO_COLOR is set.
+          if (!process.env.NO_COLOR) {
+            process.stdout.write("c");
+          }
+          const rendered = opts.json
+            ? formatJson(opts.filter ? filterByRequirement(summaries, opts.filter) : summaries)
+            : formatTable(opts.filter ? filterByRequirement(summaries, opts.filter) : summaries);
+          console.log(rendered);
+          console.log(
+            pc.dim(`\nwatching ${opts.root}/.claw-squad/runs/  •  Ctrl-C to exit`),
+          );
+        });
+        process.on("SIGINT", () => {
+          handle.stop();
+          process.exit(0);
+        });
+        return;
+      }
+
+      const summaries = loadSummaries(opts.root, { filter: opts.filter });
+      if (opts.json) {
+        console.log(formatJson(summaries));
+      } else {
+        console.log(formatTable(summaries));
+      }
+    },
+  );
+
+dashboardCmd
+  .command("diff <a> <b>")
+  .description(
+    "Compare two run IDs (filename without .jsonl). Shows cost / outcome / per-role / per-subagent deltas (b - a).",
+  )
+  .option("--root <path>", "repo root", process.cwd())
+  .option(
+    "--json",
+    "emit a structured JSON diff instead of the human report",
+  )
+  .action(
+    (
+      a: string,
+      b: string,
+      opts: { root: string; json?: boolean },
+    ) => {
+      const aSummary = loadSummaryById(opts.root, a);
+      const bSummary = loadSummaryById(opts.root, b);
+      if (!aSummary) {
+        console.error(pc.red(`run ${a} not found under ${opts.root}/.claw-squad/runs/`));
+        process.exit(1);
+      }
+      if (!bSummary) {
+        console.error(pc.red(`run ${b} not found under ${opts.root}/.claw-squad/runs/`));
+        process.exit(1);
+      }
+      const report = diffRuns(aSummary, bSummary);
+      console.log(opts.json ? formatDiffJson(report) : formatDiff(report));
+    },
+  );
+
+// Local helper kept off the dashboard module because it's a pure
+// rendering convenience — `loadSummaries` already supports filtering
+// for the non-watch path, but watchSummaries returns the full set
+// (cheaper than re-running the filter logic on every tick).
+function filterByRequirement<T extends { requirement?: string }>(
+  rows: T[],
+  needle: string,
+): T[] {
+  const n = needle.toLowerCase();
+  return rows.filter((r) => r.requirement && r.requirement.toLowerCase().includes(n));
+}
 
 program.parseAsync().catch((err) => {
   console.error(pc.red((err as Error).message));
