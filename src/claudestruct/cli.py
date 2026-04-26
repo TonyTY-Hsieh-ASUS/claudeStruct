@@ -382,5 +382,16 @@ def metrics_cmd(root, out_path):
         console.print(text, markup=False, highlight=False, end="")
 
 
+@main.command("mcp", help="Start the claudestruct MCP server over stdio. Wire into Claude Code via .mcp config.")
+def mcp_cmd():
+    # Lazy import — the `mcp` SDK is heavy and unrelated to dev/review/plan/debug.
+    from claudestruct.mcp_server import run as run_mcp
+    try:
+        run_mcp()
+    except ClaudestructError as exc:
+        err.print(f"[red]{exc}[/red]")
+        sys.exit(1)
+
+
 if __name__ == "__main__":
     main()
