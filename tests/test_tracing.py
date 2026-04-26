@@ -10,8 +10,6 @@ the no-op fallback path is also covered. We test:
 """
 from __future__ import annotations
 
-import importlib
-
 import pytest
 
 from claudestruct import tracing

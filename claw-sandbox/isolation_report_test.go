@@ -41,11 +41,16 @@ func TestBuildIsolationReport_NoNetworkOffWhenFlagAbsent(t *testing.T) {
 
 func TestBuildIsolationReport_NoNetworkReflectsCapability(t *testing.T) {
 	r := buildIsolationReport("/tmp/repo", true)
-	// Both linux and non-linux currently report this as unsupported
-	// (Linux without CAP_SYS_ADMIN can't unshare; other OSes lack
-	// the kernel hooks). When that changes, update this test.
-	if r.NoNetwork != statusUnsupported {
-		t.Errorf("noNetwork should be %q, got %q", statusUnsupported, r.NoNetwork)
+	// Linux: depends on whether the test runner is root (enforced),
+	// inside an unprivileged userns (best-effort), or in the init
+	// namespace as non-root (unsupported). Other OSes are always
+	// unsupported. We just lock the value to one of the recognized
+	// strings so a regression that drops the field caught instantly.
+	switch r.NoNetwork {
+	case statusEnforced, statusBestEffort, statusUnsupported:
+		// ok
+	default:
+		t.Errorf("noNetwork=%q is not one of the recognized status values", r.NoNetwork)
 	}
 }
 

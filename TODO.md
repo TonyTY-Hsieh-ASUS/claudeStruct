@@ -173,11 +173,12 @@ Goal: anyone can `pip install claudestruct` / `npm install claw-squad` / `docker
 
 Goal: trust this in CI pipelines and long-running daemons. Wave 4 makes it installable; Wave 5 makes it operable.
 
-- [~] **W5.1 — OpenTelemetry tracing** (claudestruct only; claw-squad deferred)
-  - `src/claudestruct/tracing.py` — opt-in via `OTEL_EXPORTER_OTLP_ENDPOINT`; soft dep on `opentelemetry-api`/`-sdk`/`-exporter-otlp-proto-http` (declared as `claudestruct[otel]` extra in `pyproject.toml`); zero-cost no-op spans when disabled
-  - `runner.run_task_and_log` wraps a root `claudestruct.task` span with child `claudestruct.context_gather` + `claudestruct.llm_call` spans; attributes: `task`, `model`, `prompt_version`, `budget_bytes`, `files`, `total_bytes`, `input_tokens`, `output_tokens`, `cache_*_tokens`, `cost_usd`, `duration_ms`
-  - Tests: `tests/test_tracing.py` (6 cases) — disabled-by-default, no-op span methods, idempotent init, mixed-type attribute serialization, shutdown safety; enabled-path tests stub `OTLPSpanExporter` with a no-op so CI doesn't spawn an HTTP retry loop
-  - claw-squad TS-side tracing remains pending (orchestrator instrumentation across 8 providers is a larger separate effort)
+- [x] **W5.1 — OpenTelemetry tracing** (claudestruct + claw-squad)
+  - claudestruct: `src/claudestruct/tracing.py` — opt-in via `OTEL_EXPORTER_OTLP_ENDPOINT`; soft dep on `opentelemetry-api`/`-sdk`/`-exporter-otlp-proto-http` (declared as `claudestruct[otel]` extra in `pyproject.toml`); zero-cost no-op spans when disabled
+  - claudestruct: `runner.run_task_and_log` wraps a root `claudestruct.task` span with child `claudestruct.context_gather` + `claudestruct.llm_call` spans; attributes: `task`, `model`, `prompt_version`, `budget_bytes`, `files`, `total_bytes`, `input_tokens`, `output_tokens`, `cache_*_tokens`, `cost_usd`, `duration_ms`
+  - claw-squad: `claw-squad/src/tracing.ts` — same opt-in via `OTEL_EXPORTER_OTLP_ENDPOINT`; soft deps via `optionalDependencies` block in `package.json` (`@opentelemetry/api` / `sdk-node` / `exporter-trace-otlp-http`); dynamic-imported so default install stays lean
+  - claw-squad: orchestrator wraps the full `runOrchestrator` execution in a root `clawSquad.run` span (attributes: `requirement` (200-char truncated), `maxLoops`, `maxReviewRounds`, `repoRoot`, then `reason`/`costUsd`/`calls` on completion); flushes via `shutdownTracing()` in the existing `finally` block
+  - Tests: `tests/test_tracing.py` (6 cases for Python) + `claw-squad/tests/tracing.test.ts` (7 cases for TS) — disabled-by-default, idempotent init, no-op span methods, exception recording + span end on throw, attribute serialization, injection point for downstream tests, shutdown safety
 - [x] **W5.2 — Error reporting (Sentry)**
   - `src/claudestruct/sentry_init.py` — opt-in via `CLAUDESTRUCT_SENTRY_DSN`; soft dep on `sentry-sdk` (declared as `claudestruct[sentry]` extra); init at CLI import so Click parsing errors are caught too
   - `before_send` scrubber redacts: env-var keys (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GITHUB_TOKEN` / `SLACK_*_TOKEN` / `CLAW_WEB_TOKEN` etc.) in `extra` / `tags` / `contexts` / `request.env`; `Authorization` / `X-API-Key` / `Cookie` headers in both dict and list-form serializations; nested dicts recursively; `<key>=<value>` patterns in breadcrumb messages
@@ -194,11 +195,12 @@ Goal: trust this in CI pipelines and long-running daemons. Wave 4 makes it insta
   - `client.py:_make_client()` now reads via `secrets.get("anthropic.api_key")`. Legacy `ANTHROPIC_API_KEY` env still works (mapped via `_LEGACY_ENV_MAP`).
   - Tests: `tests/test_secrets.py` (24 cases) — env canonical / legacy / precedence / empty-as-miss; file provider read / strip / missing / empty; pass provider no-binary / first-line / nonzero-exit; keyring no-module fallback; default_chain selection / unknowns skipped / empty falls back; get/require semantics; client integration
   - Pending: AWS Secrets Manager + HashiCorp Vault providers (deferred; the abstraction is ready, the implementations need their respective SDKs as optional extras)
-- [ ] **W5.5 — Hardened sandbox**
-  - Linux seccomp profile (`claw-sandbox/seccomp.json`) blocking `ptrace`, `kexec_*`, `mount`, etc.
-  - AppArmor profile sample
-  - Network-namespace isolation when CAP_SYS_ADMIN available; auto-detect + warn otherwise
-  - Documented Docker / firejail recipes
+- [x] **W5.5 — Hardened sandbox**
+  - `claw-sandbox/seccomp.json` — Docker / OCI / Kubernetes-compatible profile. `defaultAction=ALLOW` plus an explicit `ERRNO=1` denylist for ptrace + kernel modules (init/finit/delete) + kexec/reboot + mount/pivot_root/chroot + setuid/capset escalation + sethostname/clock-set + ioperm/iopl/bpf + unshare/setns + swapon/quotactl + add_key/keyctl/perf_event_open
+  - `claw-sandbox/apparmor.profile` — sample profile mediating filesystem access. Allows /usr/lib + /lib + /workspace + /tmp + /etc/resolv.conf etc.; explicit deny for /etc/shadow, /root, ~/.ssh, ~/.aws/credentials, ~/.config/gh, /sys/kernel/{debug,tracing}, /dev/{mem,kmem,port}
+  - `claw-sandbox/rlimit_linux.go` — `detectNetworkIsolationStatus()` probes uid (root → "enforced") and `/proc/self/uid_map` (unprivileged userns → "best-effort"); init namespace as non-root → "unsupported". Status flows into the existing structured isolation report so callers see the actual capability instead of a hardcoded "unsupported"
+  - `claw-squad/docs/sandbox-hardening.md` — Docker / Kubernetes / firejail recipes, network-isolation guidance ("enforce outside the sandbox"), explicit list of out-of-scope cases (GPU, nested containers, side channels)
+  - Tests: `claw-sandbox/isolation_report_test.go` updated to accept any of the three valid noNetwork status values since detection is now host-dependent
 - [x] **W5.6 — Cumulative cost cap**
   - `src/claudestruct/budget.py` — `current_period_spend(root)` folds `<root>/.claudestruct/runs/*.jsonl` for the current UTC calendar month; `check_budget(root, cap)` returns `BudgetStatus(spent, cap, warn_threshold, exceeded, near_limit)` with `WARN_FRACTION = 0.8`
   - CLI: new `--monthly-cap-usd <float>` flag on `cs dev/review/plan/debug` (also reads `CLAUDESTRUCT_MONTHLY_CAP_USD`); hard-aborts (`exit 2`) before any LLM call when `spent ≥ cap`, soft-warns when `spent ≥ 0.8 × cap`. Skipped on `--dry-run`.
@@ -350,6 +352,10 @@ Reopen criterion: a signed enterprise contract or three serious leads asking for
 
 ## Last Update
 
+- 2026-04-26 — Wave 5 close-out ready for PR push:
+  - W5.1 ✅ claw-squad TS-side tracing landed (root `clawSquad.run` span; `optionalDependencies` block for OTel deps; 7 new vitest cases). Wave 5 OTel item now fully done across both tools.
+  - W5.5 ✅ Hardened sandbox: seccomp.json + apparmor.profile + sandbox-hardening.md docs + Linux uid-map probe so the structured isolation report reflects actual netns capability.
+  - Stats: 139 Python tests + 302 TS tests + Go isolation-report tests; type-check clean.
 - 2026-04-26 — Wave 4 close-out + Wave 5 kick-off ready for PR push:
   - W4.2 ✅ CODE_OF_CONDUCT.md (official Contributor Covenant 2.1, contact pointer to SECURITY.md)
   - W4.3 ~ `.github/workflows/release.yml` written (OIDC PyPI + npm provenance + cross-compiled `claw-sandbox` binaries via 4-job matrix); trusted-publishing config still org-level manual step

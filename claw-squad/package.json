@@ -40,6 +40,12 @@
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"
   },
+  "_otel": "Set OTEL_EXPORTER_OTLP_ENDPOINT to enable tracing. The OTel deps in optionalDependencies are dynamic-imported by src/tracing.ts; when absent, tracing falls back to no-op spans so the default install stays lean.",
+  "optionalDependencies": {
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/sdk-node": "^0.55.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.55.0"
+  },
   "engines": {
     "node": ">=20"
   }
