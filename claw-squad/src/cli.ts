@@ -730,6 +730,96 @@ function filterByRequirement<T extends { requirement?: string }>(
   return rows.filter((r) => r.requirement && r.requirement.toLowerCase().includes(n));
 }
 
+
+// --- skills marketplace (W7.3) --------------------------------------
+
+const skillsCmd = program
+  .command("skills")
+  .description("Marketplace for sharable skill packs (manifest + sha256 verified).");
+
+skillsCmd
+  .command("list")
+  .description("List installed skills with their manifest provenance.")
+  .option("--root <path>", "repo root", process.cwd())
+  .action(async (opts: { root: string }) => {
+    const { listInstalled } = await import("./skills-registry.js");
+    const installed = listInstalled(opts.root);
+    if (installed.length === 0) {
+      console.log(pc.dim("No skills installed under .claw-squad/skills/."));
+      return;
+    }
+    for (const s of installed) {
+      const v = s.manifest ? `v${s.manifest.version}` : pc.dim("(no manifest)");
+      console.log(`${pc.cyan(s.id)}  ${v}`);
+      if (s.manifest?.description) {
+        console.log(`  ${pc.dim(s.manifest.description)}`);
+      }
+    }
+  });
+
+skillsCmd
+  .command("install <idOrUrl>")
+  .description(
+    "Install a skill by id (resolved against the registry) or by direct manifest URL.",
+  )
+  .option("--root <path>", "repo root", process.cwd())
+  .option(
+    "--registry <url>",
+    "Override the registry index URL (default: skills.claudestruct.dev).",
+  )
+  .action(async (idOrUrl: string, opts: { root: string; registry?: string }) => {
+    const {
+      DEFAULT_REGISTRY_URL,
+      installSkill,
+      loadRegistryIndex,
+      parseManifest,
+    } = await import("./skills-registry.js");
+    let manifest: ReturnType<typeof parseManifest> | null = null;
+
+    // Direct URL? Treat as a manifest URL (we fetch the manifest, then
+    // the manifest tells us where the .md body lives). Otherwise look
+    // up by id in the registry.
+    if (idOrUrl.startsWith("http://") || idOrUrl.startsWith("https://") || idOrUrl.startsWith("file://")) {
+      const isLocal = idOrUrl.startsWith("file://");
+      const body = isLocal
+        ? (await import("node:fs")).readFileSync(idOrUrl.slice("file://".length), "utf-8")
+        : await (await fetch(idOrUrl)).text();
+      manifest = parseManifest(JSON.parse(body));
+    } else {
+      const url = opts.registry ?? process.env.CLAW_SKILLS_REGISTRY ?? DEFAULT_REGISTRY_URL;
+      const { manifests, warnings } = await loadRegistryIndex(url);
+      for (const w of warnings) console.warn(pc.yellow(`[warn] ${w}`));
+      const found = manifests.find((m) => m.id === idOrUrl);
+      if (!found) {
+        console.error(pc.red(`skill "${idOrUrl}" not found in ${url}`));
+        process.exit(1);
+      }
+      manifest = found;
+    }
+    if (typeof manifest === "string") {
+      console.error(pc.red(`invalid manifest: ${manifest}`));
+      process.exit(1);
+    }
+    const res = await installSkill(opts.root, manifest);
+    console.log(pc.green(`installed ${res.manifest.id}@${res.manifest.version}`));
+    console.log(pc.dim(`  ${res.installedPath}`));
+  });
+
+skillsCmd
+  .command("uninstall <id>")
+  .description("Remove an installed skill (and its sidecar manifest).")
+  .option("--root <path>", "repo root", process.cwd())
+  .action(async (id: string, opts: { root: string }) => {
+    const { uninstallSkill } = await import("./skills-registry.js");
+    const removed = uninstallSkill(opts.root, id);
+    if (removed) {
+      console.log(pc.green(`uninstalled ${id}`));
+    } else {
+      console.log(pc.dim(`${id}: nothing to remove`));
+    }
+  });
+
+
 program.parseAsync().catch((err) => {
   console.error(pc.red((err as Error).message));
   process.exit(1);

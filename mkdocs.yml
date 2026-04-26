@@ -57,6 +57,8 @@ nav:
       - Skills: claw-squad/skills.md
       - Hooks: claw-squad/hooks.md
       - Providers: claw-squad/providers.md
+      - Plugin SDK: claw-squad/plugins.md
+      - Skills marketplace: claw-squad/skills-marketplace.md
   - Integrations: integrations.md
   - Contributing: contributing.md
   - Security: security.md

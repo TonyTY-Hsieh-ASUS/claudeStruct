@@ -255,24 +255,32 @@ Goal: distribution. Make the product discoverable, easy to install, and easy to 
 - [ ] **W7.2 — JetBrains plugin**
   - Same surface for IntelliJ / PyCharm / WebStorm; tool window for run history
   - Published to JetBrains Marketplace
-- [ ] **W7.3 — Skills marketplace**
-  - Content-addressed registry (`skill@v1.2.0` hash-pinned references)
-  - Cosign-signed skill packages; `claw-squad skills install <id>`
-  - Site at `skills.claudestruct.dev`
-- [ ] **W7.4 — Plugin SDK for new agents**
-  - Published TS types + decorator API
-  - Auto-discovery of `claudestruct-plugin-*` npm packages and `claudestruct-plugin-*` PyPI packages
-  - Reuses existing `claw-squad/docs/agents.md` contract
+- [~] **W7.3 — Skills marketplace** (claw-squad; registry hosting deferred)
+  - `claw-squad/src/skills-registry.ts` — manifest format with `id` / `version` / `url` / `sha256` (+ optional `applyTo`/`license`/`homepage`/`publishedAt`); `parseManifest`, `loadRegistryIndex`, `installSkill`, `uninstallSkill`, `listInstalled`
+  - CLI: `claw-squad skills list / install <idOrUrl> / uninstall <id>`. `--registry` overrides `CLAW_SKILLS_REGISTRY` env / default URL. Accepts ids, https manifest URLs, and `file://` air-gapped paths.
+  - sha256 verification on install — refuses on mismatch. Sidecar `<id>.md.manifest.json` keeps provenance inspectable.
+  - Tests: `claw-squad/tests/skills-registry.test.ts` (18 cases) — manifest validation, registry index shapes (`[]` and `{manifests: [...]}`), file:// + https loaders, install round-trip, sha256-mismatch refusal, install + uninstall + list lifecycle
+  - Pending: actual hosting at `skills.claudestruct.dev` (manual infra step) and cosign signature verification (deferred above the sha256 layer)
+- [x] **W7.4 — Plugin SDK for new agents** (claw-squad)
+  - `claw-squad/src/plugins.ts` — `ClawSquadPlugin` interface with `apiVersion` / `name` / `subagents[]` / `skills[]`. `PLUGIN_API_VERSION` constant lets the host skip incompatible plugins at load time with a warning rather than a crash.
+  - Auto-discovery: scan `<repoRoot>/node_modules/claudestruct-plugin-*`, resolve entry via `package.json` `main` / `exports["."]` / fallbacks, dynamic-import via `pathToFileURL`, validate with `isPlugin()`, merge with deterministic dedup (first plugin wins for duplicate names, surfaced as a warning).
+  - Plugins contribute new subagents and skills only — Planner/Coder/Reviewer roles stay core (a plugin flipping the orchestrator state machine breaks every other plugin).
+  - Tests: `claw-squad/tests/plugins.test.ts` (20 cases) — `isPlugin` validation matrix, prefix discovery + non-dir filtering, CJS + ESM loaders, missing entry / bad shape / wrong apiVersion warnings, merge dedup of plugins/subagents/skills, end-to-end `loadPluginsFromRepo`
+  - Pending: PyPI-side equivalent (claudestruct plugins), published `claudestruct-plugin-sdk` package on npm
 - [ ] **W7.5 — Public playground**
   - `playground.claudestruct.dev` with read-only sample runs, no key required
   - Limited to a 10k-token-per-day shared bucket; rate-limited per IP
 - [ ] **W7.6 — Marketing + docs site upgrade**
   - Landing page, pricing page, demo videos, case studies
   - Algolia DocSearch; analytics via Plausible (privacy-friendly)
-- [ ] **W7.7 — Distribution channels**
-  - Homebrew tap (`brew install tonyandclaw/tap/claudestruct`)
-  - Scoop bucket (Windows), AUR (Arch), Snap (Ubuntu)
-  - Auto-published on tag
+- [~] **W7.7 — Distribution channels** (templates only; publishing waits on W4.3)
+  - `packaging/homebrew/claudestruct.rb` — formula template with virtualenv install + smoke test
+  - `packaging/scoop/claudestruct.json` — Scoop manifest with `checkver` autoupdate hooks
+  - `packaging/aur/PKGBUILD` — Arch User Repository recipe with `python -m build` + `python -m installer`
+  - `packaging/snap/snapcraft.yaml` — Snapcraft strict-confinement recipe with `home`/`network`/`removable-media` plugs
+  - `packaging/README.md` documents the per-channel manual publish flow
+  - `docs/install.md` lists the channels with status (`template` until release automation lands)
+  - Pending: actual publish to each channel — needs `tonyandclaw/homebrew-tap` + `tonyandclaw/scoop-bucket` repos and AUR + Snapcraft accounts (manual infra)
 
 ---
 

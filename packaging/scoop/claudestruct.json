@@ -1,0 +1,27 @@
+{
+  "//": "Scoop manifest for claudestruct (W7.7). Hosted in the dedicated bucket repo `tonyandclaw/scoop-bucket`. Version + hash are rewritten by the release workflow on every tag.",
+  "version": "VERSION_PLACEHOLDER",
+  "description": "Token-efficient Claude Code companion (cs CLI). Python 3.10+ required.",
+  "homepage": "https://github.com/tonyandclaw/claudeStruct",
+  "license": "MIT",
+  "depends": "python",
+  "url": "https://github.com/tonyandclaw/claudeStruct/archive/refs/tags/vVERSION_PLACEHOLDER.zip",
+  "hash": "SHA256_PLACEHOLDER",
+  "extract_dir": "claudeStruct-VERSION_PLACEHOLDER",
+  "pre_install": [
+    "python -m pip install --user -e \"$dir\""
+  ],
+  "bin": [
+    [
+      "$dir\\bin\\cs.exe",
+      "cs"
+    ]
+  ],
+  "checkver": {
+    "github": "https://github.com/tonyandclaw/claudeStruct"
+  },
+  "autoupdate": {
+    "url": "https://github.com/tonyandclaw/claudeStruct/archive/refs/tags/v$version.zip",
+    "extract_dir": "claudeStruct-$version"
+  }
+}

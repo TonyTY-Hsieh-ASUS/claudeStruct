@@ -1,0 +1,38 @@
+# Snapcraft recipe for claudestruct (W7.7).
+#
+# Build locally with `snapcraft` (LXD multipass backend); publish via
+# `snapcraft upload --release=stable claudestruct_*.snap`.
+#
+# Confinement: strict + classic-network plug because `cs` needs
+# unrestricted network egress to talk to the Anthropic API and
+# read-write access to the user's repo (passed in via `--root`). The
+# `home` plug covers the default cwd-based context-gather path.
+name: claudestruct
+base: core22
+version: '0.0.0'
+summary: Token-efficient Claude Code companion (cs CLI)
+description: |
+  claudestruct is a Python CLI that wraps Claude Code workflows with
+  prompt caching, smart git-aware context collection, and a structured
+  run log for cost dashboards.
+
+  This snap exposes the `cs` command. claw-squad and claw-sandbox are
+  packaged separately.
+
+grade: stable
+confinement: strict
+
+parts:
+  claudestruct:
+    plugin: python
+    source: .
+    python-requirements:
+      - pyproject.toml
+
+apps:
+  cs:
+    command: bin/cs
+    plugs:
+      - home
+      - network
+      - removable-media

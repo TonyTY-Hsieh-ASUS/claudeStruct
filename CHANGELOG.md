@@ -7,6 +7,11 @@ adheres to [Semantic Versioning 2.0](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **claw-squad plugin SDK** (W7.4): `claw-squad/src/plugins.ts` exposes a `ClawSquadPlugin` contract plus auto-discovery of `node_modules/claudestruct-plugin-*` packages. Plugins contribute new subagents and skills (not core roles); apiVersion mismatches are skipped with a warning rather than crashing the host. Dedup is deterministic (first-wins).
+- **claw-squad skills marketplace** (W7.3): `claw-squad/src/skills-registry.ts` plus `claw-squad skills list / install <idOrUrl> / uninstall <id>` subcommands. Manifest format (`id` + `version` + `url` + `sha256` + optional fields) with content-addressed integrity check on install. Default registry URL is `https://skills.claudestruct.dev/index.json`; `--registry` / `CLAW_SKILLS_REGISTRY` override; `file://` URLs supported for air-gapped use. Sidecar `<id>.md.manifest.json` keeps provenance inspectable.
+- **Distribution channel templates** (W7.7): `packaging/homebrew/claudestruct.rb`, `packaging/scoop/claudestruct.json`, `packaging/aur/PKGBUILD`, `packaging/snap/snapcraft.yaml`, plus `packaging/README.md` with the manual publish flow until W4.3 release automation lands. `docs/install.md` lists every channel.
+
+### Earlier additions
 - **PII / secret redaction in run logs** (W5.3): new `src/claudestruct/redact.py` with default ruleset covering Anthropic / GitHub / Slack / Stripe tokens, AWS access keys, emails, and JWTs. Opt-in via `--redact` flag (or `CLAUDESTRUCT_REDACT` env) on `cs dev/review/plan/debug`. Custom rules via `Redactor.add_rule()`.
 - **`cs logs purge --older-than-days N [--dry-run]`** (W5.3): mtime-based retention pruning for `<root>/.claudestruct/runs/*.jsonl`.
 - **Pluggable secrets backend** (W5.4): `claudestruct.secrets` with `SecretsProvider` Protocol and built-in `env` / `keyring` / `pass` / `file` providers. Configure the chain via `CLAUDESTRUCT_SECRETS_PROVIDER=env,keyring,pass,file:/run/secrets`. Legacy `ANTHROPIC_API_KEY` env keeps working.
