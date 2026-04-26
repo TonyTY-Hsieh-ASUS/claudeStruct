@@ -181,6 +181,53 @@ def serve_add_key(email: str, org_slug: str, name: str | None,
         click.echo("Store the full_key now; it cannot be retrieved later.")
 
 
+@serve_group.command("worker", help="Run the daemon-mode background worker (W6.1).")
+@click.option("--db-url", default=None, envvar="CLAUDESTRUCT_DATABASE_URL")
+@click.option("--run-root", type=click.Path(file_okay=False), default=".",
+              show_default=True)
+@click.option("--once", is_flag=True,
+              help="Drain the queue once and exit; useful for cron / batch.")
+@click.option("--poll-interval", type=float, default=1.0, show_default=True,
+              help="Seconds to sleep when the queue is empty (long-running mode).")
+def serve_worker(db_url: str | None, run_root: str, once: bool,
+                 poll_interval: float) -> None:
+    """Drain queued runs.
+
+    Without `--once`, runs forever as a daemon, blocking on the queue
+    when empty. With `--once`, drains everything currently queued and
+    exits — call from cron / a CI step / a Kubernetes Job.
+    """
+    _ensure_server_deps()
+    from claudestruct.server.db import init_db, make_engine, make_session_factory
+    from claudestruct.server.worker import WorkerThread, drain_queue
+
+    engine = make_engine(db_url)
+    init_db(engine)
+    factory = make_session_factory(engine)
+
+    if once:
+        n = drain_queue(factory, run_root)
+        click.echo(f"drained {n} run(s)")
+        return
+
+    thread = WorkerThread(
+        run_root=run_root,
+        session_factory=factory,
+        poll_interval_s=poll_interval,
+    )
+    click.echo(f"worker started (poll {poll_interval}s); Ctrl-C to stop")
+    thread.start()
+    try:
+        # Block the foreground until the user interrupts. The worker
+        # thread is daemon so a hard kill won't leak it; the SIGINT
+        # path below is for graceful drain.
+        thread._thread.join() if thread._thread else None  # noqa: SLF001
+    except KeyboardInterrupt:
+        click.echo("\nstopping worker (will finish in-flight run)…")
+        thread.stop()
+        click.echo("worker stopped")
+
+
 def attach_to(main: Any) -> None:
     """Mount the serve subcommand group on the top-level CLI. Called
     from ``claudestruct.cli`` so the import stays optional."""

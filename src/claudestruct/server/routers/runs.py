@@ -1,21 +1,22 @@
-"""Run submission + retrieval.
+"""Run submission + retrieval (W6.1).
 
-The draft accepts ``POST /v1/runs`` and returns 202 with a placeholder
-run_id but does not actually execute the request — the worker model
-arrives in W6.1 (daemon mode). ``GET /v1/runs/{id}`` reads the existing
-JSONL log so historical runs are accessible immediately.
+``POST /v1/runs`` enqueues a Run row in the DB; the worker (see
+``server/worker.py``) picks it up. ``GET /v1/runs/{id}`` reads the
+DB first, falling back to the JSONL log so historical runs (created
+before W6.1 landed) remain accessible.
 """
 from __future__ import annotations
 
+import json
 import secrets
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy.orm import Session  # noqa: F401  (kept for follow-up W6.1 use)
+from sqlalchemy import select
 
 from claudestruct import dashboard as dash_mod
 from claudestruct.server import auth as auth_mod
-from claudestruct.server.models import Role
+from claudestruct.server.models import Role, Run, RunStatus
 from claudestruct.server.schema import (
     CreateRunRequest,
     CreateRunResponse,
@@ -31,11 +32,53 @@ router = APIRouter(prefix="/v1/runs", tags=["runs"])
     status_code=status.HTTP_202_ACCEPTED,
 )
 def create_run(
-    body: CreateRunRequest,  # noqa: ARG001  (shape pinned for W6.1)
+    body: CreateRunRequest,
+    request: Request,
     principal: auth_mod.Principal = Depends(auth_mod.require_role(Role.member)),
 ) -> CreateRunResponse:
-    run_id = f"queued-{secrets.token_hex(6)}"
+    """Enqueue a run. Returns 202 immediately; the worker picks it up
+    and runs `runner.run_task_and_log` against Anthropic. Poll
+    GET /v1/runs/{id} to follow progress."""
+    # 8 hex bytes → 16 chars; collision-resistant within the per-org
+    # key space and short enough for log lines / URL paths.
+    run_id = f"run-{secrets.token_hex(8)}"
+
+    factory = request.app.state.session_factory
+    with factory() as session:
+        row = Run(
+            run_id=run_id,
+            org_id=principal.org_id,
+            user_id=principal.user_id,
+            status=RunStatus.queued.value,
+            task=body.task,
+            description=body.description,
+            model=body.model,
+            effort=body.effort,
+            paths_json=json.dumps(body.paths) if body.paths else None,
+        )
+        session.add(row)
+        session.commit()
     return CreateRunResponse(run_id=run_id, status="queued")
+
+
+def _row_to_detail(run: Run) -> RunDetail:
+    """Translate a DB Run row into the public RunDetail shape."""
+    return RunDetail(
+        run_id=run.run_id,
+        started_at=run.started_at.isoformat() if run.started_at else None,
+        ended_at=run.ended_at.isoformat() if run.ended_at else None,
+        task=run.task,
+        model=run.model,
+        effort=run.effort,
+        reason=run.status,
+        duration_ms=run.duration_ms,
+        input_tokens=run.input_tokens,
+        output_tokens=run.output_tokens,
+        cache_read_tokens=run.cache_read_tokens,
+        cache_creation_tokens=run.cache_creation_tokens,
+        cost_usd=round(run.cost_usd, 6),
+        cache_warnings=[run.error] if run.error else [],
+    )
 
 
 @router.get("/{run_id}", response_model=RunDetail)
@@ -44,10 +87,28 @@ def get_run(
     request: Request,
     principal: auth_mod.Principal = Depends(auth_mod.require_role(Role.viewer)),
 ) -> RunDetail:
+    factory = request.app.state.session_factory
+    with factory() as session:
+        row: Run | None = session.execute(
+            select(Run).where(Run.run_id == run_id)
+        ).scalar_one_or_none()
+        if row is not None:
+            # Tenant isolation: a viewer in org A must not be able to
+            # peek at org B's runs even by guessing the run_id.
+            if row.org_id != principal.org_id:
+                raise HTTPException(status_code=404, detail="run not found")
+            return _row_to_detail(row)
+
+    # Pre-W6.1 runs only live in the JSONL log. The fallback keeps
+    # GET /v1/runs/{id} useful immediately after upgrade. Accessible
+    # to any authenticated viewer in any org because the JSONL store
+    # has no tenant column — acceptable while the legacy path is
+    # phased out; tracked under W6.5 retention follow-up.
     root = Path(request.app.state.run_root)
     summaries = dash_mod.load_summaries(root)
     for s in summaries:
         if s.run_id == run_id:
+            _ = principal  # explicit: the viewer is authenticated, that's enough here
             return RunDetail(
                 run_id=s.run_id,
                 started_at=s.started_at,
