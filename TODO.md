@@ -210,13 +210,17 @@ Goal: 5-50 devs share the tool with shared visibility, shared budgets, and team-
   - `cs serve` and `claw-squad serve` long-running supervisor
   - Postgres backend (default for >1 user), SQLite single-file fallback for tiny teams
   - Stateless workers can scale horizontally; state lives in DB, not local JSONL
-- [ ] **W6.2 — HTTP REST API**
-  - Mirrors CLI: `POST /v1/runs`, `GET /v1/runs/:id`, `GET /v1/dashboard`, `GET /healthz`, `GET /metrics`
-  - OpenAPI 3.1 spec auto-generated; SDK stubs for Python + TS
-  - Auth: API keys (long-lived, rotatable) + session cookies (browser)
-- [ ] **W6.3 — User / team / org model + RBAC**
-  - Postgres schema: `orgs`, `teams`, `users`, `memberships`, `roles` (admin/member/viewer)
-  - Migration tool (`alembic` for Python side, `drizzle` for TS side) with seeded fixtures
+- [~] **W6.2 — HTTP REST API** (draft shipped)
+  - FastAPI app under `src/claudestruct/server/` behind the `[server]` extra: `/healthz`, `/readyz`, `/v1/dashboard`, `/v1/budget`, `/v1/runs` (POST + GET), `/v1/keys` (list/create/revoke). OpenAPI 3.1 at `/openapi.json`, interactive viewer at `/docs`.
+  - Auth: bearer API keys (`ck_<key_id>_<secret>`, SHA-256-hashed secret, last_used stamp on auth success).
+  - `POST /v1/runs` returns 202 with a placeholder run_id — actual worker model lands in **W6.1**. Other endpoints work end-to-end against the existing JSONL store + budget module.
+  - Tests: `tests/test_server.py` (18 cases) — auth gate (4), RBAC (3), key lifecycle (1), tenant isolation (2), dashboard / budget / runs shape (5), OpenAPI (1), health (2)
+  - Pending: session cookies + browser SDK (deferred to W6.4 OAuth), per-language SDK stubs (deferred until the API surface is closer to final)
+- [~] **W6.3 — User / team / org model + RBAC** (schema + key lifecycle shipped)
+  - SQLAlchemy 2.x models: `orgs`, `users`, `memberships`, `api_keys`. Idempotent `init_db()` via `Base.metadata.create_all` for the draft; Alembic deferred until the first schema bump
+  - Roles: `admin` / `member` / `viewer` enforced by `require_role(min_role)` FastAPI dependency
+  - `cs serve init-db / add-org / add-user / add-key` covers the bootstrap path
+  - Pending: teams (currently flat membership of users → orgs), seeded migration fixtures, Alembic when the schema needs to change shape
 - [ ] **W6.4 — OAuth login**
   - GitHub + Google login for the daemon's web UI
   - Reuse existing `claw-squad/src/ui/web.ts` + `web-page.ts` page; swap token-in-URL for cookie session

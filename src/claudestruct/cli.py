@@ -221,6 +221,20 @@ def main() -> None:
     pass
 
 
+# `cs serve` is mounted from the optional [server] package. The import is
+# lazy at module-load — it adds the subcommand to --help even when the
+# extra isn't installed, but the actual call surfaces a clear error then.
+try:
+    from claudestruct.server.cli import attach_to as _attach_serve
+    _attach_serve(main)
+except ImportError:
+    @main.group("serve", help="Daemon-mode HTTP API (requires [server] extra).")
+    def _serve_placeholder() -> None:
+        raise click.ClickException(
+            "Install the server extra first:\n  pip install 'claudestruct[server]'"
+        )
+
+
 @main.command("dev", help="Development task with smart context collection.")
 @click.argument("description", required=True)
 @click.argument("paths", nargs=-1, type=click.Path())

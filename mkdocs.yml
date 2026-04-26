@@ -50,6 +50,8 @@ nav:
       - Install: install.md
       - claudestruct (cs): cs.md
       - claw-squad: claw-squad.md
+  - Daemon mode (preview):
+      - cs serve: server.md
   - claw-squad internals:
       - Agents: claw-squad/agents.md
       - Skills: claw-squad/skills.md

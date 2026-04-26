@@ -1,0 +1,187 @@
+"""``cs serve`` CLI subcommand group.
+
+Entry point lazy-imports FastAPI/uvicorn so the lean install (no
+``[server]`` extra) doesn't pay for them on cold start of the
+non-server CLI commands.
+
+Subcommands:
+    cs serve run           -- launch the HTTP API
+    cs serve init-db       -- create tables (idempotent)
+    cs serve add-org       -- create an org
+    cs serve add-user      -- create a user + membership
+    cs serve add-key       -- mint an API key (printed once)
+"""
+from __future__ import annotations
+
+from typing import Any
+
+import click
+
+
+def _ensure_server_deps() -> None:
+    try:
+        import fastapi  # noqa: F401
+        import sqlalchemy  # noqa: F401
+        import uvicorn  # noqa: F401
+    except ImportError as exc:
+        raise click.ClickException(
+            "The `cs serve` subcommand needs the [server] extra:\n"
+            "  pip install 'claudestruct[server]'"
+        ) from exc
+
+
+@click.group("serve", help="Daemon-mode HTTP API + RBAC (W6.2 + W6.3).")
+def serve_group() -> None:
+    pass
+
+
+@serve_group.command("run", help="Launch the HTTP API via uvicorn.")
+@click.option("--host", default="127.0.0.1", show_default=True,
+              help="Bind host. Use 0.0.0.0 to expose on the network.")
+@click.option("--port", type=int, default=8787, show_default=True)
+@click.option("--db-url", default=None,
+              envvar="CLAUDESTRUCT_DATABASE_URL",
+              help="SQLAlchemy URL. Default: sqlite:///./.claudestruct/server.db.")
+@click.option("--run-root", type=click.Path(file_okay=False), default=".",
+              show_default=True,
+              help="Directory whose .claudestruct/runs/ feeds the dashboard.")
+def serve_run(host: str, port: int, db_url: str | None, run_root: str) -> None:
+    _ensure_server_deps()
+    import uvicorn
+
+    from claudestruct.server.app import create_app
+
+    app = create_app(db_url=db_url, run_root=run_root)
+    uvicorn.run(app, host=host, port=port, log_level="info")
+
+
+@serve_group.command("init-db", help="Create tables (idempotent).")
+@click.option("--db-url", default=None,
+              envvar="CLAUDESTRUCT_DATABASE_URL")
+def serve_init_db(db_url: str | None) -> None:
+    _ensure_server_deps()
+    from claudestruct.server.db import init_db, make_engine
+
+    engine = make_engine(db_url)
+    init_db(engine)
+    click.echo(f"initialized {engine.url}")
+
+
+@serve_group.command("add-org", help="Create a new org.")
+@click.argument("slug")
+@click.argument("name")
+@click.option("--db-url", default=None, envvar="CLAUDESTRUCT_DATABASE_URL")
+def serve_add_org(slug: str, name: str, db_url: str | None) -> None:
+    _ensure_server_deps()
+    from claudestruct.server.db import init_db, make_engine, make_session_factory
+    from claudestruct.server.models import Org
+
+    engine = make_engine(db_url)
+    init_db(engine)
+    factory = make_session_factory(engine)
+    with factory() as session:
+        org = Org(slug=slug, name=name)
+        session.add(org)
+        session.commit()
+        session.refresh(org)
+        click.echo(f"created org id={org.id} slug={org.slug}")
+
+
+@serve_group.command("add-user", help="Create a user + add to an org with a role.")
+@click.argument("email")
+@click.argument("org_slug")
+@click.option("--name", default=None)
+@click.option("--role", type=click.Choice(["admin", "member", "viewer"]),
+              default="member", show_default=True)
+@click.option("--db-url", default=None, envvar="CLAUDESTRUCT_DATABASE_URL")
+def serve_add_user(email: str, org_slug: str, name: str | None, role: str,
+                   db_url: str | None) -> None:
+    _ensure_server_deps()
+    from sqlalchemy import select
+
+    from claudestruct.server.db import init_db, make_engine, make_session_factory
+    from claudestruct.server.models import Membership, Org, User
+
+    engine = make_engine(db_url)
+    init_db(engine)
+    factory = make_session_factory(engine)
+    with factory() as session:
+        org = session.execute(
+            select(Org).where(Org.slug == org_slug)
+        ).scalar_one_or_none()
+        if org is None:
+            raise click.ClickException(f"org '{org_slug}' not found; run `cs serve add-org` first.")
+        user = session.execute(
+            select(User).where(User.email == email)
+        ).scalar_one_or_none()
+        if user is None:
+            user = User(email=email, name=name)
+            session.add(user)
+            session.flush()
+        membership = session.execute(
+            select(Membership).where(
+                Membership.user_id == user.id, Membership.org_id == org.id,
+            )
+        ).scalar_one_or_none()
+        if membership is None:
+            membership = Membership(user_id=user.id, org_id=org.id, role=role)
+            session.add(membership)
+        else:
+            membership.role = role
+        session.commit()
+        click.echo(f"user id={user.id} email={user.email} role={role} org={org.slug}")
+
+
+@serve_group.command("add-key", help="Mint an API key for a user in an org.")
+@click.argument("email")
+@click.argument("org_slug")
+@click.option("--name", default=None, help="Human label (e.g. 'CI runner').")
+@click.option("--db-url", default=None, envvar="CLAUDESTRUCT_DATABASE_URL")
+def serve_add_key(email: str, org_slug: str, name: str | None,
+                  db_url: str | None) -> None:
+    _ensure_server_deps()
+    from sqlalchemy import select
+
+    from claudestruct.server.auth import generate_key
+    from claudestruct.server.db import init_db, make_engine, make_session_factory
+    from claudestruct.server.models import ApiKey, Membership, Org, User
+
+    engine = make_engine(db_url)
+    init_db(engine)
+    factory = make_session_factory(engine)
+    with factory() as session:
+        org = session.execute(
+            select(Org).where(Org.slug == org_slug)
+        ).scalar_one_or_none()
+        if org is None:
+            raise click.ClickException(f"org '{org_slug}' not found.")
+        user = session.execute(
+            select(User).where(User.email == email)
+        ).scalar_one_or_none()
+        if user is None:
+            raise click.ClickException(f"user '{email}' not found.")
+        membership = session.execute(
+            select(Membership).where(
+                Membership.user_id == user.id, Membership.org_id == org.id,
+            )
+        ).scalar_one_or_none()
+        if membership is None:
+            raise click.ClickException(
+                f"user '{email}' is not a member of '{org_slug}'."
+            )
+        full_key, key_id, hashed = generate_key()
+        row = ApiKey(
+            user_id=user.id, org_id=org.id,
+            key_id=key_id, hashed_secret=hashed, name=name,
+        )
+        session.add(row)
+        session.commit()
+        click.echo(f"key_id={key_id}")
+        click.echo(f"full_key={full_key}")
+        click.echo("Store the full_key now; it cannot be retrieved later.")
+
+
+def attach_to(main: Any) -> None:
+    """Mount the serve subcommand group on the top-level CLI. Called
+    from ``claudestruct.cli`` so the import stays optional."""
+    main.add_command(serve_group)

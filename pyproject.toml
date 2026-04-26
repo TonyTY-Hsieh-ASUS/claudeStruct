@@ -21,6 +21,16 @@ dependencies = [
   "mcp>=1.0.0",
 ]
 
+[project.optional-dependencies]
+# `cs serve` and the daemon-mode REST API + RBAC layer (W6.2 + W6.3).
+# Kept out of the base install so `pip install claudestruct` stays lean.
+server = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.32",
+  "sqlalchemy>=2.0",
+  "pydantic>=2.0",
+]
+
 [project.scripts]
 cs = "claudestruct.cli:main"
 claudestruct = "claudestruct.cli:main"
