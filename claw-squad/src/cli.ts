@@ -140,6 +140,10 @@ const runCmd = program
   .option(
     "--dry-run",
     "stop after Planner finishes its TODO list and print a cost estimate; no Coder/Reviewer calls",
+  )
+  .option(
+    "--log-json <path>",
+    "mirror every run-log event (run-start, usage, phase, todo-complete, run-end) to this JSONL file in addition to .claw-squad/runs/",
   );
 
 // Per-role provider flags. Commander can't easily do templated option
@@ -187,6 +191,8 @@ runCmd.action(async (requirement: string, opts: Record<string, unknown>) => {
       rollbackOnMaxRounds: opts.rollbackOnMaxRounds !== false,
       rollbackOnHardFail: opts.rollbackOnHardFail !== false,
       dryRun: Boolean(opts.dryRun),
+      logJsonPath:
+        typeof opts.logJson === "string" ? opts.logJson : undefined,
     };
 
     // Pull multi-repo spec out of the config file if present. When

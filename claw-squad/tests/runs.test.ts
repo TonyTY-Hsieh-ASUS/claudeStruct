@@ -188,4 +188,42 @@ describe("run log", () => {
       expect(u.subagentName).toBe("research-helper");
     }
   });
+
+  it("mirrors events to a secondary path when --log-json is set", () => {
+    const mirror = join(root, "downstream", "feed.jsonl");
+    const h = startRun(root, { mirrorPath: mirror });
+    appendEvent(h, {
+      type: "phase",
+      ts: new Date().toISOString(),
+      label: "planner.q1",
+    });
+    appendEvent(h, {
+      type: "run-end",
+      ts: new Date().toISOString(),
+      reason: "complete",
+      overall: { costUsd: 0.5, cacheSavedUsd: 0.1, calls: 3 },
+    });
+
+    const canonical = loadOneRun(h.path);
+    const mirrored = loadOneRun(mirror);
+    expect(canonical).toHaveLength(2);
+    expect(mirrored).toHaveLength(2);
+    expect(mirrored[0]!.type).toBe("phase");
+    expect(mirrored[1]!.type).toBe("run-end");
+  });
+
+  it("mirror failure does not abort writes to the canonical log", () => {
+    // A directory at the mirror path makes appendFileSync throw EISDIR.
+    const mirror = join(root, "blocked-dir");
+    mkdirSync(mirror, { recursive: true });
+    const h = startRun(root, { mirrorPath: mirror });
+    expect(() =>
+      appendEvent(h, {
+        type: "phase",
+        ts: new Date().toISOString(),
+        label: "still-runs",
+      }),
+    ).not.toThrow();
+    expect(loadOneRun(h.path)).toHaveLength(1);
+  });
 });

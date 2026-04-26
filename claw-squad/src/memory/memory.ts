@@ -61,6 +61,126 @@ export function readMemorySnippet(repoRoot: string): string {
   return parts.join("\n");
 }
 
+// --- Relevance-ranked retrieval (W3.3) ---
+//
+// As lessons.md grows, the chronological-tail strategy quietly drops
+// older-but-relevant lessons in favor of recent-but-unrelated ones.
+// `readRelevantMemorySnippet(query, ...)` instead scores each lesson
+// block by keyword overlap with the user's requirement and returns
+// the top-scoring lessons that fit within the budget.
+//
+// Why keyword overlap, not TF-IDF or embeddings?
+//   - Lesson corpus is small (40 KB cap → ~50-100 entries). IDF is
+//     near-noise on that scale; embeddings add a heavy dependency
+//     for marginal gain. Keyword overlap is one pass over the bytes.
+//   - Stays deterministic, byte-stable across runs, no model calls.
+
+const STOPWORDS = new Set([
+  "a", "an", "the", "and", "or", "but", "if", "is", "are", "was", "were",
+  "be", "been", "of", "to", "in", "on", "for", "with", "by", "as", "at",
+  "from", "this", "that", "these", "those", "it", "its", "we", "our",
+  "you", "your", "they", "them", "their", "i", "me", "my", "do", "does",
+  "did", "have", "has", "had", "not", "no", "yes", "so", "than", "then",
+  "when", "what", "which", "who", "how", "why", "where", "can", "will",
+  "would", "should", "could", "may", "might", "must", "make", "made",
+  "use", "used", "using", "want", "need", "needs", "any", "all", "some",
+  "each", "every", "more", "less", "very", "just", "also", "only",
+]);
+
+function tokenize(text: string): string[] {
+  // Split on non-word, lowercase, drop short tokens and stopwords.
+  return text
+    .toLowerCase()
+    .split(/[^a-z0-9_]+/)
+    .filter((t) => t.length >= 3 && !STOPWORDS.has(t));
+}
+
+interface LessonBlock {
+  index: number;        // Order in file; higher = newer.
+  text: string;
+  tokens: Set<string>;
+}
+
+/** Split a lessons file into per-entry blocks. Entries start with `## `. */
+function splitLessons(raw: string): LessonBlock[] {
+  if (!raw.trim()) return [];
+  const parts = raw.split(/\n(?=## )/);
+  return parts
+    .filter((p) => p.trim().length > 0)
+    .map((text, index) => ({
+      index,
+      text,
+      tokens: new Set(tokenize(text)),
+    }));
+}
+
+function scoreBlock(block: LessonBlock, queryTokens: Set<string>): number {
+  let hits = 0;
+  for (const t of queryTokens) {
+    if (block.tokens.has(t)) hits += 1;
+  }
+  return hits;
+}
+
+/**
+ * Pick the top-scoring lessons for `query`, falling back to chronological
+ * tail when scores tie or the query is empty.
+ *
+ * Budget is in bytes; we accumulate blocks newest-first within the highest
+ * score band, then the next band, until the budget fills. Block ordering
+ * within a band is recency-descending so the Planner sees what worked
+ * recently before older but equally-relevant lessons.
+ */
+export function readRelevantMemorySnippet(
+  repoRoot: string,
+  query: string,
+  budgetBytes: number = RECENT_TAIL_BYTES,
+): string {
+  const dir = memoryDir(repoRoot);
+  const lessons = readIfExists(join(dir, LESSONS_FILE));
+  const patterns = readIfExists(join(dir, PATTERNS_FILE));
+
+  const queryTokens = new Set(tokenize(query));
+  const blocks = splitLessons(lessons);
+
+  let selected: string[] = [];
+  if (blocks.length === 0) {
+    // No lessons yet; nothing to rank.
+  } else if (queryTokens.size === 0) {
+    // Empty / all-stopwords query: behave like the legacy tail.
+    selected = [lessons.slice(-budgetBytes)];
+  } else {
+    const scored = blocks
+      .map((b) => ({ b, score: scoreBlock(b, queryTokens) }))
+      .filter((x) => x.score > 0)
+      .sort((a, b) => b.score - a.score || b.b.index - a.b.index);
+    let used = 0;
+    for (const { b } of scored) {
+      const size = Buffer.byteLength(b.text, "utf8");
+      if (used + size > budgetBytes) break;
+      selected.push(b.text);
+      used += size;
+    }
+    // Empty selection (zero overlap) → fall back to recent tail so the
+    // Planner still sees *something* useful from prior runs.
+    if (selected.length === 0) {
+      selected = [lessons.slice(-budgetBytes)];
+    }
+  }
+
+  const parts: string[] = [];
+  if (selected.length > 0) {
+    parts.push("### Lessons (relevance-ranked)");
+    parts.push(selected.join("\n\n"));
+  }
+  if (patterns.length > 0) {
+    parts.push("");
+    parts.push("### Patterns");
+    parts.push(patterns.slice(-budgetBytes));
+  }
+  return parts.join("\n");
+}
+
 /** Append a lesson. Rotates the file when oversized. */
 export function appendLesson(repoRoot: string, entry: string): void {
   const dir = memoryDir(repoRoot);

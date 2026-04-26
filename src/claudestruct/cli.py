@@ -28,11 +28,16 @@ from claudestruct.client import (
     run_task,
 )
 from claudestruct.context import (
+    BUDGETS_PER_TASK,
     gather_debug_context,
     gather_dev_context,
     gather_plan_context,
     gather_review_context,
 )
+from claudestruct.cost import estimate_cost_usd
+from claudestruct import dashboard
+from claudestruct import logging as event_log
+from claudestruct import metrics
 from claudestruct.prompts import TASK_PROMPT_VERSIONS
 
 console = Console()
@@ -97,10 +102,15 @@ def _run_common(
     dry_run: bool,
     show_context: bool,
     verbose: bool,
+    log_json: str | None,
+    max_bytes: int | None,
 ) -> None:
+    import time
+
     explicit = [Path(p) for p in paths] if paths else None
     gatherer = GATHERERS[task]
-    ctx = gatherer(root=root, explicit_paths=explicit)
+    budget = max_bytes if max_bytes is not None else BUDGETS_PER_TASK.get(task, 600_000)
+    ctx = gatherer(root=root, explicit_paths=explicit, max_total_bytes=budget)
 
     if verbose and ctx.skipped:
         err.print("[dim]Skipped files:[/dim]")
@@ -130,18 +140,56 @@ def _run_common(
     def on_chunk(text: str) -> None:
         console.print(text, end="", markup=False, highlight=False)
 
-    try:
-        result = run_task(
-            task,
-            user_msg,
+    started = time.monotonic()
+    auto_path = dashboard.auto_log_path(root)
+    with event_log.fanout_log([str(auto_path), log_json]) as sink:
+        sink.write(event_log.run_start(
+            task=task,
             model=model,
-            max_tokens=max_tokens,
             effort=effort,
-            stream_callback=on_chunk,
+            prompt_version=TASK_PROMPT_VERSIONS.get(task),
+        ))
+        try:
+            result = run_task(
+                task,
+                user_msg,
+                model=model,
+                max_tokens=max_tokens,
+                effort=effort,
+                stream_callback=on_chunk,
+            )
+        except ClaudestructError as exc:
+            err.print(f"\n[red]{exc}[/red]")
+            sink.write(event_log.run_end(
+                reason="error",
+                duration_ms=int((time.monotonic() - started) * 1000),
+                total_cost_usd=0.0,
+            ))
+            sys.exit(1)
+        cost = estimate_cost_usd(
+            model=result.model,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            cache_read_tokens=result.cache_read_tokens,
+            cache_creation_tokens=result.cache_creation_tokens,
         )
-    except ClaudestructError as exc:
-        err.print(f"\n[red]{exc}[/red]")
-        sys.exit(1)
+        sink.write(event_log.agent_usage(
+            role="claudestruct",
+            provider="anthropic",
+            model=result.model,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            cache_read_tokens=result.cache_read_tokens,
+            cache_creation_tokens=result.cache_creation_tokens,
+            cost_usd=cost,
+        ))
+        if result.cache_warning:
+            sink.write(event_log.cache_warning(result.cache_warning))
+        sink.write(event_log.run_end(
+            reason=result.stop_reason or "complete",
+            duration_ms=int((time.monotonic() - started) * 1000),
+            total_cost_usd=cost,
+        ))
     console.print()
     _render_usage(result, task)
 
@@ -160,6 +208,12 @@ common_options = [
     click.option("--show-context", is_flag=True,
                  help="Print the collected context summary and exit."),
     click.option("-v", "--verbose", is_flag=True, help="Verbose logging."),
+    click.option("--log-json", type=click.Path(dir_okay=False), default=None,
+                 help="Append structured JSON-lines events (run.start, agent.usage, "
+                      "cache.warning, run.end) to this path. Stdout/Rich output unaffected."),
+    click.option("--max-bytes", type=int, default=None,
+                 help="Override the per-task context budget. Defaults: review 200k, "
+                      "dev 600k, debug 400k, plan 800k."),
 ]
 
 
@@ -179,36 +233,36 @@ def main() -> None:
 @click.argument("description", required=True)
 @click.argument("paths", nargs=-1, type=click.Path())
 @_apply_options
-def dev_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose):
+def dev_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json, max_bytes):
     _run_common("dev", description, paths, _resolve_root(root), model, max_tokens,
-                effort, dry_run, show_context, verbose)
+                effort, dry_run, show_context, verbose, log_json, max_bytes)
 
 
 @main.command("review", help="Code review on the current branch diff, or specified files.")
 @click.argument("description", required=False, default="Review the code below for bugs, security issues, and maintainability concerns.")
 @click.argument("paths", nargs=-1, type=click.Path())
 @_apply_options
-def review_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose):
+def review_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json, max_bytes):
     _run_common("review", description, paths, _resolve_root(root), model, max_tokens,
-                effort, dry_run, show_context, verbose)
+                effort, dry_run, show_context, verbose, log_json, max_bytes)
 
 
 @main.command("plan", help="Architecture / planning mode.")
 @click.argument("description", required=True)
 @click.argument("paths", nargs=-1, type=click.Path())
 @_apply_options
-def plan_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose):
+def plan_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json, max_bytes):
     _run_common("plan", description, paths, _resolve_root(root), model, max_tokens,
-                effort, dry_run, show_context, verbose)
+                effort, dry_run, show_context, verbose, log_json, max_bytes)
 
 
 @main.command("debug", help="Debug an error, anchored on a failure description.")
 @click.argument("description", required=True)
 @click.argument("paths", nargs=-1, type=click.Path())
 @_apply_options
-def debug_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose):
+def debug_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json, max_bytes):
     _run_common("debug", description, paths, _resolve_root(root), model, max_tokens,
-                effort, dry_run, show_context, verbose)
+                effort, dry_run, show_context, verbose, log_json, max_bytes)
 
 
 @main.command("tokens", help="Count tokens for a given task + context without calling Claude.")
@@ -241,6 +295,99 @@ def context_cmd(task, paths, root, raw):
         console.print(ctx.render(), markup=False, highlight=False)
     else:
         _render_context_summary(ctx)
+
+
+def _render_dashboard_table(summaries, limit: int) -> None:
+    if not summaries:
+        err.print("[dim]no runs logged yet[/dim]")
+        return
+    table = Table(title="claudestruct runs", show_header=True, header_style="bold")
+    table.add_column("started", style="cyan", no_wrap=True)
+    table.add_column("task")
+    table.add_column("model", overflow="fold")
+    table.add_column("cost", justify="right")
+    table.add_column("in", justify="right")
+    table.add_column("out", justify="right")
+    table.add_column("cacheR", justify="right")
+    table.add_column("dur", justify="right")
+    table.add_column("reason")
+    for s in summaries[-limit:]:
+        when = (s.started_at or "")[:19].replace("T", " ")
+        dur = f"{s.duration_ms/1000:.1f}s" if s.duration_ms else "—"
+        table.add_row(
+            when,
+            s.task or "—",
+            s.model or "—",
+            f"${s.cost_usd:.4f}",
+            f"{s.input_tokens:,}",
+            f"{s.output_tokens:,}",
+            f"{s.cache_read_tokens:,}",
+            dur,
+            s.reason or "—",
+        )
+    err.print(table)
+    if any(s.cache_warnings for s in summaries):
+        warned = sum(len(s.cache_warnings) for s in summaries)
+        err.print(f"[yellow]{warned} cache warnings across runs (use --json to inspect)[/yellow]")
+
+
+@main.command("dashboard", help="Print a cost / outcome table for every run logged under .claudestruct/runs/.")
+@click.option("--root", type=click.Path(exists=True, file_okay=False), default=None,
+              help="Project root (defaults to cwd).")
+@click.option("--task", type=click.Choice(list(GATHERERS)), default=None,
+              help="Filter to a single task type.")
+@click.option("--json", "as_json", is_flag=True,
+              help="Emit machine-readable JSON instead of the human table.")
+@click.option("--limit", type=int, default=20, show_default=True,
+              help="Show only the most recent N runs (table view).")
+@click.option("--watch", "watch_seconds", type=float, default=None,
+              help="Re-render every N seconds. Ctrl-C to exit. Mirrors `claw-squad dashboard --watch`.")
+def dashboard_cmd(root, task, as_json, limit, watch_seconds):
+    import time
+    resolved_root = _resolve_root(root)
+
+    def render_once():
+        summaries = dashboard.load_summaries(resolved_root)
+        if task:
+            summaries = dashboard.filter_summaries(summaries, task=task)
+        if as_json:
+            console.print(dashboard.to_json(summaries), markup=False, highlight=False)
+        else:
+            _render_dashboard_table(summaries, limit)
+
+    if watch_seconds is None:
+        render_once()
+        return
+
+    if watch_seconds < 0.2:
+        err.print("[red]--watch interval must be ≥ 0.2 seconds[/red]")
+        sys.exit(1)
+    try:
+        while True:
+            # ANSI clear + cursor home; matches claw-squad's behavior so
+            # the two tools feel uniform when watched side-by-side.
+            console.print("\x1bc", end="")
+            render_once()
+            err.print(f"[dim]watching {resolved_root}/.claudestruct/runs/  •  Ctrl-C to exit[/dim]")
+            time.sleep(watch_seconds)
+    except KeyboardInterrupt:
+        sys.exit(0)
+
+
+@main.command("metrics", help="Emit Prometheus text-format metrics aggregated from .claudestruct/runs/.")
+@click.option("--root", type=click.Path(exists=True, file_okay=False), default=None,
+              help="Project root (defaults to cwd).")
+@click.option("--out", "out_path", type=click.Path(dir_okay=False), default=None,
+              help="Write to this file instead of stdout. Useful for node_exporter's textfile collector.")
+def metrics_cmd(root, out_path):
+    summaries = dashboard.load_summaries(_resolve_root(root))
+    text = metrics.render_prometheus(summaries)
+    if out_path:
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(out_path).write_text(text, encoding="utf-8")
+        err.print(f"[dim]wrote {len(text)} bytes to {out_path}[/dim]")
+    else:
+        console.print(text, markup=False, highlight=False, end="")
 
 
 if __name__ == "__main__":

@@ -8,17 +8,24 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { SocketReplyStrategy, type SocketEventEmitter } from "../src/ui/slack-socket.js";
+import {
+  SocketReplyStrategy,
+  type ConnectionState,
+  type SocketEventEmitter,
+} from "../src/ui/slack-socket.js";
 
 function makeEmitter() {
   const messageHandlers: Array<(text: string) => void> = [];
   const buttonHandlers: Array<(promptId: string, value: string) => void> = [];
+  const stateHandlers: Array<(state: ConnectionState) => void> = [];
   const emitter: SocketEventEmitter = {
     on: ((event: string, fn: (...args: unknown[]) => void) => {
       if (event === "message") {
         messageHandlers.push(fn as (text: string) => void);
       } else if (event === "button") {
         buttonHandlers.push(fn as (promptId: string, value: string) => void);
+      } else if (event === "connectionState") {
+        stateHandlers.push(fn as (state: ConnectionState) => void);
       }
     }) as SocketEventEmitter["on"],
     disconnect: () => {
@@ -30,6 +37,8 @@ function makeEmitter() {
     fireMessage: (text: string) => messageHandlers.forEach((fn) => fn(text)),
     fireButton: (promptId: string, value: string) =>
       buttonHandlers.forEach((fn) => fn(promptId, value)),
+    fireConnection: (state: ConnectionState) =>
+      stateHandlers.forEach((fn) => fn(state)),
   };
 }
 
@@ -105,5 +114,52 @@ describe("SocketReplyStrategy", () => {
     await expect(p1).resolves.toBeUndefined();
     await expect(p2).resolves.toBeUndefined();
     await expect(s.shutdown()).resolves.toBeUndefined();
+  });
+
+  it("forwards connection state transitions to a registered listener", async () => {
+    const s = new SocketReplyStrategy({ channel: "C1" });
+    const e = makeEmitter();
+    s.attach(e.emitter);
+    const seen: ConnectionState[] = [];
+    s.onConnectionState((state) => seen.push(state));
+    // Initial replay of the latest known state ("connecting" by default).
+    expect(seen).toEqual(["connecting"]);
+    e.fireConnection("disconnected");
+    e.fireConnection("reconnecting");
+    e.fireConnection("connected");
+    expect(seen).toEqual([
+      "connecting",
+      "disconnected",
+      "reconnecting",
+      "connected",
+    ]);
+    await s.shutdown();
+  });
+
+  it("listener errors do not break the socket", async () => {
+    const s = new SocketReplyStrategy({ channel: "C1" });
+    const e = makeEmitter();
+    s.attach(e.emitter);
+    s.onConnectionState(() => {
+      throw new Error("boom");
+    });
+    expect(() => e.fireConnection("disconnected")).not.toThrow();
+    // Subsequent message delivery still works.
+    const p = s.nextReply("T1");
+    e.fireMessage("hi");
+    await expect(p).resolves.toBe("hi");
+    await s.shutdown();
+  });
+
+  it("late-bound listener gets a replay of the latest state", async () => {
+    const s = new SocketReplyStrategy({ channel: "C1" });
+    const e = makeEmitter();
+    s.attach(e.emitter);
+    e.fireConnection("disconnected");
+    e.fireConnection("connected");
+    const seen: ConnectionState[] = [];
+    s.onConnectionState((state) => seen.push(state));
+    expect(seen).toEqual(["connected"]);
+    await s.shutdown();
   });
 });

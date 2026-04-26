@@ -10,7 +10,7 @@ importers:
     dependencies:
       '@anthropic-ai/sdk':
         specifier: ^0.90.0
-        version: 0.90.0
+        version: 0.90.0(zod@3.25.76)
       '@octokit/rest':
         specifier: ^21.0.0
         version: 21.1.1
@@ -28,7 +28,7 @@ importers:
         version: 7.0.1(@types/react@19.2.14)(react@19.2.5)
       openai:
         specifier: ^6.34.0
-        version: 6.34.0(ws@8.20.0)
+        version: 6.34.0(ws@8.20.0)(zod@3.25.76)
       picocolors:
         specifier: ^1.1.1
         version: 1.1.1
@@ -47,6 +47,9 @@ importers:
       ws:
         specifier: ^8.20.0
         version: 8.20.0
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
     devDependencies:
       '@types/node':
         specifier: ^22.10.0
@@ -1210,6 +1213,9 @@ packages:
   yoga-layout@3.2.1:
     resolution: {integrity: sha512-0LPOt3AxKqMdFBZA3HBAt/t/8vIKq7VaQYbuA8WxCgung+p9TVyKRYdpvCb80HcdTN2NkbIKbhNwKUfm3tQywQ==}
 
+  zod@3.25.76:
+    resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
+
 snapshots:
 
   '@alcalzone/ansi-tokenize@0.3.0':
@@ -1217,9 +1223,11 @@ snapshots:
       ansi-styles: 6.2.3
       is-fullwidth-code-point: 5.1.0
 
-  '@anthropic-ai/sdk@0.90.0':
+  '@anthropic-ai/sdk@0.90.0(zod@3.25.76)':
     dependencies:
       json-schema-to-ts: 3.1.1
+    optionalDependencies:
+      zod: 3.25.76
 
   '@babel/runtime@7.29.2': {}
 
@@ -1928,9 +1936,10 @@ snapshots:
     dependencies:
       mimic-fn: 2.1.0
 
-  openai@6.34.0(ws@8.20.0):
+  openai@6.34.0(ws@8.20.0)(zod@3.25.76):
     optionalDependencies:
       ws: 8.20.0
+      zod: 3.25.76
 
   p-finally@1.0.0: {}
 
@@ -2173,3 +2182,5 @@ snapshots:
   ws@8.20.0: {}
 
   yoga-layout@3.2.1: {}
+
+  zod@3.25.76: {}

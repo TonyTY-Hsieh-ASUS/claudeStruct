@@ -29,6 +29,7 @@ import { runCoder } from "./agents/coder.js";
 import { runReviewer } from "./agents/reviewer.js";
 import {
   appendLesson,
+  readRelevantMemorySnippet,
   lessonFromCompletedTask,
   readMemorySnippet,
 } from "./memory/memory.js";
@@ -314,7 +315,9 @@ export async function runOrchestrator(args: {
 
   // Per-run event log. JSONL on disk; dashboard folds it back into a
   // summary. Survives crashes (append-only, no trailing bracket).
-  const runLog: RunLogHandle = startRun(config.repoRoot);
+  const runLog: RunLogHandle = startRun(config.repoRoot, {
+    mirrorPath: config.logJsonPath,
+  });
   appendEvent(runLog, {
     type: "run-start",
     ts: new Date().toISOString(),
@@ -463,7 +466,9 @@ export async function runOrchestrator(args: {
 
     ui.log(pc.cyan("\n[Planner] thinking…"));
     const memorySnippet = composePlannerSnippet({
-      memory: config.selfLearning ? readMemorySnippet(config.repoRoot) : undefined,
+      memory: config.selfLearning
+        ? readRelevantMemorySnippet(config.repoRoot, requirement)
+        : undefined,
       skillCatalog,
       subagentCatalog,
       repoCatalog,
@@ -515,7 +520,9 @@ export async function runOrchestrator(args: {
       state,
       mode: "initial",
       memorySnippet: composePlannerSnippet({
-        memory: config.selfLearning ? readMemorySnippet(config.repoRoot) : undefined,
+        memory: config.selfLearning
+        ? readRelevantMemorySnippet(config.repoRoot, requirement)
+        : undefined,
         skillCatalog,
         subagentCatalog,
         subagentAnswers: pendingSubagentAnswers,
@@ -649,7 +656,9 @@ export async function runOrchestrator(args: {
       state,
       mode: "loop",
       memorySnippet: composePlannerSnippet({
-        memory: config.selfLearning ? readMemorySnippet(config.repoRoot) : undefined,
+        memory: config.selfLearning
+        ? readRelevantMemorySnippet(config.repoRoot, requirement)
+        : undefined,
         skillCatalog,
         subagentCatalog,
         subagentAnswers: pendingSubagentAnswers,

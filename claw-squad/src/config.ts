@@ -16,6 +16,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentRole, RepoSpec, RunConfig } from "./types.js";
 import type { ProviderConfig, ProviderName } from "./providers/types.js";
+import { validateConfigFile } from "./config-schema.js";
 
 /**
  * Per-agent provider config. One entry per role; each entry is a full
@@ -242,11 +243,15 @@ export function resolveRepos(config: RunConfig): RepoSpec[] {
 function readConfigFile(path: string): ConfigFile | undefined {
   if (!existsSync(path)) return undefined;
   const raw = readFileSync(path, "utf-8");
-  let parsed: ConfigFile;
+  let parsed: unknown;
   try {
-    parsed = JSON.parse(raw) as ConfigFile;
+    parsed = JSON.parse(raw);
   } catch (err) {
     throw new Error(`failed to parse ${path}: ${(err as Error).message}`);
   }
-  return parsed;
+  // zod gates the file's *shape*: unknown fields, wrong enum values,
+  // string-vs-number mistakes get a clear `agents.planner.effort: ...`
+  // message. The merge + CLI override path below keeps its existing
+  // checks for the post-merge result.
+  return validateConfigFile(parsed, path) as ConfigFile;
 }
