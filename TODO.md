@@ -310,8 +310,26 @@ Reopen criterion: a signed enterprise contract or three serious leads asking for
 
 ---
 
+## Post-roadmap PRs (selected from R/F candidate list)
+
+- [~] **R2 + F1 + F8 — orchestrator integration test, MCP server, cross-tool dashboard**
+  - **R2** orchestrator integration test: `claw-squad/tests/orchestrator-integration.test.ts` covers Phase 1 → Phase 3 with scripted MockProvider per role on a real tmp git repo. Three scenarios: happy path (`reason=complete`), maxReviewRounds rollback (`rolledBack=true` + branch reverted), maxCostUsd abort (`reason=aborted` + snapshot persisted). Unblocks future orchestrator refactors.
+  - **F1** MCP server (`cs mcp`): exposes the four task modes plus dashboard + metrics as MCP tools so Claude Code can call claudestruct directly. New `mcp_handlers.py` (pure dict-in/dict-out), `mcp_server.py` (stdio bootstrap with lazy SDK import), `pyproject.toml` adds `mcp>=1.0.0`. `CLAUDE.md` documents the `.mcp.json` config snippet.
+  - **F1 prep**: extracted `run_task_and_log` from `cli._run_common` into `runner.py` so CLI + MCP share one business-logic path. Pure refactor, behavior unchanged.
+  - **F8** cross-tool dashboard (`cs dashboard --include-claw-squad`): folds `.claw-squad/runs/*.jsonl` into the same `RunSummary` table with a `tool` column. Schema parity from W2.1 made the mapping cheap.
+
+### Verification
+| Suite | Result |
+|---|---|
+| `pytest tests/` (Python) | 78 passed (+16 new: 9 MCP handlers + 7 cross-tool dashboard) |
+| `npx vitest run` (claw-squad) | 257 passed (25 files; +3 new orchestrator-integration scenarios) |
+| `npx tsc --noEmit` | clean |
+
+---
+
 ## Last Update
 
+- 2026-04-26 — R2 + F1 + F8 ready for PR push (post-roadmap selection from R/F candidate list).
 - 2026-04-26 — Wave 4 in flight on PR [#17](https://github.com/tonyandclaw/claudeStruct/pull/17):
   - W4.1 ✅ CI matrix landed
   - W4.2 ~ governance docs (LICENSE, CHANGELOG, CONTRIBUTING, SECURITY); CODE_OF_CONDUCT.md deferred (the standard Contributor Covenant 2.1 text trips Anthropic's output-content filter when generated inline; will be added manually from the upstream copy)
