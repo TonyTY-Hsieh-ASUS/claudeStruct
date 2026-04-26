@@ -14,11 +14,12 @@ fields); the server bootstrap maps them to MCP-level error responses.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from claudestruct import dashboard, metrics
-from claudestruct.client import ClaudestructError, DEFAULT_MAX_TOKENS, DEFAULT_MODEL
+from claudestruct.client import DEFAULT_MAX_TOKENS, DEFAULT_MODEL, ClaudestructError
 from claudestruct.context import (
     gather_debug_context,
     gather_dev_context,
@@ -26,7 +27,6 @@ from claudestruct.context import (
     gather_review_context,
 )
 from claudestruct.runner import run_task_and_log
-
 
 _GATHERERS: dict[str, Callable] = {
     "dev": gather_dev_context,

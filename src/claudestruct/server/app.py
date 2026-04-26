@@ -17,9 +17,17 @@ from claudestruct import __version__
 from claudestruct.server.db import init_db, make_engine, make_session_factory
 from claudestruct.server.routers import (
     budget as budget_router,
+)
+from claudestruct.server.routers import (
     dashboard as dashboard_router,
+)
+from claudestruct.server.routers import (
     health as health_router,
+)
+from claudestruct.server.routers import (
     keys as keys_router,
+)
+from claudestruct.server.routers import (
     runs as runs_router,
 )
 

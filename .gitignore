@@ -25,3 +25,4 @@ claw-squad/dist/
 .claw-squad/runs/
 .claw-squad/memory/
 site/
+.coverage

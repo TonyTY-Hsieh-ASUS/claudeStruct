@@ -22,7 +22,6 @@ from claudestruct.server.schema import (
     RunDetail,
 )
 
-
 router = APIRouter(prefix="/v1/runs", tags=["runs"])
 
 

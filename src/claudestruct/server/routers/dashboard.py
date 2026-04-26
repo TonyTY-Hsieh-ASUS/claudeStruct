@@ -11,7 +11,6 @@ from claudestruct.server import auth as auth_mod
 from claudestruct.server.models import Role
 from claudestruct.server.schema import DashboardResponse, RunRow
 
-
 router = APIRouter(prefix="/v1", tags=["dashboard"])
 
 

@@ -7,8 +7,6 @@ collapse them back to a single global default.
 """
 from __future__ import annotations
 
-import pytest
-
 from claudestruct.context import (
     BUDGETS_PER_TASK,
     DEFAULT_MAX_TOTAL_BYTES,
@@ -42,4 +40,4 @@ def test_default_matches_dev_budget():
     """The legacy DEFAULT_MAX_TOTAL_BYTES is now an alias for the dev
     budget — anything else would silently shift behavior for callers
     relying on the historical 600k cap."""
-    assert DEFAULT_MAX_TOTAL_BYTES == BUDGETS_PER_TASK["dev"]
+    assert BUDGETS_PER_TASK["dev"] == DEFAULT_MAX_TOTAL_BYTES

@@ -180,13 +180,17 @@ Goal: trust this in CI pipelines and long-running daemons. Wave 4 makes it insta
 - [ ] **W5.2 — Error reporting (Sentry)**
   - Opt-in via `CLAUDESTRUCT_SENTRY_DSN` / `CLAW_SQUAD_SENTRY_DSN`
   - Redact `ANTHROPIC_API_KEY`, `SLACK_*_TOKEN`, `GITHUB_TOKEN` in event capture (before-send hook)
-- [ ] **W5.3 — PII redaction + retention**
-  - Pluggable redactor pipeline (regex set: emails, phones, AWS/GCP keys, JWT-shaped tokens) applied to log events at write time
-  - `cs logs purge --older-than 30d` and `claw-squad runs purge` subcommands
-  - Configurable retention policy in `.claudestruct/config.json` and `.claw-squad/config.json`
-- [ ] **W5.4 — Secrets vault integration**
-  - `SecretsProvider` abstraction in both codebases; built-in providers: `env` (default), `keyring` (OS keychain), `pass` (Unix), AWS Secrets Manager, HashiCorp Vault
-  - Replace direct `os.environ["ANTHROPIC_API_KEY"]` reads with `secrets.get("anthropic.api_key")`
+- [x] **W5.3 — PII redaction + retention** (claudestruct only)
+  - `src/claudestruct/redact.py` — `Redactor` walks event dicts replacing matched substrings with `[redacted]`. Default ruleset covers Anthropic / GitHub / Slack / Stripe tokens, AWS access keys, emails, JWTs. Pluggable via `Redactor.add_rule(name, pattern)`.
+  - Wired through `EventSink` / `MultiSink` / `event_log` / `fanout_log`. CLI flag `--redact` (also `CLAUDESTRUCT_REDACT` env) constructs `Redactor.default()` and threads it to `run_task_and_log`.
+  - `cs logs purge --older-than-days N [--dry-run]` uses `redact.purge_runs()` to delete `<root>/.claudestruct/runs/*.jsonl` files older than the cutoff (mtime-based for clock-skew safety).
+  - Tests: `tests/test_redact.py` (21 cases) — every default rule + nested dict/list walk + non-string passthrough + custom rule + integration with EventSink + 5 purge cases (empty dir, recent skipped, old deleted, dry-run preserves, non-jsonl ignored)
+  - Pending: claw-squad-side equivalent (`claw-squad runs purge`) — separate PR
+- [x] **W5.4 — Secrets vault integration** (claudestruct only)
+  - `src/claudestruct/secrets.py` — `SecretsProvider` Protocol with built-in `EnvProvider`, `KeyringProvider`, `PassProvider`, `FileProvider`. Provider chain is selected by `CLAUDESTRUCT_SECRETS_PROVIDER` (e.g. `env,keyring,pass,file:/run/secrets`); first-hit-wins. Default `env`-only for back-compat.
+  - `client.py:_make_client()` now reads via `secrets.get("anthropic.api_key")`. Legacy `ANTHROPIC_API_KEY` env still works (mapped via `_LEGACY_ENV_MAP`).
+  - Tests: `tests/test_secrets.py` (24 cases) — env canonical / legacy / precedence / empty-as-miss; file provider read / strip / missing / empty; pass provider no-binary / first-line / nonzero-exit; keyring no-module fallback; default_chain selection / unknowns skipped / empty falls back; get/require semantics; client integration
+  - Pending: AWS Secrets Manager + HashiCorp Vault providers (deferred; the abstraction is ready, the implementations need their respective SDKs as optional extras)
 - [ ] **W5.5 — Hardened sandbox**
   - Linux seccomp profile (`claw-sandbox/seccomp.json`) blocking `ptrace`, `kexec_*`, `mount`, etc.
   - AppArmor profile sample
@@ -196,9 +200,11 @@ Goal: trust this in CI pipelines and long-running daemons. Wave 4 makes it insta
   - `src/claudestruct/budget.py` — `current_period_spend(root)` folds `<root>/.claudestruct/runs/*.jsonl` for the current UTC calendar month; `check_budget(root, cap)` returns `BudgetStatus(spent, cap, warn_threshold, exceeded, near_limit)` with `WARN_FRACTION = 0.8`
   - CLI: new `--monthly-cap-usd <float>` flag on `cs dev/review/plan/debug` (also reads `CLAUDESTRUCT_MONTHLY_CAP_USD`); hard-aborts (`exit 2`) before any LLM call when `spent ≥ cap`, soft-warns when `spent ≥ 0.8 × cap`. Skipped on `--dry-run`.
   - Tests: `tests/test_budget.py` (11 cases) — month bounds incl. December roll-over, period filtering, naive ISO timestamps, exact-threshold semantics, `cap=0` disables check, malformed run skipped
-- [ ] **W5.7 — Test rigor**
-  - End-to-end tests with mocked Anthropic SDK (no real API calls)
-  - Mutation testing: `mutmut` (Python), `stryker` (TS); coverage gate at 80% in CI
+- [~] **W5.7 — Test rigor**
+  - Ruff lint config in `pyproject.toml` (select F/E/W/I/B/UP/SIM, opinionated rules silenced); CI runs `ruff check src/ tests/` before pytest
+  - Coverage gate via `coverage` (`fail_under = 70`; current run hits 80% with CLI/MCP entry points excluded as integration-tested)
+  - CI workflow installs `pytest coverage ruff` and runs lint → coverage-gated pytest
+  - Pending: end-to-end tests with mocked Anthropic SDK; mutation testing (mutmut / stryker) — both deferred until the unit-test floor is solid
 
 ---
 

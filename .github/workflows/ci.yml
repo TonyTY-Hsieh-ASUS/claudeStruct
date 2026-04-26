@@ -34,9 +34,13 @@ jobs:
           # module actually runs in CI (it pytest.importorskips out
           # otherwise). Lean-install verification is a separate concern.
           python -m pip install -e '.[server]'
-          python -m pip install pytest
-      - name: Run pytest
-        run: python -m pytest tests/
+          python -m pip install pytest coverage ruff
+      - name: Lint (ruff)
+        run: ruff check src/ tests/
+      - name: Run pytest with coverage gate
+        run: |
+          python -m coverage run -m pytest tests/
+          python -m coverage report
 
   typescript:
     name: TypeScript / Node ${{ matrix.node-version }}

@@ -11,21 +11,22 @@ Subcommands:
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 import click
 from rich.console import Console
 from rich.table import Table
 
-from claudestruct import __version__
+from claudestruct import __version__, dashboard, metrics
+from claudestruct import budget as budget_mod
+from claudestruct import redact as redact_mod
 from claudestruct.client import (
     DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL,
     ClaudestructError,
     build_user_message,
     count_tokens,
-    run_task,
 )
 from claudestruct.context import (
     BUDGETS_PER_TASK,
@@ -34,9 +35,6 @@ from claudestruct.context import (
     gather_plan_context,
     gather_review_context,
 )
-from claudestruct import budget as budget_mod
-from claudestruct import dashboard
-from claudestruct import metrics
 from claudestruct.prompts import TASK_PROMPT_VERSIONS
 from claudestruct.runner import run_task_and_log
 
@@ -105,8 +103,8 @@ def _run_common(
     log_json: str | None,
     max_bytes: int | None,
     monthly_cap_usd: float | None,
+    redact: bool,
 ) -> None:
-    import time
 
     if monthly_cap_usd is not None and monthly_cap_usd > 0 and not dry_run:
         status = budget_mod.check_budget(root, monthly_cap_usd)
@@ -172,6 +170,7 @@ def _run_common(
             max_bytes=max_bytes,
             log_json=log_json,
             on_chunk=on_chunk,
+            redactor=redact_mod.Redactor.default() if redact else None,
         )
     except ClaudestructError as exc:
         err.print(f"\n[red]{exc}[/red]")
@@ -206,6 +205,11 @@ common_options = [
                       "Computed from <root>/.claudestruct/runs/*.jsonl. Hard-aborts "
                       "before the LLM call if exceeded; warns at 80% of cap. "
                       "Reads CLAUDESTRUCT_MONTHLY_CAP_USD by default."),
+    click.option("--redact", is_flag=True,
+                 envvar="CLAUDESTRUCT_REDACT",
+                 help="Strip emails / API keys / JWTs from JSONL run logs before "
+                      "they hit disk. Reads CLAUDESTRUCT_REDACT to default-on for "
+                      "shared environments."),
 ]
 
 
@@ -239,36 +243,36 @@ except ImportError:
 @click.argument("description", required=True)
 @click.argument("paths", nargs=-1, type=click.Path())
 @_apply_options
-def dev_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd):
+def dev_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact):
     _run_common("dev", description, paths, _resolve_root(root), model, max_tokens,
-                effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd)
+                effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact)
 
 
 @main.command("review", help="Code review on the current branch diff, or specified files.")
 @click.argument("description", required=False, default="Review the code below for bugs, security issues, and maintainability concerns.")
 @click.argument("paths", nargs=-1, type=click.Path())
 @_apply_options
-def review_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd):
+def review_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact):
     _run_common("review", description, paths, _resolve_root(root), model, max_tokens,
-                effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd)
+                effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact)
 
 
 @main.command("plan", help="Architecture / planning mode.")
 @click.argument("description", required=True)
 @click.argument("paths", nargs=-1, type=click.Path())
 @_apply_options
-def plan_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd):
+def plan_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact):
     _run_common("plan", description, paths, _resolve_root(root), model, max_tokens,
-                effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd)
+                effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact)
 
 
 @main.command("debug", help="Debug an error, anchored on a failure description.")
 @click.argument("description", required=True)
 @click.argument("paths", nargs=-1, type=click.Path())
 @_apply_options
-def debug_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd):
+def debug_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact):
     _run_common("debug", description, paths, _resolve_root(root), model, max_tokens,
-                effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd)
+                effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact)
 
 
 @main.command("tokens", help="Count tokens for a given task + context without calling Claude.")
@@ -416,6 +420,36 @@ def mcp_cmd():
     except ClaudestructError as exc:
         err.print(f"[red]{exc}[/red]")
         sys.exit(1)
+
+
+@main.group("logs", help="Inspect / manage the per-run JSONL logs.")
+def logs_group():
+    pass
+
+
+@logs_group.command("purge", help="Delete run-log files older than --older-than-days.")
+@click.option("--root", type=click.Path(exists=True, file_okay=False), default=None,
+              help="Project root (defaults to cwd).")
+@click.option("--older-than-days", type=int, required=True,
+              help="Delete files whose mtime is older than this many days.")
+@click.option("--dry-run", is_flag=True,
+              help="List the files that would be deleted; don't touch them.")
+def logs_purge_cmd(root, older_than_days, dry_run):
+    from datetime import timedelta
+
+    target = _resolve_root(root)
+    victims = redact_mod.purge_runs(
+        target,
+        older_than=timedelta(days=older_than_days),
+        dry_run=dry_run,
+    )
+    if not victims:
+        err.print("[dim]No run logs older than the cutoff.[/dim]")
+        return
+    verb = "Would delete" if dry_run else "Deleted"
+    err.print(f"[bold]{verb} {len(victims)} file(s):[/bold]")
+    for p in victims:
+        err.print(f"  {p}")
 
 
 if __name__ == "__main__":

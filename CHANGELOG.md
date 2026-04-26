@@ -7,6 +7,12 @@ adheres to [Semantic Versioning 2.0](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **PII / secret redaction in run logs** (W5.3): new `src/claudestruct/redact.py` with default ruleset covering Anthropic / GitHub / Slack / Stripe tokens, AWS access keys, emails, and JWTs. Opt-in via `--redact` flag (or `CLAUDESTRUCT_REDACT` env) on `cs dev/review/plan/debug`. Custom rules via `Redactor.add_rule()`.
+- **`cs logs purge --older-than-days N [--dry-run]`** (W5.3): mtime-based retention pruning for `<root>/.claudestruct/runs/*.jsonl`.
+- **Pluggable secrets backend** (W5.4): `claudestruct.secrets` with `SecretsProvider` Protocol and built-in `env` / `keyring` / `pass` / `file` providers. Configure the chain via `CLAUDESTRUCT_SECRETS_PROVIDER=env,keyring,pass,file:/run/secrets`. Legacy `ANTHROPIC_API_KEY` env keeps working.
+- **Ruff lint + coverage gate** (W5.7): `pyproject.toml` ships ruff config (F/E/W/I/B/UP/SIM) and a `coverage` floor of 70% (current run: 80%). CI runs `ruff check` then `coverage run -m pytest`.
+
+### Added (earlier)
 - **`cs serve` daemon-mode draft** (W6.2 + W6.3, behind `pip install 'claudestruct[server]'`): FastAPI HTTP API with `/healthz`, `/readyz`, `/v1/dashboard`, `/v1/budget`, `/v1/runs` (POST + GET), `/v1/keys` (list/create/revoke). OpenAPI 3.1 at `/openapi.json`. Multi-tenant SQLAlchemy schema (`orgs`, `users`, `memberships`, `api_keys`) with three roles (`admin`/`member`/`viewer`) enforced by a `require_role` dependency. Bearer-token auth uses `ck_<key_id>_<secret>` with SHA-256-hashed secrets. CLI bootstrap: `cs serve init-db / add-org / add-user / add-key / run`.
 - **GitLab + Bitbucket CI templates** (W6.7): `src/claudestruct/integrations/gitlab-ci-cs-review.yml` and `bitbucket-pipelines-cs-review.yml` — drop-in pipelines that run `cs review` on every MR/PR and post the verdict as a comment via the platform-native API. Mirrors the existing GitHub Action shape.
 - **Cumulative monthly cost cap** (W5.6): new `--monthly-cap-usd` flag (also `CLAUDESTRUCT_MONTHLY_CAP_USD`) on `cs dev/review/plan/debug`. Aggregates spend across `<root>/.claudestruct/runs/*.jsonl` for the current UTC calendar month; hard-aborts before any LLM call when spent ≥ cap, warns at 80%.

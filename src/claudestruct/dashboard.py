@@ -12,10 +12,10 @@ and that's locked by the structured logging tests on each side.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Iterator
 
 
 @dataclass
