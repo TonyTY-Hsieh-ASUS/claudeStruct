@@ -289,12 +289,15 @@ def context_cmd(task, paths, root, raw):
         _render_context_summary(ctx)
 
 
-def _render_dashboard_table(summaries, limit: int) -> None:
+def _render_dashboard_table(summaries, limit: int, show_tool: bool = False) -> None:
     if not summaries:
         err.print("[dim]no runs logged yet[/dim]")
         return
-    table = Table(title="claudestruct runs", show_header=True, header_style="bold")
+    title = "claudestruct + claw-squad runs" if show_tool else "claudestruct runs"
+    table = Table(title=title, show_header=True, header_style="bold")
     table.add_column("started", style="cyan", no_wrap=True)
+    if show_tool:
+        table.add_column("tool", style="magenta", no_wrap=True)
     table.add_column("task")
     table.add_column("model", overflow="fold")
     table.add_column("cost", justify="right")
@@ -306,8 +309,9 @@ def _render_dashboard_table(summaries, limit: int) -> None:
     for s in summaries[-limit:]:
         when = (s.started_at or "")[:19].replace("T", " ")
         dur = f"{s.duration_ms/1000:.1f}s" if s.duration_ms else "—"
-        table.add_row(
+        row = [
             when,
+            *([s.tool] if show_tool else []),
             s.task or "—",
             s.model or "—",
             f"${s.cost_usd:.4f}",
@@ -316,7 +320,8 @@ def _render_dashboard_table(summaries, limit: int) -> None:
             f"{s.cache_read_tokens:,}",
             dur,
             s.reason or "—",
-        )
+        ]
+        table.add_row(*row)
     err.print(table)
     if any(s.cache_warnings for s in summaries):
         warned = sum(len(s.cache_warnings) for s in summaries)
@@ -334,18 +339,24 @@ def _render_dashboard_table(summaries, limit: int) -> None:
               help="Show only the most recent N runs (table view).")
 @click.option("--watch", "watch_seconds", type=float, default=None,
               help="Re-render every N seconds. Ctrl-C to exit. Mirrors `claw-squad dashboard --watch`.")
-def dashboard_cmd(root, task, as_json, limit, watch_seconds):
+@click.option("--include-claw-squad", is_flag=True,
+              help="Also fold .claw-squad/runs/*.jsonl into the table (single pane for "
+                   "teams running both tools). Adds a `tool` column.")
+def dashboard_cmd(root, task, as_json, limit, watch_seconds, include_claw_squad):
     import time
     resolved_root = _resolve_root(root)
 
     def render_once():
-        summaries = dashboard.load_summaries(resolved_root)
+        if include_claw_squad:
+            summaries = dashboard.load_summaries_with_claw_squad(resolved_root)
+        else:
+            summaries = dashboard.load_summaries(resolved_root)
         if task:
             summaries = dashboard.filter_summaries(summaries, task=task)
         if as_json:
             console.print(dashboard.to_json(summaries), markup=False, highlight=False)
         else:
-            _render_dashboard_table(summaries, limit)
+            _render_dashboard_table(summaries, limit, show_tool=include_claw_squad)
 
     if watch_seconds is None:
         render_once()
@@ -360,7 +371,7 @@ def dashboard_cmd(root, task, as_json, limit, watch_seconds):
             # the two tools feel uniform when watched side-by-side.
             console.print("\x1bc", end="")
             render_once()
-            err.print(f"[dim]watching {resolved_root}/.claudestruct/runs/  •  Ctrl-C to exit[/dim]")
+            err.print(f"[dim]watching {resolved_root}/  •  Ctrl-C to exit[/dim]")
             time.sleep(watch_seconds)
     except KeyboardInterrupt:
         sys.exit(0)
