@@ -11,7 +11,7 @@ The repo holds three binaries that share conventions but build independently:
 - `claw-squad/` — TypeScript orchestrator (`claw-squad`).
 - `claw-sandbox/` — Go sandbox wrapper.
 
-See [`CLAUDE.md`](CLAUDE.md) for the cross-cutting conventions (prompt caching
+See [`CLAUDE.md`](https://github.com/tonyandclaw/claudeStruct/blob/main/CLAUDE.md) for the cross-cutting conventions (prompt caching
 discipline, structured logging schema, configuration files).
 
 ## Development setup
@@ -63,10 +63,10 @@ with reproduction steps, expected vs actual behavior, and environment details
 (OS, Python/Node/Go versions, claudeStruct version). Redact any API keys before
 pasting logs.
 
-For security-sensitive reports, follow [`SECURITY.md`](SECURITY.md) instead of
+For security-sensitive reports, follow [`SECURITY.md`](https://github.com/tonyandclaw/claudeStruct/blob/main/SECURITY.md) instead of
 filing a public issue.
 
 ## Code of conduct
 
-Participation is governed by [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md). Be
+Participation is governed by [`CODE_OF_CONDUCT.md`](https://github.com/tonyandclaw/claudeStruct/blob/main/CODE_OF_CONDUCT.md). Be
 kind. Critique code, not people.

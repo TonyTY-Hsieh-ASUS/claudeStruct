@@ -1,6 +1,6 @@
 # claudeStruct Roadmap TODO
 
-Tracks progress against the [improve-crispy-moore roadmap](~/.claude/plans/improve-crispy-moore.md). Updated on every PR push.
+Tracks the wave-by-wave roadmap. Updated on every PR push.
 
 Legend: `[ ]` pending · `[~]` in progress · `[x]` done
 
@@ -141,27 +141,31 @@ The 1-3 roadmap is closed. Wave 4-8 below tracks the path to a "complete and com
 
 Goal: anyone can `pip install claudestruct` / `npm install claw-squad` / `docker run` and get a working, trustworthy tool. Today everything ships unsigned, untested-by-CI, undocumented past `claw-squad/docs/`.
 
-- [~] **W4.1 — GitHub Actions CI matrix**
-  - `.github/workflows/ci.yml` — pytest (3.10/3.11/3.12/3.13), vitest + tsc (Node 20/22), go test (1.22), ruff lint
-  - Required check on every PR; cache pip/pnpm/go modules across runs
+- [x] **W4.1 — GitHub Actions CI matrix**
+  - `.github/workflows/ci.yml` — pytest (3.10/3.11/3.12/3.13), vitest + tsc (Node 20/22), go test + go vet (1.22)
+  - Concurrency group cancels superseded runs; pip/pnpm caches keyed off lockfiles
+  - ruff lint deferred (pyproject.toml has no ruff config yet; tracked under W5)
 - [~] **W4.2 — License + governance files**
   - `LICENSE` (MIT, matches `pyproject.toml` declared license) at repo root
-  - `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1), `SECURITY.md` (vuln disclosure)
+  - `CONTRIBUTING.md`, `SECURITY.md` (vuln disclosure)
   - `CHANGELOG.md` (keepachangelog 1.1 format) seeded with Waves 1-3 history
+  - `CODE_OF_CONDUCT.md` deferred — see note below
 - [ ] **W4.3 — Release automation**
   - `.github/workflows/release.yml` — on tag `v*.*.*`: PyPI publish (trusted publishing/OIDC, no API token), npm publish for `claw-squad`, GitHub Release with cross-compiled `claw-sandbox` binaries (linux-amd64/arm64, darwin-amd64/arm64) + Sigstore provenance
   - `release-please` or `cz-cli` for conventional-commit-driven version bumps
-- [~] **W4.4 — Container distribution**
-  - Multi-stage `Dockerfile` (python-slim base, builds Go binary, copies TS dist) → `ghcr.io/tonyandclaw/claudestruct:latest`
-  - GitHub Action publishes on tag + on main; SBOM via `syft`, vuln scan via `trivy`
-- [ ] **W4.5 — Docs site**
-  - mkdocs-material wraps existing `CLAUDE.md` + `claw-squad/docs/*.md` + `README.md`
-  - Hosted on GitHub Pages (`docs.claudestruct.dev` placeholder); navigation tree, search, dark mode
-  - `mkdocs.yml` + `.github/workflows/docs.yml` for auto-deploy on main
-- [ ] **W4.6 — README polish + demo**
-  - Badges: CI, PyPI, npm, license, docker pulls
-  - Asciinema recording of `cs dev` and `claw-squad run` in action
-  - Per-platform install: macOS (brew tap placeholder), Linux (curl-pipe-sh installer), Windows (scoop), Docker
+  - Defers until repo-level PyPI / npm / GHCR trusted-publishing config is in place (manual step on the org settings)
+- [x] **W4.4 — Container distribution**
+  - Multi-stage `Dockerfile` (python-slim base, Go builder for sandbox, Node builder for claw-squad) → `ghcr.io/tonyandclaw/claudestruct:latest`
+  - `.github/workflows/docker.yml` builds on every PR (verifies the Dockerfile) and pushes to GHCR on push to main + on tag, with PR/branch/sha tags via `docker/metadata-action`
+  - SBOM (syft) + vuln scan (trivy) deferred to a follow-up PR alongside W4.3
+- [x] **W4.5 — Docs site**
+  - mkdocs-material wraps `claw-squad/docs/*.md` + the root README/CHANGELOG/CONTRIBUTING/SECURITY/TODO via `mkdocs-include-markdown-plugin` (single source of truth, no duplicated content)
+  - `.github/workflows/docs.yml` builds on every PR (`mkdocs build --strict`) and deploys to GitHub Pages on push to main via `actions/deploy-pages@v4`
+  - GH Pages must be enabled at the repo level (manual step) for the deploy job to land; build job runs unconditionally
+- [~] **W4.6 — README polish + demo**
+  - CI / Docs / License / Container badges added to the README header
+  - Asciinema recording of `cs dev` and `claw-squad run` in action — pending (needs an env with API key)
+  - Per-platform install (Homebrew, scoop, snap) tracked under W7.7
 
 ---
 
@@ -307,4 +311,10 @@ Reopen criterion: a signed enterprise contract or three serious leads asking for
 
 ## Last Update
 
-- 2026-04-25 — Waves 1-3 closed (PRs #11, #13, #14, #15, #16 merged). Wave 4-8 commercialization roadmap added. Wave 4 starter PR in flight (CI, license, governance, Dockerfile).
+- 2026-04-26 — Wave 4 in flight on PR [#17](https://github.com/tonyandclaw/claudeStruct/pull/17):
+  - W4.1 ✅ CI matrix landed
+  - W4.2 ~ governance docs (LICENSE, CHANGELOG, CONTRIBUTING, SECURITY); CODE_OF_CONDUCT.md deferred (the standard Contributor Covenant 2.1 text trips Anthropic's output-content filter when generated inline; will be added manually from the upstream copy)
+  - W4.4 ✅ Dockerfile + GHCR publish workflow
+  - W4.5 ✅ mkdocs-material site + GH Pages deploy workflow
+  - W4.6 ~ README badges in; asciinema recording pending
+- 2026-04-25 — Waves 1-3 closed (PRs #11, #13, #14, #15, #16 merged). Wave 4-8 commercialization roadmap added.
