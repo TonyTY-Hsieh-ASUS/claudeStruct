@@ -7,6 +7,7 @@ adheres to [Semantic Versioning 2.0](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Cumulative monthly cost cap** (W5.6): new `--monthly-cap-usd` flag (also `CLAUDESTRUCT_MONTHLY_CAP_USD`) on `cs dev/review/plan/debug`. Aggregates spend across `<root>/.claudestruct/runs/*.jsonl` for the current UTC calendar month; hard-aborts before any LLM call when spent ≥ cap, warns at 80%.
 - Top-level `LICENSE` (MIT), `CHANGELOG.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`.
 - GitHub Actions CI matrix (`.github/workflows/ci.yml`) covering Python 3.10–3.13, Node 20/22, and Go 1.22.
 - Multi-stage `Dockerfile` producing a single image with all three binaries (`cs`, `claw-squad`, `claw-sandbox`).
