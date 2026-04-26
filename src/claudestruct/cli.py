@@ -35,11 +35,10 @@ from claudestruct.context import (
     gather_review_context,
 )
 from claudestruct import budget as budget_mod
-from claudestruct.cost import estimate_cost_usd
 from claudestruct import dashboard
-from claudestruct import logging as event_log
 from claudestruct import metrics
 from claudestruct.prompts import TASK_PROMPT_VERSIONS
+from claudestruct.runner import run_task_and_log
 
 console = Console()
 err = Console(stderr=True)
@@ -160,58 +159,25 @@ def _run_common(
     def on_chunk(text: str) -> None:
         console.print(text, end="", markup=False, highlight=False)
 
-    started = time.monotonic()
-    auto_path = dashboard.auto_log_path(root)
-    with event_log.fanout_log([str(auto_path), log_json]) as sink:
-        sink.write(event_log.run_start(
+    try:
+        outcome = run_task_and_log(
             task=task,
+            description=description,
+            paths=explicit,
+            root=root,
+            gatherer=gatherer,
             model=model,
+            max_tokens=max_tokens,
             effort=effort,
-            prompt_version=TASK_PROMPT_VERSIONS.get(task),
-        ))
-        try:
-            result = run_task(
-                task,
-                user_msg,
-                model=model,
-                max_tokens=max_tokens,
-                effort=effort,
-                stream_callback=on_chunk,
-            )
-        except ClaudestructError as exc:
-            err.print(f"\n[red]{exc}[/red]")
-            sink.write(event_log.run_end(
-                reason="error",
-                duration_ms=int((time.monotonic() - started) * 1000),
-                total_cost_usd=0.0,
-            ))
-            sys.exit(1)
-        cost = estimate_cost_usd(
-            model=result.model,
-            input_tokens=result.input_tokens,
-            output_tokens=result.output_tokens,
-            cache_read_tokens=result.cache_read_tokens,
-            cache_creation_tokens=result.cache_creation_tokens,
+            max_bytes=max_bytes,
+            log_json=log_json,
+            on_chunk=on_chunk,
         )
-        sink.write(event_log.agent_usage(
-            role="claudestruct",
-            provider="anthropic",
-            model=result.model,
-            input_tokens=result.input_tokens,
-            output_tokens=result.output_tokens,
-            cache_read_tokens=result.cache_read_tokens,
-            cache_creation_tokens=result.cache_creation_tokens,
-            cost_usd=cost,
-        ))
-        if result.cache_warning:
-            sink.write(event_log.cache_warning(result.cache_warning))
-        sink.write(event_log.run_end(
-            reason=result.stop_reason or "complete",
-            duration_ms=int((time.monotonic() - started) * 1000),
-            total_cost_usd=cost,
-        ))
+    except ClaudestructError as exc:
+        err.print(f"\n[red]{exc}[/red]")
+        sys.exit(1)
     console.print()
-    _render_usage(result, task)
+    _render_usage(outcome.result, task)
 
 
 common_options = [
@@ -323,12 +289,15 @@ def context_cmd(task, paths, root, raw):
         _render_context_summary(ctx)
 
 
-def _render_dashboard_table(summaries, limit: int) -> None:
+def _render_dashboard_table(summaries, limit: int, show_tool: bool = False) -> None:
     if not summaries:
         err.print("[dim]no runs logged yet[/dim]")
         return
-    table = Table(title="claudestruct runs", show_header=True, header_style="bold")
+    title = "claudestruct + claw-squad runs" if show_tool else "claudestruct runs"
+    table = Table(title=title, show_header=True, header_style="bold")
     table.add_column("started", style="cyan", no_wrap=True)
+    if show_tool:
+        table.add_column("tool", style="magenta", no_wrap=True)
     table.add_column("task")
     table.add_column("model", overflow="fold")
     table.add_column("cost", justify="right")
@@ -340,8 +309,9 @@ def _render_dashboard_table(summaries, limit: int) -> None:
     for s in summaries[-limit:]:
         when = (s.started_at or "")[:19].replace("T", " ")
         dur = f"{s.duration_ms/1000:.1f}s" if s.duration_ms else "—"
-        table.add_row(
+        row = [
             when,
+            *([s.tool] if show_tool else []),
             s.task or "—",
             s.model or "—",
             f"${s.cost_usd:.4f}",
@@ -350,7 +320,8 @@ def _render_dashboard_table(summaries, limit: int) -> None:
             f"{s.cache_read_tokens:,}",
             dur,
             s.reason or "—",
-        )
+        ]
+        table.add_row(*row)
     err.print(table)
     if any(s.cache_warnings for s in summaries):
         warned = sum(len(s.cache_warnings) for s in summaries)
@@ -368,18 +339,24 @@ def _render_dashboard_table(summaries, limit: int) -> None:
               help="Show only the most recent N runs (table view).")
 @click.option("--watch", "watch_seconds", type=float, default=None,
               help="Re-render every N seconds. Ctrl-C to exit. Mirrors `claw-squad dashboard --watch`.")
-def dashboard_cmd(root, task, as_json, limit, watch_seconds):
+@click.option("--include-claw-squad", is_flag=True,
+              help="Also fold .claw-squad/runs/*.jsonl into the table (single pane for "
+                   "teams running both tools). Adds a `tool` column.")
+def dashboard_cmd(root, task, as_json, limit, watch_seconds, include_claw_squad):
     import time
     resolved_root = _resolve_root(root)
 
     def render_once():
-        summaries = dashboard.load_summaries(resolved_root)
+        if include_claw_squad:
+            summaries = dashboard.load_summaries_with_claw_squad(resolved_root)
+        else:
+            summaries = dashboard.load_summaries(resolved_root)
         if task:
             summaries = dashboard.filter_summaries(summaries, task=task)
         if as_json:
             console.print(dashboard.to_json(summaries), markup=False, highlight=False)
         else:
-            _render_dashboard_table(summaries, limit)
+            _render_dashboard_table(summaries, limit, show_tool=include_claw_squad)
 
     if watch_seconds is None:
         render_once()
@@ -394,7 +371,7 @@ def dashboard_cmd(root, task, as_json, limit, watch_seconds):
             # the two tools feel uniform when watched side-by-side.
             console.print("\x1bc", end="")
             render_once()
-            err.print(f"[dim]watching {resolved_root}/.claudestruct/runs/  •  Ctrl-C to exit[/dim]")
+            err.print(f"[dim]watching {resolved_root}/  •  Ctrl-C to exit[/dim]")
             time.sleep(watch_seconds)
     except KeyboardInterrupt:
         sys.exit(0)
@@ -414,6 +391,17 @@ def metrics_cmd(root, out_path):
         err.print(f"[dim]wrote {len(text)} bytes to {out_path}[/dim]")
     else:
         console.print(text, markup=False, highlight=False, end="")
+
+
+@main.command("mcp", help="Start the claudestruct MCP server over stdio. Wire into Claude Code via .mcp config.")
+def mcp_cmd():
+    # Lazy import — the `mcp` SDK is heavy and unrelated to dev/review/plan/debug.
+    from claudestruct.mcp_server import run as run_mcp
+    try:
+        run_mcp()
+    except ClaudestructError as exc:
+        err.print(f"[red]{exc}[/red]")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
