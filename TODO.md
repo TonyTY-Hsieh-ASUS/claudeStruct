@@ -217,10 +217,12 @@ Goal: trust this in CI pipelines and long-running daemons. Wave 4 makes it insta
 
 Goal: 5-50 devs share the tool with shared visibility, shared budgets, and team-level admin. Today the orchestrator and dashboard are single-user-on-this-machine.
 
-- [ ] **W6.1 — Daemon mode**
-  - `cs serve` and `claw-squad serve` long-running supervisor
-  - Postgres backend (default for >1 user), SQLite single-file fallback for tiny teams
-  - Stateless workers can scale horizontally; state lives in DB, not local JSONL
+- [x] **W6.1 — Daemon mode** (claudestruct only; claw-squad worker deferred)
+  - `Run` SQLAlchemy model added to `src/claudestruct/server/models.py` with `RunStatus` enum (queued → running → done|failed). Per-row payload (task, description, model, effort, paths_json) plus outcomes (cost_usd, tokens, duration_ms, error)
+  - `src/claudestruct/server/worker.py` — `process_pending_run(session, run_root, runner=...)` synchronous drain helper, `WorkerThread` long-running daemon thread with poll-interval + graceful stop, `drain_queue(...)` for cron / batch operation, `wait_until_empty(...)` test helper
+  - `POST /v1/runs` now writes a queued `Run` row tagged with `org_id`/`user_id` instead of returning a placeholder id; `GET /v1/runs/{id}` reads from the DB first (with tenant isolation: cross-org lookup → 404, not 403, to avoid leaking existence) and falls back to the legacy JSONL log so pre-W6.1 history stays accessible
+  - New `cs serve worker [--once] [--poll-interval N]` CLI subcommand (foreground daemon thread + Ctrl-C graceful drain, or single drain pass)
+  - claw-squad-side daemon mode tracked separately — orchestrator's threading model + multi-repo state make it a bigger reshape
 - [~] **W6.2 — HTTP REST API** (draft shipped)
   - FastAPI app under `src/claudestruct/server/` behind the `[server]` extra: `/healthz`, `/readyz`, `/v1/dashboard`, `/v1/budget`, `/v1/runs` (POST + GET), `/v1/keys` (list/create/revoke). OpenAPI 3.1 at `/openapi.json`, interactive viewer at `/docs`.
   - Auth: bearer API keys (`ck_<key_id>_<secret>`, SHA-256-hashed secret, last_used stamp on auth success).
@@ -235,10 +237,10 @@ Goal: 5-50 devs share the tool with shared visibility, shared budgets, and team-
 - [ ] **W6.4 — OAuth login**
   - GitHub + Google login for the daemon's web UI
   - Reuse existing `claw-squad/src/ui/web.ts` + `web-page.ts` page; swap token-in-URL for cookie session
-- [ ] **W6.5 — Shared dashboard**
-  - Multi-user view of recent runs, per-team budget rollups, cost-per-author leaderboard
-  - Regression alerts: "run cost is >2σ over team baseline" → Slack/email
-  - Extends `src/claudestruct/dashboard.py` with team-scoped queries
+- [~] **W6.5 — Shared dashboard** (multi-user view shipped; alerts deferred)
+  - `GET /v1/dashboard/team` endpoint reads the `runs` table for the caller's org (filtered to terminal states `done`/`failed` so queued/running rows don't skew rollups). Returns `total_runs` + `total_cost_usd` headline numbers, `by_author` leaderboard sorted by spend desc with email + run-count + tokens, `by_task` task-type breakdown, plus `recent` (default 50, max 500) for the activity feed
+  - New schemas in `src/claudestruct/server/schema.py`: `AuthorRollup`, `TaskRollup`, `TeamDashboardResponse`. Tenant-scoped via `Run.org_id == principal.org_id` so an org can never see another org's spend
+  - Pending: regression alerts ("run cost > 2σ over team baseline" → Slack/email) and budget-cap rollups per team — both depend on a notification surface that doesn't exist yet
 - [ ] **W6.6 — GitHub App**
   - Replaces personal-token usage; per-org installation; opens PRs as `claudeStruct[bot]`
   - Webhook-triggered runs (`pull_request`, `issue_comment` with `/cs review`)
@@ -352,6 +354,10 @@ Reopen criterion: a signed enterprise contract or three serious leads asking for
 
 ## Last Update
 
+- 2026-04-26 — Wave 6 mid-roll ready for PR push:
+  - W6.1 ✅ daemon-mode background runner: `Run` model, `process_pending_run` + `WorkerThread`, `drain_queue`, `cs serve worker` subcommand, real DB-backed POST/GET runs with tenant isolation (cross-org → 404)
+  - W6.5 🟢 shared dashboard: `GET /v1/dashboard/team` with author leaderboard + task breakdown + recent feed; alerts/regression detection deferred until a notification surface exists
+  - 16 new server tests (worker drain + failure recovery + queue empty + isolation; team dashboard 5 cases including cross-org isolation, queued-row exclusion, limit validation). Total Python: 168 passed
 - 2026-04-26 — Wave 5 close-out ready for PR push:
   - W5.1 ✅ claw-squad TS-side tracing landed (root `clawSquad.run` span; `optionalDependencies` block for OTel deps; 7 new vitest cases). Wave 5 OTel item now fully done across both tools.
   - W5.5 ✅ Hardened sandbox: seccomp.json + apparmor.profile + sandbox-hardening.md docs + Linux uid-map probe so the structured isolation report reflects actual netns capability.

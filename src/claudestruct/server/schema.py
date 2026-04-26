@@ -63,6 +63,44 @@ class DashboardResponse(BaseModel):
     runs: list[RunRow]
 
 
+# --- Shared / team dashboard (W6.5) ---------------------------------
+
+class AuthorRollup(BaseModel):
+    """Per-author aggregate for the leaderboard."""
+
+    user_id: int
+    email: str
+    runs: int
+    cost_usd: float
+    input_tokens: int
+    output_tokens: int
+
+
+class TaskRollup(BaseModel):
+    """Per-task aggregate for the donut chart."""
+
+    task: str
+    runs: int
+    cost_usd: float
+
+
+class TeamDashboardResponse(BaseModel):
+    """Org-scoped rollup of recent runs.
+
+    Authoritative numbers come from the `runs` table (W6.1) so legacy
+    JSONL data isn't mixed in — the dashboard is meant to reflect what
+    the daemon has actually executed for this org.
+    """
+
+    org_id: int
+    org_slug: str
+    total_runs: int
+    total_cost_usd: float
+    by_author: list[AuthorRollup]
+    by_task: list[TaskRollup]
+    recent: list[RunRow]
+
+
 # --- Budget ---------------------------------------------------------
 
 class BudgetResponse(BaseModel):
@@ -90,8 +128,9 @@ class CreateRunResponse(BaseModel):
     run_id: str
     status: Literal["queued"]
     note: str = (
-        "Daemon-mode execution lands in W6.1; this draft accepts the "
-        "request, returns a placeholder id, and does not run anything."
+        "Run is queued. The daemon-mode worker (W6.1) picks it up and "
+        "writes results back to the same row; poll GET /v1/runs/{id} "
+        "for status. Run `cs serve worker` to drain the queue locally."
     )
 
 
