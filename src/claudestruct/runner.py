@@ -25,9 +25,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from claudestruct import dashboard
+from claudestruct import dashboard, tracing
 from claudestruct import logging as event_log
-from claudestruct import tracing
 from claudestruct.client import (
     DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL,

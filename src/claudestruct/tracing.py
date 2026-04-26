@@ -24,7 +24,8 @@ from __future__ import annotations
 import contextlib
 import os
 import sys
-from typing import Any, Iterator
+from collections.abc import Iterator
+from typing import Any
 
 
 class _NoopSpan:
@@ -70,12 +71,12 @@ def init_tracing(service_name: str = "claudestruct") -> bool:
 
     try:
         from opentelemetry import trace
-        from opentelemetry.sdk.resources import Resource
-        from opentelemetry.sdk.trace import TracerProvider
-        from opentelemetry.sdk.trace.export import BatchSpanProcessor
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
             OTLPSpanExporter,
         )
+        from opentelemetry.sdk.resources import Resource
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
     except ImportError:
         # Soft dep: don't crash the run, just warn once. Users who
         # want tracing should `pip install claudestruct[otel]`.
