@@ -21,9 +21,9 @@ What does NOT live here:
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 from claudestruct import dashboard
 from claudestruct import logging as event_log
@@ -67,8 +67,12 @@ def run_task_and_log(
     max_bytes: int | None = None,
     log_json: str | None = None,
     on_chunk: Callable[[str], None] | None = None,
+    redactor: object | None = None,
 ) -> TaskRunOutcome:
     """Run one task, emit structured events, return the outcome.
+
+    ``redactor`` (a ``claudestruct.redact.Redactor``) is applied to
+    every event before it lands on disk. Pass ``None`` to disable.
 
     Raises `ClaudestructError` on API key / unknown task / network
     errors — caller decides how to surface those (Click prints + exits;
@@ -80,7 +84,7 @@ def run_task_and_log(
 
     started = time.monotonic()
     auto_path = dashboard.auto_log_path(root)
-    with event_log.fanout_log([str(auto_path), log_json]) as sink:
+    with event_log.fanout_log([str(auto_path), log_json], redactor=redactor) as sink:
         sink.write(event_log.run_start(
             task=task,
             model=model,

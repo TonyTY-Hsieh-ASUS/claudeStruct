@@ -4,8 +4,8 @@ from __future__ import annotations
 import hashlib
 
 from claudestruct.prompts import (
-    TASK_PROMPTS,
     TASK_PROMPT_VERSIONS,
+    TASK_PROMPTS,
     prompt_version,
 )
 

@@ -19,11 +19,12 @@ be aggregated by a single consumer.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import IO, Any, Iterator
+from typing import IO, Any
 
 
 def _now_iso() -> str:
@@ -37,10 +38,14 @@ class EventSink:
     Best-effort: a write failure is swallowed (logged via stderr by the
     caller's exception handler if needed) so an observability blip
     never breaks the user's actual run.
+
+    Optional ``redactor`` applies PII / secret stripping before each
+    write. None == no-op (back-compat). See ``redact.Redactor``.
     """
 
     path: Path
     _fh: IO[str] | None = None
+    redactor: Any = None  # claudestruct.redact.Redactor | None
 
     def open(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -49,8 +54,9 @@ class EventSink:
     def write(self, event: dict[str, Any]) -> None:
         if self._fh is None:
             return
+        payload = self.redactor.redact(event) if self.redactor is not None else event
         try:
-            self._fh.write(json.dumps(event, separators=(",", ":")) + "\n")
+            self._fh.write(json.dumps(payload, separators=(",", ":")) + "\n")
             self._fh.flush()
         except OSError:
             pass
@@ -93,15 +99,18 @@ class MultiSink:
             s.close()
 
 
-def make_sink(path: str | None) -> EventSink | NullSink:
+def make_sink(path: str | None, redactor: Any = None) -> EventSink | NullSink:
     if not path:
         return NullSink()
-    return EventSink(path=Path(path).expanduser())
+    return EventSink(path=Path(path).expanduser(), redactor=redactor)
 
 
 @contextmanager
-def event_log(path: str | None) -> Iterator[EventSink | NullSink]:
-    sink = make_sink(path)
+def event_log(
+    path: str | None,
+    redactor: Any = None,
+) -> Iterator[EventSink | NullSink]:
+    sink = make_sink(path, redactor=redactor)
     sink.open()
     try:
         yield sink
@@ -112,11 +121,15 @@ def event_log(path: str | None) -> Iterator[EventSink | NullSink]:
 @contextmanager
 def fanout_log(
     paths: list[str | None],
+    redactor: Any = None,
 ) -> Iterator[MultiSink]:
     """Open multiple JSONL sinks at once. Empty/None entries are
     silently dropped. Useful when the CLI writes both the auto-log
-    and a user-supplied --log-json target."""
-    sinks = [make_sink(p) for p in paths]
+    and a user-supplied --log-json target.
+
+    ``redactor`` is shared across all sinks — applied once per write
+    to minimize regex cost when fanning out."""
+    sinks = [make_sink(p, redactor=redactor) for p in paths]
     multi = MultiSink(sinks)
     multi.open()
     try:

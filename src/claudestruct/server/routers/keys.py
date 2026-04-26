@@ -16,7 +16,6 @@ from claudestruct.server.schema import (
     KeyMetadata,
 )
 
-
 router = APIRouter(prefix="/v1/keys", tags=["keys"])
 
 

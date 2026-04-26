@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Iterator
 
 import anthropic
 
@@ -82,13 +81,21 @@ class RunResult:
 
 
 def _make_client() -> anthropic.Anthropic:
-    if not os.environ.get("ANTHROPIC_API_KEY"):
+    # The secrets module checks env first (incl. legacy ANTHROPIC_API_KEY)
+    # and then any further providers selected via CLAUDESTRUCT_SECRETS_PROVIDER
+    # (keyring / pass / file). See claudestruct.secrets.
+    from claudestruct import secrets as secrets_mod
+
+    api_key = secrets_mod.get("anthropic.api_key")
+    if not api_key:
         raise ClaudestructError(
-            "ANTHROPIC_API_KEY is not set. Export it in your shell or put it in a .env."
+            "ANTHROPIC_API_KEY is not set. Export it in your shell, store it in "
+            "your OS keychain (`keyring set claudestruct anthropic.api_key`), "
+            "or in `pass` and set CLAUDESTRUCT_SECRETS_PROVIDER=keyring,pass."
         )
     timeout = _env_float("CLAUDESTRUCT_TIMEOUT", DEFAULT_HTTP_TIMEOUT_SECONDS)
     max_retries = _env_int("CLAUDESTRUCT_MAX_RETRIES", DEFAULT_MAX_RETRIES)
-    return anthropic.Anthropic(timeout=timeout, max_retries=max_retries)
+    return anthropic.Anthropic(api_key=api_key, timeout=timeout, max_retries=max_retries)
 
 
 def _system_blocks(task: str) -> list[dict]:

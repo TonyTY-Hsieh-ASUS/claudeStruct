@@ -40,3 +40,58 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 claudestruct = ["py.typed"]
+
+# --- W5.7 — Test rigor ----------------------------------------------
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+extend-exclude = ["site", "dist", "build", ".venv", ".pytest_cache"]
+
+[tool.ruff.lint]
+# Error-only categories. F = pyflakes (unused imports, undefined names),
+# E/W = pycodestyle errors+warnings, I = isort, B = bugbear (likely
+# bugs), UP = pyupgrade (modernization), SIM = simplify (dead code).
+# Skipping ANN/D/PT/etc -- prefer signal over noise on a small codebase.
+select = ["F", "E", "W", "I", "B", "UP", "SIM"]
+ignore = [
+  "E501",   # line-too-long; handled by formatter, not blocking
+  "B008",   # function call in default arg; click decorators legit use this
+  "SIM103", # explicit `if cond: return True / return False` reads more clearly
+  "SIM105", # `try/except/pass` is fine; `contextlib.suppress` adds an import
+  "SIM108", # ternary preference is opinionated
+  "UP045",  # `Optional[X]` -> `X | None` -- noisy on existing files
+  "UP007",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011", "F841"]  # asserts in tests are fine
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["claudestruct"]
+branch = true
+omit = [
+  # CLI entry points: covered by manual smoke + CI invocations rather
+  # than unit tests. Excluded from the gate so library code drives the
+  # number.
+  "src/claudestruct/cli.py",
+  "src/claudestruct/mcp_server.py",
+  "src/claudestruct/server/cli.py",
+]
+
+[tool.coverage.report]
+# Floor of 70% for the draft -- bumps to 80% after W5.1 OTel adds the
+# tracing module's tests.
+fail_under = 70
+show_missing = true
+skip_covered = false
+exclude_lines = [
+  "pragma: no cover",
+  "raise NotImplementedError",
+  "if __name__ == .__main__.:",
+  "if TYPE_CHECKING:",
+]

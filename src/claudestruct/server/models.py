@@ -49,7 +49,7 @@ class Org(Base):
     name: Mapped[str] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now_utc)
 
-    memberships: Mapped[list["Membership"]] = relationship(
+    memberships: Mapped[list[Membership]] = relationship(
         back_populates="org", cascade="all, delete-orphan"
     )
 
@@ -62,10 +62,10 @@ class User(Base):
     name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now_utc)
 
-    memberships: Mapped[list["Membership"]] = relationship(
+    memberships: Mapped[list[Membership]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
-    api_keys: Mapped[list["ApiKey"]] = relationship(
+    api_keys: Mapped[list[ApiKey]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
 
@@ -79,8 +79,8 @@ class Membership(Base):
     role: Mapped[str] = mapped_column(String(16), default=Role.member.value)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now_utc)
 
-    user: Mapped["User"] = relationship(back_populates="memberships")
-    org: Mapped["Org"] = relationship(back_populates="memberships")
+    user: Mapped[User] = relationship(back_populates="memberships")
+    org: Mapped[Org] = relationship(back_populates="memberships")
 
 
 class ApiKey(Base):
@@ -96,7 +96,7 @@ class ApiKey(Base):
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    user: Mapped["User"] = relationship(back_populates="api_keys")
+    user: Mapped[User] = relationship(back_populates="api_keys")
 
     def is_active(self) -> bool:
         return self.revoked_at is None

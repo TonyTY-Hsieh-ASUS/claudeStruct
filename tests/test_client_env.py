@@ -6,8 +6,6 @@ make it through, and that a typo doesn't silently zero them out.
 """
 from __future__ import annotations
 
-import pytest
-
 from claudestruct import client
 
 

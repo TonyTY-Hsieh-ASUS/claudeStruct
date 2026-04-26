@@ -9,7 +9,6 @@ Covers:
 """
 from __future__ import annotations
 
-import importlib.util
 import json
 
 import pytest
@@ -129,6 +128,7 @@ def test_revoked_key_rejected(env):
     factory = env["factory"]
     with factory() as session:
         from datetime import datetime, timezone
+
         from sqlalchemy import update
         session.execute(
             update(ApiKey).where(ApiKey.name == "admin@a-key").values(revoked_at=datetime.now(timezone.utc))

@@ -23,7 +23,6 @@ from sqlalchemy.orm import Session
 
 from claudestruct.server.models import ApiKey, Membership, Org, Role, User
 
-
 _KEY_PREFIX = "ck_"
 _KEY_ID_BYTES = 8       # 16 hex chars
 _KEY_SECRET_BYTES = 24  # 48 hex chars

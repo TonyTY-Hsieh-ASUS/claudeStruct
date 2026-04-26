@@ -6,7 +6,6 @@ from fastapi import APIRouter
 from claudestruct import __version__
 from claudestruct.server.schema import HealthResponse
 
-
 router = APIRouter()
 
 
