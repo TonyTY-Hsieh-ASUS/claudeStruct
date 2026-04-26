@@ -35,11 +35,10 @@ from claudestruct.context import (
     gather_review_context,
 )
 from claudestruct import budget as budget_mod
-from claudestruct.cost import estimate_cost_usd
 from claudestruct import dashboard
-from claudestruct import logging as event_log
 from claudestruct import metrics
 from claudestruct.prompts import TASK_PROMPT_VERSIONS
+from claudestruct.runner import run_task_and_log
 
 console = Console()
 err = Console(stderr=True)
@@ -160,58 +159,25 @@ def _run_common(
     def on_chunk(text: str) -> None:
         console.print(text, end="", markup=False, highlight=False)
 
-    started = time.monotonic()
-    auto_path = dashboard.auto_log_path(root)
-    with event_log.fanout_log([str(auto_path), log_json]) as sink:
-        sink.write(event_log.run_start(
+    try:
+        outcome = run_task_and_log(
             task=task,
+            description=description,
+            paths=explicit,
+            root=root,
+            gatherer=gatherer,
             model=model,
+            max_tokens=max_tokens,
             effort=effort,
-            prompt_version=TASK_PROMPT_VERSIONS.get(task),
-        ))
-        try:
-            result = run_task(
-                task,
-                user_msg,
-                model=model,
-                max_tokens=max_tokens,
-                effort=effort,
-                stream_callback=on_chunk,
-            )
-        except ClaudestructError as exc:
-            err.print(f"\n[red]{exc}[/red]")
-            sink.write(event_log.run_end(
-                reason="error",
-                duration_ms=int((time.monotonic() - started) * 1000),
-                total_cost_usd=0.0,
-            ))
-            sys.exit(1)
-        cost = estimate_cost_usd(
-            model=result.model,
-            input_tokens=result.input_tokens,
-            output_tokens=result.output_tokens,
-            cache_read_tokens=result.cache_read_tokens,
-            cache_creation_tokens=result.cache_creation_tokens,
+            max_bytes=max_bytes,
+            log_json=log_json,
+            on_chunk=on_chunk,
         )
-        sink.write(event_log.agent_usage(
-            role="claudestruct",
-            provider="anthropic",
-            model=result.model,
-            input_tokens=result.input_tokens,
-            output_tokens=result.output_tokens,
-            cache_read_tokens=result.cache_read_tokens,
-            cache_creation_tokens=result.cache_creation_tokens,
-            cost_usd=cost,
-        ))
-        if result.cache_warning:
-            sink.write(event_log.cache_warning(result.cache_warning))
-        sink.write(event_log.run_end(
-            reason=result.stop_reason or "complete",
-            duration_ms=int((time.monotonic() - started) * 1000),
-            total_cost_usd=cost,
-        ))
+    except ClaudestructError as exc:
+        err.print(f"\n[red]{exc}[/red]")
+        sys.exit(1)
     console.print()
-    _render_usage(result, task)
+    _render_usage(outcome.result, task)
 
 
 common_options = [
