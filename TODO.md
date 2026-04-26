@@ -227,10 +227,10 @@ Goal: 5-50 devs share the tool with shared visibility, shared budgets, and team-
 - [ ] **W6.6 — GitHub App**
   - Replaces personal-token usage; per-org installation; opens PRs as `claudeStruct[bot]`
   - Webhook-triggered runs (`pull_request`, `issue_comment` with `/cs review`)
-- [ ] **W6.7 — GitLab + Bitbucket integrations**
-  - GitLab CI template (analog to existing `github-action-cs-review.yml`)
-  - Bitbucket Pipelines template
-  - Lives under `src/claudestruct/integrations/`
+- [x] **W6.7 — GitLab + Bitbucket integrations**
+  - `src/claudestruct/integrations/gitlab-ci-cs-review.yml` — MR-triggered job, posts verdict via GitLab Notes API using `CI_JOB_TOKEN`. Honors `ANTHROPIC_API_KEY` + optional `CLAUDESTRUCT_MONTHLY_CAP_USD`.
+  - `src/claudestruct/integrations/bitbucket-pipelines-cs-review.yml` — `pull-requests."**"` step, posts via Bitbucket 2.0 Comments API using `BITBUCKET_USER` + `BITBUCKET_APP_PASSWORD`.
+  - `integrations/README.md` documents the install / env-var setup for both, plus a "common knobs" section covering `--max-bytes` + `CLAUDESTRUCT_MONTHLY_CAP_USD` across all three templates.
 
 ---
 

@@ -7,6 +7,7 @@ adheres to [Semantic Versioning 2.0](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **GitLab + Bitbucket CI templates** (W6.7): `src/claudestruct/integrations/gitlab-ci-cs-review.yml` and `bitbucket-pipelines-cs-review.yml` — drop-in pipelines that run `cs review` on every MR/PR and post the verdict as a comment via the platform-native API. Mirrors the existing GitHub Action shape.
 - **Cumulative monthly cost cap** (W5.6): new `--monthly-cap-usd` flag (also `CLAUDESTRUCT_MONTHLY_CAP_USD`) on `cs dev/review/plan/debug`. Aggregates spend across `<root>/.claudestruct/runs/*.jsonl` for the current UTC calendar month; hard-aborts before any LLM call when spent ≥ cap, warns at 80%.
 - Top-level `LICENSE` (MIT), `CHANGELOG.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`.
 - GitHub Actions CI matrix (`.github/workflows/ci.yml`) covering Python 3.10–3.13, Node 20/22, and Go 1.22.
