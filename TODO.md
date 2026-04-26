@@ -210,13 +210,17 @@ Goal: 5-50 devs share the tool with shared visibility, shared budgets, and team-
   - `cs serve` and `claw-squad serve` long-running supervisor
   - Postgres backend (default for >1 user), SQLite single-file fallback for tiny teams
   - Stateless workers can scale horizontally; state lives in DB, not local JSONL
-- [ ] **W6.2 — HTTP REST API**
-  - Mirrors CLI: `POST /v1/runs`, `GET /v1/runs/:id`, `GET /v1/dashboard`, `GET /healthz`, `GET /metrics`
-  - OpenAPI 3.1 spec auto-generated; SDK stubs for Python + TS
-  - Auth: API keys (long-lived, rotatable) + session cookies (browser)
-- [ ] **W6.3 — User / team / org model + RBAC**
-  - Postgres schema: `orgs`, `teams`, `users`, `memberships`, `roles` (admin/member/viewer)
-  - Migration tool (`alembic` for Python side, `drizzle` for TS side) with seeded fixtures
+- [~] **W6.2 — HTTP REST API** (draft shipped)
+  - FastAPI app under `src/claudestruct/server/` behind the `[server]` extra: `/healthz`, `/readyz`, `/v1/dashboard`, `/v1/budget`, `/v1/runs` (POST + GET), `/v1/keys` (list/create/revoke). OpenAPI 3.1 at `/openapi.json`, interactive viewer at `/docs`.
+  - Auth: bearer API keys (`ck_<key_id>_<secret>`, SHA-256-hashed secret, last_used stamp on auth success).
+  - `POST /v1/runs` returns 202 with a placeholder run_id — actual worker model lands in **W6.1**. Other endpoints work end-to-end against the existing JSONL store + budget module.
+  - Tests: `tests/test_server.py` (18 cases) — auth gate (4), RBAC (3), key lifecycle (1), tenant isolation (2), dashboard / budget / runs shape (5), OpenAPI (1), health (2)
+  - Pending: session cookies + browser SDK (deferred to W6.4 OAuth), per-language SDK stubs (deferred until the API surface is closer to final)
+- [~] **W6.3 — User / team / org model + RBAC** (schema + key lifecycle shipped)
+  - SQLAlchemy 2.x models: `orgs`, `users`, `memberships`, `api_keys`. Idempotent `init_db()` via `Base.metadata.create_all` for the draft; Alembic deferred until the first schema bump
+  - Roles: `admin` / `member` / `viewer` enforced by `require_role(min_role)` FastAPI dependency
+  - `cs serve init-db / add-org / add-user / add-key` covers the bootstrap path
+  - Pending: teams (currently flat membership of users → orgs), seeded migration fixtures, Alembic when the schema needs to change shape
 - [ ] **W6.4 — OAuth login**
   - GitHub + Google login for the daemon's web UI
   - Reuse existing `claw-squad/src/ui/web.ts` + `web-page.ts` page; swap token-in-URL for cookie session
@@ -227,10 +231,10 @@ Goal: 5-50 devs share the tool with shared visibility, shared budgets, and team-
 - [ ] **W6.6 — GitHub App**
   - Replaces personal-token usage; per-org installation; opens PRs as `claudeStruct[bot]`
   - Webhook-triggered runs (`pull_request`, `issue_comment` with `/cs review`)
-- [ ] **W6.7 — GitLab + Bitbucket integrations**
-  - GitLab CI template (analog to existing `github-action-cs-review.yml`)
-  - Bitbucket Pipelines template
-  - Lives under `src/claudestruct/integrations/`
+- [x] **W6.7 — GitLab + Bitbucket integrations**
+  - `src/claudestruct/integrations/gitlab-ci-cs-review.yml` — MR-triggered job, posts verdict via GitLab Notes API using `CI_JOB_TOKEN`. Honors `ANTHROPIC_API_KEY` + optional `CLAUDESTRUCT_MONTHLY_CAP_USD`.
+  - `src/claudestruct/integrations/bitbucket-pipelines-cs-review.yml` — `pull-requests."**"` step, posts via Bitbucket 2.0 Comments API using `BITBUCKET_USER` + `BITBUCKET_APP_PASSWORD`.
+  - `integrations/README.md` documents the install / env-var setup for both, plus a "common knobs" section covering `--max-bytes` + `CLAUDESTRUCT_MONTHLY_CAP_USD` across all three templates.
 
 ---
 
@@ -310,8 +314,26 @@ Reopen criterion: a signed enterprise contract or three serious leads asking for
 
 ---
 
+## Post-roadmap PRs (selected from R/F candidate list)
+
+- [~] **R2 + F1 + F8 — orchestrator integration test, MCP server, cross-tool dashboard**
+  - **R2** orchestrator integration test: `claw-squad/tests/orchestrator-integration.test.ts` covers Phase 1 → Phase 3 with scripted MockProvider per role on a real tmp git repo. Three scenarios: happy path (`reason=complete`), maxReviewRounds rollback (`rolledBack=true` + branch reverted), maxCostUsd abort (`reason=aborted` + snapshot persisted). Unblocks future orchestrator refactors.
+  - **F1** MCP server (`cs mcp`): exposes the four task modes plus dashboard + metrics as MCP tools so Claude Code can call claudestruct directly. New `mcp_handlers.py` (pure dict-in/dict-out), `mcp_server.py` (stdio bootstrap with lazy SDK import), `pyproject.toml` adds `mcp>=1.0.0`. `CLAUDE.md` documents the `.mcp.json` config snippet.
+  - **F1 prep**: extracted `run_task_and_log` from `cli._run_common` into `runner.py` so CLI + MCP share one business-logic path. Pure refactor, behavior unchanged.
+  - **F8** cross-tool dashboard (`cs dashboard --include-claw-squad`): folds `.claw-squad/runs/*.jsonl` into the same `RunSummary` table with a `tool` column. Schema parity from W2.1 made the mapping cheap.
+
+### Verification
+| Suite | Result |
+|---|---|
+| `pytest tests/` (Python) | 78 passed (+16 new: 9 MCP handlers + 7 cross-tool dashboard) |
+| `npx vitest run` (claw-squad) | 257 passed (25 files; +3 new orchestrator-integration scenarios) |
+| `npx tsc --noEmit` | clean |
+
+---
+
 ## Last Update
 
+- 2026-04-26 — R2 + F1 + F8 ready for PR push (post-roadmap selection from R/F candidate list).
 - 2026-04-26 — Wave 4 in flight on PR [#17](https://github.com/tonyandclaw/claudeStruct/pull/17):
   - W4.1 ✅ CI matrix landed
   - W4.2 ~ governance docs (LICENSE, CHANGELOG, CONTRIBUTING, SECURITY); CODE_OF_CONDUCT.md deferred (the standard Contributor Covenant 2.1 text trips Anthropic's output-content filter when generated inline; will be added manually from the upstream copy)

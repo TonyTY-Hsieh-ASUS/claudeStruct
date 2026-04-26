@@ -1,0 +1,63 @@
+# GitLab CI template that runs `cs review` on every merge request and posts
+# the verdict as an MR comment.
+#
+# Install: copy this file to .gitlab-ci.yml in your repo (or include it from
+# an existing pipeline via `include:`), then set the project CI/CD variable
+# ANTHROPIC_API_KEY (Settings -> CI/CD -> Variables, mark "Masked" + "Protected").
+#
+# Trigger: merge requests targeting main / master / claude/* branches.
+# Adjust the rules block to match your branching convention.
+#
+# Cost guard: passes --max-bytes 200000 (the review-task default) so a
+# runaway diff doesn't burn through your spend cap. Combine with
+# CLAUDESTRUCT_MONTHLY_CAP_USD (set as another CI/CD variable) for a
+# cumulative cap across runs.
+#
+# GitLab API: posts the comment via the Notes API. Requires the default
+# CI_JOB_TOKEN to have notes:write on the project (true for project members
+# by default; check Settings -> CI/CD -> Job token permissions).
+
+cs-review:
+  stage: test
+  image: python:3.12-slim
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: on_success
+  variables:
+    # fetch-depth: 0 equivalent — GitLab clones shallow by default.
+    GIT_DEPTH: 0
+  before_script:
+    - apt-get update -qq && apt-get install -y --no-install-recommends git curl jq
+    - pip install --quiet --upgrade pip
+    - pip install --quiet claudestruct
+    # If you vendor claudestruct in-repo instead of installing from PyPI,
+    # replace the line above with: `pip install --quiet -e .`
+  script:
+    - |
+      set +e
+      cs review --max-bytes 200000 > review.md 2>&1
+      status=$?
+      echo "cs review exited with status=$status"
+
+      # Post the review as an MR note. The API path uses the merge request IID,
+      # which GitLab exposes as $CI_MERGE_REQUEST_IID.
+      body=$(jq -Rs '.' < review.md)
+      payload=$(jq -n \
+        --arg b "### cs review\n\n<details><summary>verdict</summary>\n\n\`\`\`\n$(cat review.md)\n\`\`\`\n\n</details>" \
+        '{body: $b}')
+      curl --fail-with-body --silent --show-error \
+        --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+        --header "Content-Type: application/json" \
+        --request POST \
+        --data "$payload" \
+        "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes"
+  artifacts:
+    when: always
+    paths:
+      - review.md
+    expire_in: 1 week
+  timeout: 8m
+  # Don't fail the pipeline if cs review surfaces critical findings —
+  # the comment is the deliverable. Set allow_failure: false if you want
+  # critical findings to gate the merge.
+  allow_failure: true

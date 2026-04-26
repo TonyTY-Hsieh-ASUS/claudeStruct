@@ -55,6 +55,26 @@ cd claw-sandbox && go test ./...
 - **Sandbox is defense-in-depth, not a VM.** `claw-sandbox` emits a `[sandbox] {"event":"isolation",...}` JSON line declaring per-control status. On macOS most controls are `unsupported`; on Linux rlimits land but `--no-network` needs CAP_SYS_ADMIN we don't assume. Run inside Docker / firejail for stronger guarantees.
 - **State persists for `--resume`.** The orchestrator writes `.claw-squad/state.json` after every outer loop and in its `finally`. SIGINT routes through the same path so Ctrl-C doesn't lose progress.
 
+## MCP setup (wire `cs` into Claude Code)
+
+`cs mcp` runs claudestruct as an MCP server over stdio, exposing `claudestruct_dev` / `_review` / `_plan` / `_debug` / `_dashboard` / `_metrics` as tools. Claude Code (and any other MCP client) can then call these directly — no shell hop, prompt caching still applies, and the structured run log keeps recording every invocation.
+
+Drop the following into Claude Code's `.mcp.json` (or the user-scope MCP config):
+
+```json
+{
+  "mcpServers": {
+    "claudestruct": {
+      "command": "cs",
+      "args": ["mcp"],
+      "env": { "ANTHROPIC_API_KEY": "$ANTHROPIC_API_KEY" }
+    }
+  }
+}
+```
+
+The handlers live in [src/claudestruct/mcp_handlers.py](src/claudestruct/mcp_handlers.py) — pure dict-in/dict-out functions that Claude Code's MCP client invokes. The server bootstrap in [src/claudestruct/mcp_server.py](src/claudestruct/mcp_server.py) is a thin wrapper around the SDK; lazy-imported so non-MCP runs don't pay the dep cost.
+
 ## Roadmap
 
 [TODO.md](TODO.md) tracks the wave-by-wave roadmap (W1–W3 across stability, observability, DX, and new features). Updated on every PR push.

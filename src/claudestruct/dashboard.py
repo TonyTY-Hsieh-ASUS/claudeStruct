@@ -38,6 +38,10 @@ class RunSummary:
     cache_creation_tokens: int = 0
     cost_usd: float = 0.0
     cache_warnings: list[str] = field(default_factory=list)
+    # Which tool produced this run. "claudestruct" for the local CLI;
+    # "claw-squad" when surfaced via --include-claw-squad. Lets the
+    # combined dashboard show provenance per row.
+    tool: str = "claudestruct"
 
 
 def runs_dir(root: Path) -> Path:
@@ -133,6 +137,75 @@ def filter_summaries(
     return out
 
 
+# --- Cross-tool: claw-squad run log support (F8) ---
+
+def claw_squad_runs_dir(root: Path) -> Path:
+    return Path(root) / ".claw-squad" / "runs"
+
+
+def _fold_claw_squad(path: Path) -> RunSummary:
+    """Translate a claw-squad JSONL stream into a RunSummary.
+
+    Schema differences vs claudestruct's own writer:
+      - Event types use hyphens: `run-start`, `usage`, `run-end`.
+      - `usage` events come per-role; we sum all of them into a single
+        run-level row. Per-role detail is preserved in the original
+        file for anyone who wants the multi-agent breakdown.
+      - `requirement` (free text) replaces `task` since claw-squad
+        doesn't categorize like dev/review/plan/debug.
+      - `model` is per-call (each agent picks its own). We pick the
+        first non-empty value seen so the table has *something*; the
+        original log retains the per-role detail.
+    """
+    s = RunSummary(run_id=path.stem, path=path, tool="claw-squad")
+    for ev in _iter_events(path):
+        t = ev.get("type")
+        if t == "run-start":
+            s.started_at = ev.get("ts")
+            req = ev.get("requirement")
+            if isinstance(req, str):
+                # Truncate long requirements so the dashboard table
+                # stays readable; the run log keeps the full text.
+                s.task = req if len(req) <= 60 else req[:57] + "..."
+        elif t == "usage":
+            s.input_tokens += int(ev.get("inputTokens", 0) or 0)
+            s.output_tokens += int(ev.get("outputTokens", 0) or 0)
+            s.cache_read_tokens += int(ev.get("cacheReadTokens", 0) or 0)
+            s.cache_creation_tokens += int(ev.get("cacheCreationTokens", 0) or 0)
+            s.cost_usd += float(ev.get("costUsd", 0.0) or 0.0)
+            if not s.model:
+                provider = ev.get("provider")
+                if isinstance(provider, str):
+                    s.model = provider
+        elif t == "run-end":
+            s.ended_at = ev.get("ts")
+            s.reason = ev.get("reason")
+    return s
+
+
+def load_claw_squad_summaries(root: Path) -> list[RunSummary]:
+    d = claw_squad_runs_dir(root)
+    if not d.exists():
+        return []
+    out: list[RunSummary] = []
+    for p in sorted(d.iterdir()):
+        if p.suffix != ".jsonl":
+            continue
+        out.append(_fold_claw_squad(p))
+    return out
+
+
+def load_summaries_with_claw_squad(root: Path) -> list[RunSummary]:
+    """Combined summaries from both tools, sorted chronologically by
+    `started_at`. Rows with missing timestamps sink to the front
+    (oldest-looking) so they don't bury current activity."""
+    cs = load_summaries(root)
+    cw = load_claw_squad_summaries(root)
+    combined = cs + cw
+    combined.sort(key=lambda s: s.started_at or "")
+    return combined
+
+
 def to_json(summaries: Iterable[RunSummary]) -> str:
     """Machine-readable rendering: one JSON array, suitable for `jq` or
     spreadsheet ingest. Matches the field names in `RunSummary` minus
@@ -141,6 +214,7 @@ def to_json(summaries: Iterable[RunSummary]) -> str:
     for s in summaries:
         rows.append({
             "runId": s.run_id,
+            "tool": s.tool,
             "startedAt": s.started_at,
             "endedAt": s.ended_at,
             "task": s.task,

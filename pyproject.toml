@@ -15,6 +15,20 @@ dependencies = [
   "click>=8.1.0",
   "rich>=13.7.0",
   "pathspec>=0.12.0",
+  # MCP server mode (`cs mcp`). The SDK is loaded lazily — only the
+  # `cs mcp` subcommand triggers the import — but the dep is hard so
+  # the wire-into-Claude-Code workflow is one `pip install -e .` away.
+  "mcp>=1.0.0",
+]
+
+[project.optional-dependencies]
+# `cs serve` and the daemon-mode REST API + RBAC layer (W6.2 + W6.3).
+# Kept out of the base install so `pip install claudestruct` stays lean.
+server = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.32",
+  "sqlalchemy>=2.0",
+  "pydantic>=2.0",
 ]
 
 [project.scripts]
