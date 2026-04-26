@@ -34,6 +34,7 @@ from claudestruct.context import (
     gather_plan_context,
     gather_review_context,
 )
+from claudestruct import budget as budget_mod
 from claudestruct.cost import estimate_cost_usd
 from claudestruct import dashboard
 from claudestruct import logging as event_log
@@ -104,8 +105,27 @@ def _run_common(
     verbose: bool,
     log_json: str | None,
     max_bytes: int | None,
+    monthly_cap_usd: float | None,
 ) -> None:
     import time
+
+    if monthly_cap_usd is not None and monthly_cap_usd > 0 and not dry_run:
+        status = budget_mod.check_budget(root, monthly_cap_usd)
+        if status.exceeded:
+            err.print(
+                f"[red]Monthly cap reached: ${status.spent_usd:.4f} spent of "
+                f"${status.cap_usd:.2f} cap (UTC calendar month). Aborting before "
+                f"any API call. Re-run with a higher --monthly-cap-usd, wait for "
+                f"the next month, or unset the cap.[/red]"
+            )
+            sys.exit(2)
+        if status.near_limit:
+            err.print(
+                f"[yellow]Cumulative spend: ${status.spent_usd:.4f} of "
+                f"${status.cap_usd:.2f} cap "
+                f"({status.spent_usd / status.cap_usd:.0%}); "
+                f"${status.remaining_usd():.4f} remaining this month.[/yellow]"
+            )
 
     explicit = [Path(p) for p in paths] if paths else None
     gatherer = GATHERERS[task]
@@ -214,6 +234,12 @@ common_options = [
     click.option("--max-bytes", type=int, default=None,
                  help="Override the per-task context budget. Defaults: review 200k, "
                       "dev 600k, debug 400k, plan 800k."),
+    click.option("--monthly-cap-usd", type=float, default=None,
+                 envvar="CLAUDESTRUCT_MONTHLY_CAP_USD",
+                 help="Cumulative USD cap for the current calendar month (UTC). "
+                      "Computed from <root>/.claudestruct/runs/*.jsonl. Hard-aborts "
+                      "before the LLM call if exceeded; warns at 80% of cap. "
+                      "Reads CLAUDESTRUCT_MONTHLY_CAP_USD by default."),
 ]
 
 
@@ -233,36 +259,36 @@ def main() -> None:
 @click.argument("description", required=True)
 @click.argument("paths", nargs=-1, type=click.Path())
 @_apply_options
-def dev_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json, max_bytes):
+def dev_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd):
     _run_common("dev", description, paths, _resolve_root(root), model, max_tokens,
-                effort, dry_run, show_context, verbose, log_json, max_bytes)
+                effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd)
 
 
 @main.command("review", help="Code review on the current branch diff, or specified files.")
 @click.argument("description", required=False, default="Review the code below for bugs, security issues, and maintainability concerns.")
 @click.argument("paths", nargs=-1, type=click.Path())
 @_apply_options
-def review_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json, max_bytes):
+def review_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd):
     _run_common("review", description, paths, _resolve_root(root), model, max_tokens,
-                effort, dry_run, show_context, verbose, log_json, max_bytes)
+                effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd)
 
 
 @main.command("plan", help="Architecture / planning mode.")
 @click.argument("description", required=True)
 @click.argument("paths", nargs=-1, type=click.Path())
 @_apply_options
-def plan_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json, max_bytes):
+def plan_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd):
     _run_common("plan", description, paths, _resolve_root(root), model, max_tokens,
-                effort, dry_run, show_context, verbose, log_json, max_bytes)
+                effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd)
 
 
 @main.command("debug", help="Debug an error, anchored on a failure description.")
 @click.argument("description", required=True)
 @click.argument("paths", nargs=-1, type=click.Path())
 @_apply_options
-def debug_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json, max_bytes):
+def debug_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd):
     _run_common("debug", description, paths, _resolve_root(root), model, max_tokens,
-                effort, dry_run, show_context, verbose, log_json, max_bytes)
+                effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd)
 
 
 @main.command("tokens", help="Count tokens for a given task + context without calling Claude.")

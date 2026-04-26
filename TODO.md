@@ -192,9 +192,10 @@ Goal: trust this in CI pipelines and long-running daemons. Wave 4 makes it insta
   - AppArmor profile sample
   - Network-namespace isolation when CAP_SYS_ADMIN available; auto-detect + warn otherwise
   - Documented Docker / firejail recipes
-- [ ] **W5.6 — Cumulative cost cap**
-  - Extend per-run budgets with `monthly_cap_usd` aggregating across `~/.claudestruct/runs/*.jsonl`
-  - Hard-aborts before next run starts when exceeded; soft-warn at 80%
+- [x] **W5.6 — Cumulative cost cap**
+  - `src/claudestruct/budget.py` — `current_period_spend(root)` folds `<root>/.claudestruct/runs/*.jsonl` for the current UTC calendar month; `check_budget(root, cap)` returns `BudgetStatus(spent, cap, warn_threshold, exceeded, near_limit)` with `WARN_FRACTION = 0.8`
+  - CLI: new `--monthly-cap-usd <float>` flag on `cs dev/review/plan/debug` (also reads `CLAUDESTRUCT_MONTHLY_CAP_USD`); hard-aborts (`exit 2`) before any LLM call when `spent ≥ cap`, soft-warns when `spent ≥ 0.8 × cap`. Skipped on `--dry-run`.
+  - Tests: `tests/test_budget.py` (11 cases) — month bounds incl. December roll-over, period filtering, naive ISO timestamps, exact-threshold semantics, `cap=0` disables check, malformed run skipped
 - [ ] **W5.7 — Test rigor**
   - End-to-end tests with mocked Anthropic SDK (no real API calls)
   - Mutation testing: `mutmut` (Python), `stryker` (TS); coverage gate at 80% in CI
