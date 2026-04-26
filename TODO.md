@@ -145,15 +145,15 @@ Goal: anyone can `pip install claudestruct` / `npm install claw-squad` / `docker
   - `.github/workflows/ci.yml` — pytest (3.10/3.11/3.12/3.13), vitest + tsc (Node 20/22), go test + go vet (1.22)
   - Concurrency group cancels superseded runs; pip/pnpm caches keyed off lockfiles
   - ruff lint deferred (pyproject.toml has no ruff config yet; tracked under W5)
-- [~] **W4.2 — License + governance files**
+- [x] **W4.2 — License + governance files**
   - `LICENSE` (MIT, matches `pyproject.toml` declared license) at repo root
   - `CONTRIBUTING.md`, `SECURITY.md` (vuln disclosure)
   - `CHANGELOG.md` (keepachangelog 1.1 format) seeded with Waves 1-3 history
-  - `CODE_OF_CONDUCT.md` deferred — see note below
-- [ ] **W4.3 — Release automation**
-  - `.github/workflows/release.yml` — on tag `v*.*.*`: PyPI publish (trusted publishing/OIDC, no API token), npm publish for `claw-squad`, GitHub Release with cross-compiled `claw-sandbox` binaries (linux-amd64/arm64, darwin-amd64/arm64) + Sigstore provenance
-  - `release-please` or `cz-cli` for conventional-commit-driven version bumps
-  - Defers until repo-level PyPI / npm / GHCR trusted-publishing config is in place (manual step on the org settings)
+  - `CODE_OF_CONDUCT.md` — official Contributor Covenant 2.1 fetched from `contributor-covenant.org`; `[INSERT CONTACT METHOD]` swapped to point at `SECURITY.md`
+- [~] **W4.3 — Release automation**
+  - `.github/workflows/release.yml` — on `v*.*.*` tag push: PyPI sdist+wheel via OIDC trusted publishing, npm publish (`claw-squad`) with `--provenance`, GitHub Release with cross-compiled `claw-sandbox` binaries (linux/darwin × amd64/arm64) + aggregated `SHA256SUMS`
+  - Workflow uses `env:` block routing for every shell-substituted ref to keep template injection out of `run:` bodies
+  - Trusted-publishing config (PyPI project + npm package settings) is the remaining manual step before the first tag
 - [x] **W4.4 — Container distribution**
   - Multi-stage `Dockerfile` (python-slim base, Go builder for sandbox, Node builder for claw-squad) → `ghcr.io/tonyandclaw/claudestruct:latest`
   - `.github/workflows/docker.yml` builds on every PR (verifies the Dockerfile) and pushes to GHCR on push to main + on tag, with PR/branch/sha tags via `docker/metadata-action`
@@ -173,13 +173,16 @@ Goal: anyone can `pip install claudestruct` / `npm install claw-squad` / `docker
 
 Goal: trust this in CI pipelines and long-running daemons. Wave 4 makes it installable; Wave 5 makes it operable.
 
-- [ ] **W5.1 — OpenTelemetry tracing**
-  - claudestruct: `src/claudestruct/tracing.py` — span per task, child spans for context-gather and Claude invocation; OTLP exporter via `OTEL_EXPORTER_OTLP_ENDPOINT`
-  - claw-squad: `src/tracing.ts` — spans across Planner→Coder→Reviewer with correlation IDs flowing into `runs/log.ts` events
-  - Reuse: existing `logging.py` event sink, `runs/log.ts` `RunLogHandle`
-- [ ] **W5.2 — Error reporting (Sentry)**
-  - Opt-in via `CLAUDESTRUCT_SENTRY_DSN` / `CLAW_SQUAD_SENTRY_DSN`
-  - Redact `ANTHROPIC_API_KEY`, `SLACK_*_TOKEN`, `GITHUB_TOKEN` in event capture (before-send hook)
+- [~] **W5.1 — OpenTelemetry tracing** (claudestruct only; claw-squad deferred)
+  - `src/claudestruct/tracing.py` — opt-in via `OTEL_EXPORTER_OTLP_ENDPOINT`; soft dep on `opentelemetry-api`/`-sdk`/`-exporter-otlp-proto-http` (declared as `claudestruct[otel]` extra in `pyproject.toml`); zero-cost no-op spans when disabled
+  - `runner.run_task_and_log` wraps a root `claudestruct.task` span with child `claudestruct.context_gather` + `claudestruct.llm_call` spans; attributes: `task`, `model`, `prompt_version`, `budget_bytes`, `files`, `total_bytes`, `input_tokens`, `output_tokens`, `cache_*_tokens`, `cost_usd`, `duration_ms`
+  - Tests: `tests/test_tracing.py` (6 cases) — disabled-by-default, no-op span methods, idempotent init, mixed-type attribute serialization, shutdown safety; enabled-path tests stub `OTLPSpanExporter` with a no-op so CI doesn't spawn an HTTP retry loop
+  - claw-squad TS-side tracing remains pending (orchestrator instrumentation across 8 providers is a larger separate effort)
+- [x] **W5.2 — Error reporting (Sentry)**
+  - `src/claudestruct/sentry_init.py` — opt-in via `CLAUDESTRUCT_SENTRY_DSN`; soft dep on `sentry-sdk` (declared as `claudestruct[sentry]` extra); init at CLI import so Click parsing errors are caught too
+  - `before_send` scrubber redacts: env-var keys (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GITHUB_TOKEN` / `SLACK_*_TOKEN` / `CLAW_WEB_TOKEN` etc.) in `extra` / `tags` / `contexts` / `request.env`; `Authorization` / `X-API-Key` / `Cookie` headers in both dict and list-form serializations; nested dicts recursively; `<key>=<value>` patterns in breadcrumb messages
+  - `traces_sample_rate=0.0` (use OTel for perf) and `send_default_pii=False`
+  - Tests: `tests/test_sentry_init.py` (10 cases) — disabled path, idempotent init, every redaction surface (top-level / nested / request env / headers in both shapes / breadcrumb data + message), pattern coverage, explicit DSN argument override
 - [x] **W5.3 — PII redaction + retention** (claudestruct only)
   - `src/claudestruct/redact.py` — `Redactor` walks event dicts replacing matched substrings with `[redacted]`. Default ruleset covers Anthropic / GitHub / Slack / Stripe tokens, AWS access keys, emails, JWTs. Pluggable via `Redactor.add_rule(name, pattern)`.
   - Wired through `EventSink` / `MultiSink` / `event_log` / `fanout_log`. CLI flag `--redact` (also `CLAUDESTRUCT_REDACT` env) constructs `Redactor.default()` and threads it to `run_task_and_log`.
@@ -347,11 +350,12 @@ Reopen criterion: a signed enterprise contract or three serious leads asking for
 
 ## Last Update
 
-- 2026-04-26 — R2 + F1 + F8 ready for PR push (post-roadmap selection from R/F candidate list).
-- 2026-04-26 — Wave 4 in flight on PR [#17](https://github.com/tonyandclaw/claudeStruct/pull/17):
-  - W4.1 ✅ CI matrix landed
-  - W4.2 ~ governance docs (LICENSE, CHANGELOG, CONTRIBUTING, SECURITY); CODE_OF_CONDUCT.md deferred (the standard Contributor Covenant 2.1 text trips Anthropic's output-content filter when generated inline; will be added manually from the upstream copy)
-  - W4.4 ✅ Dockerfile + GHCR publish workflow
-  - W4.5 ✅ mkdocs-material site + GH Pages deploy workflow
-  - W4.6 ~ README badges in; asciinema recording pending
+- 2026-04-26 — Wave 4 close-out + Wave 5 kick-off ready for PR push:
+  - W4.2 ✅ CODE_OF_CONDUCT.md (official Contributor Covenant 2.1, contact pointer to SECURITY.md)
+  - W4.3 ~ `.github/workflows/release.yml` written (OIDC PyPI + npm provenance + cross-compiled `claw-sandbox` binaries via 4-job matrix); trusted-publishing config still org-level manual step
+  - W5.1 ~ `tracing.py` shipped for claudestruct with 6 tests; claw-squad TS-side tracing remains pending
+  - W5.2 ✅ `sentry_init.py` shipped with 10 tests covering every redaction surface
+  - 16 new Python tests; full pytest 94 passed
+- 2026-04-26 — R2 + F1 + F8 PR open at [#19](https://github.com/tonyandclaw/claudeStruct/pull/19) → merged.
+- 2026-04-26 — Wave 4 (W4.1, W4.4, W4.5) merged via [#17](https://github.com/tonyandclaw/claudeStruct/pull/17).
 - 2026-04-25 — Waves 1-3 closed (PRs #11, #13, #14, #15, #16 merged). Wave 4-8 commercialization roadmap added.

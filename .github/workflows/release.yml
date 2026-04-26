@@ -1,0 +1,145 @@
+name: Release
+
+# Triggered on a `v*.*.*` tag push. Builds & publishes:
+#   - Python wheel + sdist for `claudestruct` -> PyPI (OIDC trusted publishing)
+#   - npm package for `claw-squad` -> npm registry (OIDC provenance)
+#   - GitHub Release with cross-compiled `claw-sandbox` binaries
+#     (linux-amd64/arm64, darwin-amd64/arm64) and SHA256SUMS
+#
+# Prerequisite (one-time, manual at the org/repo level):
+#   - PyPI: configure trusted publishing for this repo + the `pypi` env.
+#     https://docs.pypi.org/trusted-publishers/
+#   - npm: configure trusted publishing (provenance) for `claw-squad`.
+#     https://docs.npmjs.com/generating-provenance-statements
+#
+# We deliberately do NOT use long-lived API tokens -- OIDC is the only
+# auth path. If the env isn't configured, the publish step fails fast
+# with a clear error rather than silently shipping unsigned artifacts.
+#
+# Security notes for this workflow:
+#   - We only consume `github.ref_name` (a validated git ref pattern,
+#     never user-controlled body text). Even so, every place we use it
+#     in a `run:` step routes through `env:` -> shell var, never via
+#     template expansion inside the script body.
+#   - No reference to issue/PR/comment/commit body anywhere.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+  id-token: write
+  packages: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  pypi:
+    name: Publish claudestruct to PyPI
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/claudestruct
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+      - name: Publish to PyPI (OIDC trusted publishing)
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  npm:
+    name: Publish claw-squad to npm
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: claw-squad
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+          cache: pnpm
+          cache-dependency-path: claw-squad/pnpm-lock.yaml
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Build
+        run: pnpm build
+      - name: Publish (with provenance)
+        run: pnpm publish --no-git-checks --provenance --access public
+
+  sandbox:
+    name: Cross-compile claw-sandbox
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux,  goarch: amd64 }
+          - { goos: linux,  goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+    defaults:
+      run:
+        working-directory: claw-sandbox
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - name: Build
+        # Pass GOOS/GOARCH/CGO_ENABLED + the tag ref via env: block so
+        # the script body uses bash-quoted variables exclusively, not
+        # `${{ ... }}` template expansion. See workflow header for why.
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          out="claw-sandbox-${GOOS}-${GOARCH}"
+          go build -trimpath -ldflags="-s -w -X main.version=${REF_NAME}" -o "$out" .
+          sha256sum "$out" > "$out.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: claw-sandbox-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            claw-sandbox/claw-sandbox-${{ matrix.goos }}-${{ matrix.goarch }}
+            claw-sandbox/claw-sandbox-${{ matrix.goos }}-${{ matrix.goarch }}.sha256
+
+  github_release:
+    name: GitHub Release
+    runs-on: ubuntu-latest
+    needs: [sandbox]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Aggregate SHA256SUMS
+        run: |
+          cd dist
+          cat *.sha256 > SHA256SUMS
+          ls -la
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/claw-sandbox-*
+            dist/SHA256SUMS
+          fail_on_unmatched_files: true

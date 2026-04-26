@@ -18,7 +18,7 @@ import click
 from rich.console import Console
 from rich.table import Table
 
-from claudestruct import __version__, dashboard, metrics
+from claudestruct import __version__, dashboard, metrics, sentry_init
 from claudestruct import budget as budget_mod
 from claudestruct import redact as redact_mod
 from claudestruct.client import (
@@ -37,6 +37,11 @@ from claudestruct.context import (
 )
 from claudestruct.prompts import TASK_PROMPT_VERSIONS
 from claudestruct.runner import run_task_and_log
+
+# Best-effort: initialise error reporting at import time so any
+# exception during Click parsing / option resolution is captured too.
+# init() is a no-op when CLAUDESTRUCT_SENTRY_DSN is unset.
+sentry_init.init()
 
 console = Console()
 err = Console(stderr=True)
