@@ -1,5 +1,10 @@
 # claudestruct
 
+[![CI](https://github.com/tonyandclaw/claudeStruct/actions/workflows/ci.yml/badge.svg)](https://github.com/tonyandclaw/claudeStruct/actions/workflows/ci.yml)
+[![Docs](https://github.com/tonyandclaw/claudeStruct/actions/workflows/docs.yml/badge.svg)](https://github.com/tonyandclaw/claudeStruct/actions/workflows/docs.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Container](https://img.shields.io/badge/ghcr.io-claudestruct-2496ED?logo=docker)](https://github.com/tonyandclaw/claudeStruct/pkgs/container/claudestruct)
+
 **Token-efficient Claude companion for Claude Code workflows.**
 
 `cs` is a CLI tool that makes Claude Code sessions cheaper and more focused on

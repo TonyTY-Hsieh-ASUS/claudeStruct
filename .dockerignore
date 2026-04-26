@@ -1,0 +1,23 @@
+# Keep the build context lean.
+.git
+.github
+.claude
+.pytest_cache
+.venv
+venv
+__pycache__
+*.pyc
+node_modules
+claw-squad/node_modules
+claw-squad/dist
+claw-sandbox/claw-sandbox
+src/claudestruct.egg-info
+dist
+build
+docs/_site
+site
+TODO.md
+CHANGELOG.md
+CONTRIBUTING.md
+SECURITY.md
+CODE_OF_CONDUCT.md
