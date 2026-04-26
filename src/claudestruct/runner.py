@@ -27,6 +27,7 @@ from pathlib import Path
 
 from claudestruct import dashboard
 from claudestruct import logging as event_log
+from claudestruct import tracing
 from claudestruct.client import (
     DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL,
@@ -78,60 +79,93 @@ def run_task_and_log(
     errors — caller decides how to surface those (Click prints + exits;
     MCP raises into a structured tool error).
     """
-    budget = max_bytes if max_bytes is not None else BUDGETS_PER_TASK.get(task, 600_000)
-    ctx = gatherer(root=root, explicit_paths=paths, max_total_bytes=budget)
-    user_msg = build_user_message(description, ctx.render())
+    # Tracing is opt-in via OTEL_EXPORTER_OTLP_ENDPOINT. init_tracing()
+    # is idempotent and zero-cost when disabled, so we can call it on
+    # every task run rather than threading state through the CLI.
+    tracing.init_tracing()
 
-    started = time.monotonic()
-    auto_path = dashboard.auto_log_path(root)
-    with event_log.fanout_log([str(auto_path), log_json], redactor=redactor) as sink:
-        sink.write(event_log.run_start(
-            task=task,
-            model=model,
-            effort=effort,
-            prompt_version=TASK_PROMPT_VERSIONS.get(task),
-        ))
-        try:
-            result = run_task(
-                task,
-                user_msg,
+    with tracing.span(
+        "claudestruct.task",
+        attributes={
+            "claudestruct.task": task,
+            "claudestruct.model": model,
+            "claudestruct.effort": effort,
+            "claudestruct.prompt_version": TASK_PROMPT_VERSIONS.get(task),
+        },
+    ) as task_span:
+        budget = max_bytes if max_bytes is not None else BUDGETS_PER_TASK.get(task, 600_000)
+        with tracing.span(
+            "claudestruct.context_gather",
+            attributes={"claudestruct.budget_bytes": budget},
+        ) as ctx_span:
+            ctx = gatherer(root=root, explicit_paths=paths, max_total_bytes=budget)
+            ctx_span.set_attribute("claudestruct.files", len(ctx.files))
+            ctx_span.set_attribute("claudestruct.total_bytes", ctx.total_bytes)
+        user_msg = build_user_message(description, ctx.render())
+
+        started = time.monotonic()
+        auto_path = dashboard.auto_log_path(root)
+        # `redactor` from W5.3 (PII / secret stripping) flows through the
+        # fanout sink so both the auto-log AND the optional --log-json
+        # mirror get scrubbed in one pass before disk write.
+        with event_log.fanout_log([str(auto_path), log_json], redactor=redactor) as sink:
+            sink.write(event_log.run_start(
+                task=task,
                 model=model,
-                max_tokens=max_tokens,
                 effort=effort,
-                stream_callback=on_chunk,
-            )
-        except ClaudestructError:
-            sink.write(event_log.run_end(
-                reason="error",
-                duration_ms=int((time.monotonic() - started) * 1000),
-                total_cost_usd=0.0,
+                prompt_version=TASK_PROMPT_VERSIONS.get(task),
             ))
-            raise
-        cost = estimate_cost_usd(
-            model=result.model,
-            input_tokens=result.input_tokens,
-            output_tokens=result.output_tokens,
-            cache_read_tokens=result.cache_read_tokens,
-            cache_creation_tokens=result.cache_creation_tokens,
-        )
-        sink.write(event_log.agent_usage(
-            role="claudestruct",
-            provider="anthropic",
-            model=result.model,
-            input_tokens=result.input_tokens,
-            output_tokens=result.output_tokens,
-            cache_read_tokens=result.cache_read_tokens,
-            cache_creation_tokens=result.cache_creation_tokens,
-            cost_usd=cost,
-        ))
-        if result.cache_warning:
-            sink.write(event_log.cache_warning(result.cache_warning))
-        duration_ms = int((time.monotonic() - started) * 1000)
-        sink.write(event_log.run_end(
-            reason=result.stop_reason or "complete",
-            duration_ms=duration_ms,
-            total_cost_usd=cost,
-        ))
+            try:
+                with tracing.span(
+                    "claudestruct.llm_call",
+                    attributes={"claudestruct.model": model},
+                ) as call_span:
+                    result = run_task(
+                        task,
+                        user_msg,
+                        model=model,
+                        max_tokens=max_tokens,
+                        effort=effort,
+                        stream_callback=on_chunk,
+                    )
+                    call_span.set_attribute("claudestruct.input_tokens", result.input_tokens)
+                    call_span.set_attribute("claudestruct.output_tokens", result.output_tokens)
+                    call_span.set_attribute("claudestruct.cache_read_tokens", result.cache_read_tokens)
+                    call_span.set_attribute("claudestruct.cache_creation_tokens", result.cache_creation_tokens)
+            except ClaudestructError:
+                sink.write(event_log.run_end(
+                    reason="error",
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                    total_cost_usd=0.0,
+                ))
+                raise
+            cost = estimate_cost_usd(
+                model=result.model,
+                input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens,
+                cache_read_tokens=result.cache_read_tokens,
+                cache_creation_tokens=result.cache_creation_tokens,
+            )
+            sink.write(event_log.agent_usage(
+                role="claudestruct",
+                provider="anthropic",
+                model=result.model,
+                input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens,
+                cache_read_tokens=result.cache_read_tokens,
+                cache_creation_tokens=result.cache_creation_tokens,
+                cost_usd=cost,
+            ))
+            if result.cache_warning:
+                sink.write(event_log.cache_warning(result.cache_warning))
+            duration_ms = int((time.monotonic() - started) * 1000)
+            sink.write(event_log.run_end(
+                reason=result.stop_reason or "complete",
+                duration_ms=duration_ms,
+                total_cost_usd=cost,
+            ))
+            task_span.set_attribute("claudestruct.cost_usd", cost)
+            task_span.set_attribute("claudestruct.duration_ms", duration_ms)
 
     return TaskRunOutcome(
         result=result,
