@@ -314,10 +314,13 @@ Goal: a managed service teams pay for. Open-core split: Waves 4-7 OSS, Wave 8 ho
   - Stripe SDK lazy-imported via `stripe_sdk_available()`; checkout returns a deterministic stub URL on the OSS path; webhook returns 503 with a clear "install stripe" message. `billing.checkout.create` writes an audit row under the caller's org chain (W8.4 integration).
   - Tests: `tests/test_billing.py` (17 cases) — model lifecycle, tier retention map, period bounds (incl. December roll-over), stub URL determinism, all four routes including auth gates and audit linkage.
   - Pending: live Checkout integration, canonical Stripe webhook handlers, per-tier token-cap enforcement at run-submit time, invoice PDF passthrough.
-- [ ] **W8.3 — Tenant-scoped sandbox**
-  - One Docker container per orchestrator-run; image is the published `ghcr.io/tonyandclaw/claudestruct` from W4.4
-  - Resource quotas (CPU, memory) enforced per-tier
-  - Depends on W6.1 daemon worker model
+- [~] **W8.3 — Tenant-scoped sandbox** (per-tier soft limits shipped; per-run Docker container deferred)
+  - `SandboxLimits` + `SANDBOX_LIMITS` table in `src/claudestruct/server/billing.py`: free=(1 concurrent, 5min, $0.50), team=(4 concurrent, 15min, $5), business=(16 concurrent, 60min, $50). `sandbox_limits_for_tier(tier_str)` falls back to free on unknown tiers (defense-in-depth so a future tier name can't accidentally grant business ceilings)
+  - `TIER_PRIORITY` (business=30 > team=20 > free=10) prevents free-tier bursts from starving paying customers
+  - Worker `_claim_one()` in `src/claudestruct/server/worker.py` rewritten: fetches all queued rows, joins per-org subscription, skips rows whose org is at concurrency cap, picks highest-tier row first (FIFO within tier). Eligible-set materialised in Python — fine for SQLite + thousands of queued rows; Postgres path via SELECT-FOR-UPDATE-SKIP-LOCKED tracked for the W8.3 follow-up
+  - `GET /v1/billing/subscription` now returns `sandbox_limits: { max_concurrent_runs, max_runtime_seconds, max_cost_usd }` so the SPA / CLI can render quota state without re-implementing the lookup table
+  - 6 new tests: free-tier concurrent cap blocks second claim, team-tier 4-of-5 cap, business priority jumps queue past older free run, limits surface in subscription response, unknown-tier falls back to free, per-org concurrency (org-A in flight ≠ org-B in flight)
+  - Pending: per-run Docker container (one container per orchestrator-run with CPU/memory quotas via `--cpus`/`--memory`) — needs the W4.4 GHCR image as the runtime base + a Docker socket policy on the daemon host. Tracked separately because the orchestration layer is sizable
 - [x] **W8.4 — Append-only hash-chained audit log**
   - `src/claudestruct/server/audit.py` — `AuditEntry` model with per-org `seq` + `prev_hash` + `entry_hash` columns, `compute_entry_hash()` over canonical-JSON payload + identity fields + ISO-8601 created_at, `record()` appends with the chain link computed, `verify_chain()` walks forward and reports the first divergence (`broken_at_seq`, `broken_reason`).
   - `src/claudestruct/server/routers/audit.py` — `GET /v1/audit/head` (viewer+; returns the all-zero genesis sentinel for empty chains), `GET /v1/audit` (admin; paginated, cursor-based), `GET /v1/audit/verify` (admin).
@@ -368,6 +371,10 @@ Reopen criterion: a signed enterprise contract or three serious leads asking for
 
 ## Last Update
 
+- 2026-04-27 — W8.3 tenant-scoped sandbox (limits + priority) ready for PR push:
+  - `SANDBOX_LIMITS` + `TIER_PRIORITY` per-tier tables in billing module; worker `_claim_one()` skips orgs at their concurrency cap and picks highest tier first; `/v1/billing/subscription` surfaces the active limits
+  - 6 new tests + 1 augment to existing billing test. Total Python: 234 passed (audit pre-existing failures unchanged); ruff clean
+  - Per-run Docker container with CPU/memory quotas deferred — separate orchestration-layer PR
 - 2026-04-27 — W6.4 GitHub OAuth login ready for PR push:
   - `UserSession` model + `oauth.py` provider helpers + `routers/oauth.py` with login / callback / me / logout
   - `auth.current_principal` now accepts a session cookie as fallback when no bearer is present (bearer still wins on conflict)
