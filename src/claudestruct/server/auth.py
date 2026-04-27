@@ -21,7 +21,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from claudestruct.server.models import ApiKey, Membership, Org, Role, User
+from claudestruct.server.models import ApiKey, Membership, Org, Role, User, UserSession
 
 _KEY_PREFIX = "ck_"
 _KEY_ID_BYTES = 8       # 16 hex chars
@@ -133,24 +133,78 @@ def get_session(request: Request) -> Session:
         session.close()
 
 
+def authenticate_session_cookie(
+    session: Session, cookie_value: str,
+) -> Principal | None:
+    """Look up a UserSession by cookie value, return its Principal.
+
+    None on every failure mode (unknown cookie, expired, revoked,
+    deleted user/org/membership). Cookie value is the
+    `session_token` minted by the OAuth callback (W6.4)."""
+    sess: UserSession | None = session.execute(
+        select(UserSession).where(UserSession.session_token == cookie_value)
+    ).scalar_one_or_none()
+    if sess is None or not sess.is_active():
+        return None
+
+    membership = session.execute(
+        select(Membership).where(
+            Membership.user_id == sess.user_id,
+            Membership.org_id == sess.org_id,
+        )
+    ).scalar_one_or_none()
+    if membership is None:
+        return None
+
+    user = session.get(User, sess.user_id)
+    org = session.get(Org, sess.org_id)
+    if user is None or org is None:
+        return None
+
+    return Principal(
+        user_id=user.id,
+        user_email=user.email,
+        org_id=org.id,
+        org_slug=org.slug,
+        role=Role(membership.role),
+    )
+
+
+_SESSION_COOKIE_NAME = "claudestruct_session"
+
+
 def current_principal(
+    request: Request,
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
     session: Session = Depends(get_session),
 ) -> Principal:
-    if creds is None or creds.scheme.lower() != "bearer":
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="missing bearer token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    principal = authenticate(session, creds.credentials)
-    if principal is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="invalid or revoked API key",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    return principal
+    """Auth chain: bearer token first, cookie session as fallback (W6.4).
+
+    Bearer wins so a CLI script with both a key and a stale cookie
+    behaves as the CLI key intends. Cookie path lets the SPA mount
+    against the same APIs.
+    """
+    if creds is not None and creds.scheme.lower() == "bearer":
+        principal = authenticate(session, creds.credentials)
+        if principal is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="invalid or revoked API key",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        return principal
+
+    cookie = request.cookies.get(_SESSION_COOKIE_NAME)
+    if cookie:
+        principal = authenticate_session_cookie(session, cookie)
+        if principal is not None:
+            return principal
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="missing bearer token or valid session cookie",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
 
 _ROLE_RANK = {Role.viewer: 0, Role.member: 1, Role.admin: 2}

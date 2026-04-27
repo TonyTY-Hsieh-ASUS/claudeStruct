@@ -158,6 +158,42 @@ class Run(Base):
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class UserSession(Base):
+    """OAuth-derived browser session (W6.4).
+
+    Issued by the OAuth callback after a successful provider exchange;
+    surfaced to the browser as a `claudestruct_session` HTTPOnly cookie.
+    The cookie value is the random `session_token` (NOT the row id), so
+    even DB read access doesn't directly leak active sessions through
+    side-channels like log lines that mention `id=42`.
+
+    `expires_at` is a hard cap independent of the cookie's `Max-Age`
+    so a stolen cookie still rolls over within a bounded window.
+    """
+
+    __tablename__ = "user_sessions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    org_id: Mapped[int] = mapped_column(ForeignKey("orgs.id", ondelete="CASCADE"), index=True)
+    session_token: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    provider: Mapped[str] = mapped_column(String(32))  # "github", "google", ...
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now_utc)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    def is_active(self, *, now: datetime | None = None) -> bool:
+        # SQLite strips tzinfo on round-trip, so we may get a naive
+        # datetime back from the DB even though we wrote a tz-aware
+        # one. Force-attach UTC to make the comparison total-orderable
+        # against `now`, which we always produce as tz-aware.
+        ts = now or _now_utc()
+        exp = self.expires_at
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        return self.revoked_at is None and ts < exp
+
+
 class GitHubInstallation(Base):
     """GitHub App install ↔ org mapping (W6.6).
 

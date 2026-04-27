@@ -703,6 +703,258 @@ def test_verify_signature_unit():
     assert verify_signature("wrong", body, good) is False
 
 
+# --- W6.4 OAuth login + cookie sessions --------------------------------
+
+from typing import Any  # noqa: E402
+
+
+class _StubResponse:
+    def __init__(self, status_code: int, payload: Any):
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self) -> Any:
+        return self._payload
+
+
+class _StubGitHubClient:
+    """Fake httpx.Client driven from a per-test scripted plan.
+
+    Tests prepare a list of (predicate, response) pairs; the first
+    matching predicate wins. Lets us assert what URLs got hit AND
+    short-circuit unexpected requests to a 500 instead of real HTTP.
+    """
+
+    def __init__(self, plan: list[tuple[Any, _StubResponse]]):
+        self.plan = plan
+        self.calls: list[tuple[str, str, dict]] = []
+
+    def post(self, url, **kw):
+        self.calls.append(("POST", url, kw))
+        return self._dispatch("POST", url)
+
+    def get(self, url, **kw):
+        self.calls.append(("GET", url, kw))
+        return self._dispatch("GET", url)
+
+    def _dispatch(self, method, url):
+        for pred, resp in self.plan:
+            if pred(method, url):
+                return resp
+        return _StubResponse(500, {"error": "no plan match"})
+
+    def close(self):
+        pass
+
+
+def _wire_github_oauth(env, monkeypatch, *, client: _StubGitHubClient):
+    """Set the env vars the OAuth helpers consume + inject the stub."""
+    monkeypatch.setenv("CLAUDESTRUCT_GITHUB_OAUTH_CLIENT_ID", "test-client-id")
+    monkeypatch.setenv("CLAUDESTRUCT_GITHUB_OAUTH_CLIENT_SECRET", "test-client-secret")
+    monkeypatch.setenv("CLAUDESTRUCT_OAUTH_REDIRECT_BASE", "http://daemon.test")
+    env["app"].state.oauth_http_client = lambda: client
+
+
+def test_oauth_login_redirects_to_github_when_configured(env, monkeypatch):
+    monkeypatch.setenv("CLAUDESTRUCT_GITHUB_OAUTH_CLIENT_ID", "x")
+    monkeypatch.setenv("CLAUDESTRUCT_GITHUB_OAUTH_CLIENT_SECRET", "y")
+    r = env["client"].get("/v1/auth/github/login", follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers["location"].startswith(
+        "https://github.com/login/oauth/authorize?"
+    )
+    # State cookie was set so the callback can verify it later.
+    assert "claudestruct_oauth_state=" in r.headers.get("set-cookie", "")
+
+
+def test_oauth_login_503_when_unconfigured(env, monkeypatch):
+    monkeypatch.delenv("CLAUDESTRUCT_GITHUB_OAUTH_CLIENT_ID", raising=False)
+    monkeypatch.delenv("CLAUDESTRUCT_GITHUB_OAUTH_CLIENT_SECRET", raising=False)
+    r = env["client"].get("/v1/auth/github/login", follow_redirects=False)
+    assert r.status_code == 503
+
+
+def test_oauth_callback_state_mismatch_400(env, monkeypatch):
+    _wire_github_oauth(env, monkeypatch, client=_StubGitHubClient([]))
+    # No state cookie set → mismatch.
+    r = env["client"].get(
+        "/v1/auth/github/callback?code=abc&state=def",
+        follow_redirects=False,
+    )
+    assert r.status_code == 400
+
+
+def test_oauth_callback_unregistered_email_403(env, monkeypatch):
+    plan = [
+        (lambda m, u: m == "POST" and "access_token" in u,
+         _StubResponse(200, {"access_token": "gh-token"})),
+        (lambda m, u: m == "GET" and u.endswith("/user"),
+         _StubResponse(200, {
+             "login": "stranger", "email": "stranger@example.com", "name": "Stranger",
+         })),
+    ]
+    _wire_github_oauth(env, monkeypatch, client=_StubGitHubClient(plan))
+
+    env["client"].cookies.set(
+        "claudestruct_oauth_state", "s123", path="/v1/auth/",
+    )
+    r = env["client"].get(
+        "/v1/auth/github/callback?code=abc&state=s123",
+        follow_redirects=False,
+    )
+    assert r.status_code == 403
+    assert "not registered" in r.json()["detail"]
+
+
+def test_oauth_callback_happy_path_sets_session_cookie(env, monkeypatch):
+    plan = [
+        (lambda m, u: m == "POST" and "access_token" in u,
+         _StubResponse(200, {"access_token": "gh-token"})),
+        (lambda m, u: m == "GET" and u.endswith("/user"),
+         _StubResponse(200, {
+             "login": "alice", "email": "admin@a", "name": "Alice",
+         })),
+    ]
+    _wire_github_oauth(env, monkeypatch, client=_StubGitHubClient(plan))
+
+    env["client"].cookies.set(
+        "claudestruct_oauth_state", "s123", path="/v1/auth/",
+    )
+    r = env["client"].get(
+        "/v1/auth/github/callback?code=abc&state=s123",
+        follow_redirects=False,
+    )
+    assert r.status_code == 302
+    set_cookie = r.headers.get("set-cookie", "")
+    assert "claudestruct_session=" in set_cookie
+    assert "HttpOnly" in set_cookie
+
+
+def test_oauth_callback_falls_back_to_user_emails_when_user_email_missing(env, monkeypatch):
+    """GitHub /user returns null email when the user's email is private;
+    the helper should then fetch /user/emails and pick the verified primary."""
+    plan = [
+        (lambda m, u: m == "POST" and "access_token" in u,
+         _StubResponse(200, {"access_token": "gh-token"})),
+        (lambda m, u: m == "GET" and u.endswith("/user"),
+         _StubResponse(200, {"login": "admin-alice", "email": None, "name": "A"})),
+        (lambda m, u: m == "GET" and u.endswith("/user/emails"),
+         _StubResponse(200, [
+             {"email": "noreply@x.com", "primary": False, "verified": True},
+             {"email": "admin@a", "primary": True, "verified": True},
+         ])),
+    ]
+    _wire_github_oauth(env, monkeypatch, client=_StubGitHubClient(plan))
+    env["client"].cookies.set(
+        "claudestruct_oauth_state", "s123", path="/v1/auth/",
+    )
+    r = env["client"].get(
+        "/v1/auth/github/callback?code=abc&state=s123",
+        follow_redirects=False,
+    )
+    assert r.status_code == 302  # successful login
+
+
+def test_oauth_callback_handles_token_exchange_failure(env, monkeypatch):
+    plan = [
+        (lambda m, u: m == "POST" and "access_token" in u,
+         _StubResponse(200, {"error": "bad_verification_code"})),
+    ]
+    _wire_github_oauth(env, monkeypatch, client=_StubGitHubClient(plan))
+    env["client"].cookies.set(
+        "claudestruct_oauth_state", "s123", path="/v1/auth/",
+    )
+    r = env["client"].get(
+        "/v1/auth/github/callback?code=abc&state=s123",
+        follow_redirects=False,
+    )
+    assert r.status_code == 400
+    assert "oauth error" in r.json()["detail"]
+
+
+def _login_via_callback(env, monkeypatch, email="admin@a"):
+    """Drive the full OAuth flow and return the session cookie value."""
+    plan = [
+        (lambda m, u: m == "POST" and "access_token" in u,
+         _StubResponse(200, {"access_token": "gh-token"})),
+        (lambda m, u: m == "GET" and u.endswith("/user"),
+         _StubResponse(200, {"login": "x", "email": email, "name": "x"})),
+    ]
+    _wire_github_oauth(env, monkeypatch, client=_StubGitHubClient(plan))
+    env["client"].cookies.set(
+        "claudestruct_oauth_state", "s123", path="/v1/auth/",
+    )
+    r = env["client"].get(
+        "/v1/auth/github/callback?code=abc&state=s123",
+        follow_redirects=False,
+    )
+    assert r.status_code == 302
+    return env["client"].cookies.get("claudestruct_session")
+
+
+def test_session_cookie_authenticates_dashboard_request(env, monkeypatch):
+    cookie = _login_via_callback(env, monkeypatch)
+    assert cookie
+    # Dashboard call without bearer — cookie does the work.
+    r = env["client"].get("/v1/dashboard")
+    assert r.status_code == 200
+
+
+def test_whoami_returns_principal_for_session_cookie(env, monkeypatch):
+    _login_via_callback(env, monkeypatch, email="admin@a")
+    r = env["client"].get("/v1/auth/me")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["email"] == "admin@a"
+    assert body["org_slug"] == "org-a"
+    assert body["role"] == "admin"
+    assert body["auth_method"] == "session"
+
+
+def test_whoami_401_without_cookie(env, monkeypatch):
+    r = env["client"].get("/v1/auth/me")
+    assert r.status_code == 401
+
+
+def test_logout_revokes_session(env, monkeypatch):
+    _login_via_callback(env, monkeypatch)
+    # Confirm the session works.
+    r1 = env["client"].get("/v1/dashboard")
+    assert r1.status_code == 200
+    r2 = env["client"].post("/v1/auth/logout")
+    assert r2.status_code == 200
+    # Cookie remains in jar locally but is server-side revoked.
+    r3 = env["client"].get("/v1/dashboard")
+    assert r3.status_code == 401
+
+
+def test_logout_idempotent_without_cookie(env):
+    # Clear any prior session cookies to simulate a fresh logout call.
+    env["client"].cookies.clear()
+    r = env["client"].post("/v1/auth/logout")
+    assert r.status_code == 200
+
+
+def test_bearer_wins_over_session_cookie(env, monkeypatch):
+    """If both a valid bearer token and a session cookie are present,
+    bearer should take precedence — CLI calls with stale cookies must
+    still behave as the bearer's identity intends."""
+    _login_via_callback(env, monkeypatch, email="admin@a")
+    # Now hit a route with the viewer's bearer too — should still
+    # succeed (both auth methods work) and not blow up.
+    r = env["client"].get("/v1/dashboard", headers=_auth(env["keys"]["viewer@a"]))
+    assert r.status_code == 200
+
+
+def test_revoked_session_cookie_falls_through_to_401(env, monkeypatch):
+    cookie = _login_via_callback(env, monkeypatch)
+    env["client"].post("/v1/auth/logout")
+    # Restore the cookie to simulate an attacker / stale tab.
+    env["client"].cookies.set("claudestruct_session", cookie, path="/")
+    r = env["client"].get("/v1/dashboard")
+    assert r.status_code == 401
+
+
 def test_webhook_run_isolated_to_installation_org(env):
     """A webhook for org-a's installation must NOT be visible to org-b's
     members (cross-org isolation through the runs table)."""
