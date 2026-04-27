@@ -241,9 +241,13 @@ Goal: 5-50 devs share the tool with shared visibility, shared budgets, and team-
   - `GET /v1/dashboard/team` endpoint reads the `runs` table for the caller's org (filtered to terminal states `done`/`failed` so queued/running rows don't skew rollups). Returns `total_runs` + `total_cost_usd` headline numbers, `by_author` leaderboard sorted by spend desc with email + run-count + tokens, `by_task` task-type breakdown, plus `recent` (default 50, max 500) for the activity feed
   - New schemas in `src/claudestruct/server/schema.py`: `AuthorRollup`, `TaskRollup`, `TeamDashboardResponse`. Tenant-scoped via `Run.org_id == principal.org_id` so an org can never see another org's spend
   - Pending: regression alerts ("run cost > 2σ over team baseline" → Slack/email) and budget-cap rollups per team — both depend on a notification surface that doesn't exist yet
-- [ ] **W6.6 — GitHub App**
-  - Replaces personal-token usage; per-org installation; opens PRs as `claudeStruct[bot]`
-  - Webhook-triggered runs (`pull_request`, `issue_comment` with `/cs review`)
+- [~] **W6.6 — GitHub App** (webhook receiver shipped; outbound bot-as-actor + Checks API deferred)
+  - `GitHubInstallation` SQLAlchemy model maps `installation_id` ↔ `org_id` with per-install `webhook_secret` + optional `repo_filter` substring + `bot_user_id` sentinel for attribution
+  - `POST /v1/github/webhook` — auth-bypassing endpoint (signature is the only gate); reads raw body for HMAC stability before JSON-parsing; verifies `X-Hub-Signature-256` via `hmac.compare_digest`; same 401 status on unknown installation AND bad signature so attackers can't enumerate IDs
+  - Trigger detection in `routers/github.py:detect_trigger()` matches `pull_request.opened|synchronize|reopened` and `issue_comment.created` whose body contains `/cs review` (case-insensitive); ignores plain (non-PR) issues; runs are attributed to the install's bot user so the team-dashboard leaderboard shows them as `github-bot@<slug>` rather than mis-crediting a human
+  - `cs serve add-github-install <installation_id> <org_slug> [--secret SECRET] [--repo-filter SUB]` CLI subcommand auto-generates the webhook secret if omitted, prints it once, creates the sentinel bot user + membership idempotently
+  - Tests: 14 cases — unknown install / bad sig / missing-sig 401, PR open/synchronize enqueue + closed ignore, comment with/without `/cs review`, plain-issue rejection, repo filter, ping event short-circuit, revoked install, signature unit, cross-org isolation through the runs table
+  - Pending: outbound API calls (posting the verdict back as a PR review comment, opening PRs as `claudeStruct[bot]`, GitHub Checks API integration) — depends on storing the GitHub App private key + `installation_token` minting, separate PR
 - [x] **W6.7 — GitLab + Bitbucket integrations**
   - `src/claudestruct/integrations/gitlab-ci-cs-review.yml` — MR-triggered job, posts verdict via GitLab Notes API using `CI_JOB_TOKEN`. Honors `ANTHROPIC_API_KEY` + optional `CLAUDESTRUCT_MONTHLY_CAP_USD`.
   - `src/claudestruct/integrations/bitbucket-pipelines-cs-review.yml` — `pull-requests."**"` step, posts via Bitbucket 2.0 Comments API using `BITBUCKET_USER` + `BITBUCKET_APP_PASSWORD`.
@@ -360,6 +364,11 @@ Reopen criterion: a signed enterprise contract or three serious leads asking for
 
 ## Last Update
 
+- 2026-04-27 — W6.6 GitHub webhook receiver ready for PR push:
+  - `POST /v1/github/webhook` with HMAC SHA-256 signature verification, installation→org mapping, trigger detection for PR open/sync/reopen + `/cs review` comments, repo substring filter, sentinel bot user attribution
+  - `cs serve add-github-install` CLI for registration
+  - 14 new tests (signature/install gate, every trigger surface, cross-org isolation). Total Python: 182 passed; ruff clean
+  - Outbound API (PR comments, Checks API, bot-as-actor) deferred — needs GitHub App private key + token minting, separate PR
 - 2026-04-26 — W5.3 close-out: `claw-squad runs purge` shipped. New `src/runs/purge.ts` mirrors `claudestruct.redact.purge_runs` (mtime-based, `dryRun`, injectable `now`); `claw-squad runs list` lists run logs with age/size; `claw-squad runs purge --older-than-days N [--dry-run]` prunes them. 7 new vitest cases in `tests/runs-purge.test.ts`. Total TS: 309 tests passing; tsc clean. Removes the only "Pending" tail on W5.3.
 - 2026-04-26 — Wave 6 mid-roll ready for PR push:
   - W6.1 ✅ daemon-mode background runner: `Run` model, `process_pending_run` + `WorkerThread`, `drain_queue`, `cs serve worker` subcommand, real DB-backed POST/GET runs with tenant isolation (cross-org → 404)

@@ -28,6 +28,9 @@ from claudestruct.server.routers import (
     dashboard as dashboard_router,
 )
 from claudestruct.server.routers import (
+    github as github_router,
+)
+from claudestruct.server.routers import (
     health as health_router,
 )
 from claudestruct.server.routers import (
@@ -82,5 +85,6 @@ def create_app(
     app.include_router(runs_router.router)
     app.include_router(audit_router.router)
     app.include_router(billing_router.router)
+    app.include_router(github_router.router)
 
     return app

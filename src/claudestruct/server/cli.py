@@ -181,6 +181,91 @@ def serve_add_key(email: str, org_slug: str, name: str | None,
         click.echo("Store the full_key now; it cannot be retrieved later.")
 
 
+@serve_group.command("add-github-install",
+                     help="Register a GitHub App installation (W6.6).")
+@click.argument("installation_id", type=int)
+@click.argument("org_slug")
+@click.option("--secret", default=None,
+              help="Webhook secret. Auto-generated if omitted; printed once.")
+@click.option("--repo-filter", default=None,
+              help="Optional case-insensitive substring filter on owner/name.")
+@click.option("--db-url", default=None, envvar="CLAUDESTRUCT_DATABASE_URL")
+def serve_add_github_install(
+    installation_id: int,
+    org_slug: str,
+    secret: str | None,
+    repo_filter: str | None,
+    db_url: str | None,
+) -> None:
+    """Map a GitHub App installation_id to a local org.
+
+    Creates (or reuses) a sentinel `github-bot@<slug>.invalid` user
+    that webhook-driven runs are attributed to, so the team
+    dashboard's leaderboard surfaces them as a bot rather than
+    crediting / blaming a real engineer.
+    """
+    _ensure_server_deps()
+    import secrets as _secrets
+
+    from sqlalchemy import select
+
+    from claudestruct.server.db import init_db, make_engine, make_session_factory
+    from claudestruct.server.models import (
+        GitHubInstallation,
+        Membership,
+        Org,
+        Role,
+        User,
+    )
+
+    engine = make_engine(db_url)
+    init_db(engine)
+    factory = make_session_factory(engine)
+
+    with factory() as session:
+        org = session.execute(
+            select(Org).where(Org.slug == org_slug)
+        ).scalar_one_or_none()
+        if org is None:
+            raise click.ClickException(f"org '{org_slug}' not found.")
+
+        existing = session.execute(
+            select(GitHubInstallation).where(
+                GitHubInstallation.installation_id == installation_id
+            )
+        ).scalar_one_or_none()
+        if existing is not None and existing.is_active():
+            raise click.ClickException(
+                f"installation_id={installation_id} already registered for org_id={existing.org_id}"
+            )
+
+        bot_email = f"github-bot@{org_slug}.invalid"
+        bot = session.execute(
+            select(User).where(User.email == bot_email)
+        ).scalar_one_or_none()
+        if bot is None:
+            bot = User(email=bot_email, name=f"GitHub bot ({org_slug})")
+            session.add(bot)
+            session.flush()
+            session.add(Membership(
+                user_id=bot.id, org_id=org.id, role=Role.member.value,
+            ))
+
+        webhook_secret = secret or _secrets.token_urlsafe(32)
+        row = GitHubInstallation(
+            installation_id=installation_id,
+            org_id=org.id,
+            webhook_secret=webhook_secret,
+            repo_filter=repo_filter,
+            bot_user_id=bot.id,
+        )
+        session.add(row)
+        session.commit()
+        click.echo(f"installation_id={installation_id} → org={org_slug}")
+        click.echo(f"webhook_secret={webhook_secret}")
+        click.echo("Paste this secret into the GitHub App settings as the Webhook secret.")
+
+
 @serve_group.command("worker", help="Run the daemon-mode background worker (W6.1).")
 @click.option("--db-url", default=None, envvar="CLAUDESTRUCT_DATABASE_URL")
 @click.option("--run-root", type=click.Path(file_okay=False), default=".",

@@ -490,3 +490,226 @@ def test_team_dashboard_limit_validation(env):
         "/v1/dashboard/team?limit=10000", headers=_auth(env["keys"]["viewer@a"]),
     )
     assert r.status_code == 400
+
+
+# --- W6.6 GitHub App webhook --------------------------------------------
+
+import hashlib  # noqa: E402
+import hmac as _hmac  # noqa: E402
+
+
+def _install(env, *, installation_id=12345, secret="hush", repo_filter=None,
+             org_slug="org-a") -> int:
+    """Register a GitHub App installation for tests. Returns the
+    installation row's PK."""
+    from sqlalchemy import select
+
+    from claudestruct.server.models import (
+        GitHubInstallation,
+        Membership,
+        Org,
+        Role,
+        User,
+    )
+    with env["factory"]() as session:
+        org = session.execute(
+            select(Org).where(Org.slug == org_slug)
+        ).scalar_one()
+        bot_email = f"github-bot@{org_slug}.invalid"
+        bot = session.execute(
+            select(User).where(User.email == bot_email)
+        ).scalar_one_or_none()
+        if bot is None:
+            bot = User(email=bot_email, name=f"bot {org_slug}")
+            session.add(bot)
+            session.flush()
+            session.add(Membership(
+                user_id=bot.id, org_id=org.id, role=Role.member.value,
+            ))
+        row = GitHubInstallation(
+            installation_id=installation_id,
+            org_id=org.id,
+            webhook_secret=secret,
+            repo_filter=repo_filter,
+            bot_user_id=bot.id,
+        )
+        session.add(row)
+        session.commit()
+        return row.id
+
+
+def _sign(secret: str, body: bytes) -> str:
+    return "sha256=" + _hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+
+
+def _post_webhook(env, payload: dict, *, secret: str = "hush",
+                  event: str = "pull_request",
+                  override_signature: str | None = None):
+    body = json.dumps(payload).encode()
+    sig = override_signature if override_signature is not None else _sign(secret, body)
+    return env["client"].post(
+        "/v1/github/webhook",
+        content=body,
+        headers={
+            "X-GitHub-Event": event,
+            "X-Hub-Signature-256": sig,
+            "Content-Type": "application/json",
+        },
+    )
+
+
+def _pr_payload(*, installation_id=12345, action="opened",
+                repo="acme/widgets", number=42, title="add retry",
+                body="Adds retry logic to the API client."):
+    return {
+        "action": action,
+        "installation": {"id": installation_id},
+        "repository": {"full_name": repo},
+        "pull_request": {"number": number, "title": title, "body": body},
+    }
+
+
+def _comment_payload(*, installation_id=12345, body="/cs review please",
+                     repo="acme/widgets", number=42, has_pr=True,
+                     login="alice"):
+    issue: dict = {"number": number}
+    if has_pr:
+        issue["pull_request"] = {"url": "..."}
+    return {
+        "action": "created",
+        "installation": {"id": installation_id},
+        "repository": {"full_name": repo},
+        "issue": issue,
+        "comment": {"body": body, "user": {"login": login}},
+    }
+
+
+def test_webhook_unknown_installation_401(env):
+    r = _post_webhook(env, _pr_payload(installation_id=99999), secret="hush")
+    assert r.status_code == 401
+
+
+def test_webhook_bad_signature_401(env):
+    _install(env, secret="hush")
+    r = _post_webhook(env, _pr_payload(), secret="wrong")
+    assert r.status_code == 401
+
+
+def test_webhook_missing_signature_header_401(env):
+    _install(env, secret="hush")
+    r = _post_webhook(env, _pr_payload(), override_signature="")
+    assert r.status_code == 401
+
+
+def test_webhook_pr_opened_enqueues_run(env):
+    _install(env, secret="hush")
+    r = _post_webhook(env, _pr_payload(action="opened"))
+    assert r.status_code == 202
+    body = r.json()
+    assert body["status"] == "queued"
+    assert body["trigger"] == "pull_request.opened"
+    run_id = body["run_id"]
+    # Verify the row exists, attributed to the bot user.
+    from sqlalchemy import select
+
+    from claudestruct.server.models import Run, User
+    with env["factory"]() as session:
+        run = session.execute(select(Run).where(Run.run_id == run_id)).scalar_one()
+        bot = session.execute(select(User).where(User.id == run.user_id)).scalar_one()
+        assert bot.email.startswith("github-bot@")
+        assert run.task == "review"
+        assert "PR #42" in run.description
+
+
+def test_webhook_pr_synchronize_enqueues(env):
+    _install(env, secret="hush")
+    r = _post_webhook(env, _pr_payload(action="synchronize"))
+    assert r.status_code == 202
+    assert r.json()["trigger"] == "pull_request.synchronize"
+
+
+def test_webhook_pr_closed_ignored(env):
+    _install(env, secret="hush")
+    r = _post_webhook(env, _pr_payload(action="closed"))
+    assert r.status_code == 202  # signature ok, just no enqueue
+    assert r.json()["status"] == "ignored"
+
+
+def test_webhook_comment_with_cs_review_enqueues(env):
+    _install(env, secret="hush")
+    r = _post_webhook(env, _comment_payload(body="LGTM but /cs review"),
+                      event="issue_comment")
+    assert r.status_code == 202
+    assert r.json()["trigger"] == "issue_comment.cs-review"
+
+
+def test_webhook_comment_without_command_ignored(env):
+    _install(env, secret="hush")
+    r = _post_webhook(env, _comment_payload(body="lgtm"), event="issue_comment")
+    assert r.status_code == 202
+    assert r.json()["status"] == "ignored"
+
+
+def test_webhook_comment_on_plain_issue_ignored(env):
+    """Plain (non-PR) issues don't have diffs; /cs review on them is a no-op."""
+    _install(env, secret="hush")
+    r = _post_webhook(env,
+                      _comment_payload(body="/cs review", has_pr=False),
+                      event="issue_comment")
+    assert r.status_code == 202
+    assert r.json()["status"] == "ignored"
+
+
+def test_webhook_repo_filter_drops_non_matching(env):
+    _install(env, secret="hush", repo_filter="widgets")
+    r1 = _post_webhook(env, _pr_payload(repo="acme/gadgets"))
+    assert r1.status_code == 202
+    assert r1.json()["status"] == "ignored"
+    r2 = _post_webhook(env, _pr_payload(repo="acme/widgets"))
+    assert r2.json()["status"] == "queued"
+
+
+def test_webhook_ping_event_returns_ok(env):
+    _install(env, secret="hush")
+    r = _post_webhook(env,
+                      {"installation": {"id": 12345}, "zen": "Practicality"},
+                      event="ping")
+    assert r.status_code == 202
+    assert r.json() == {"status": "ok", "event": "ping"}
+
+
+def test_webhook_revoked_install_rejected(env):
+    install_pk = _install(env, secret="hush")
+    from datetime import datetime, timezone
+
+    from claudestruct.server.models import GitHubInstallation
+    with env["factory"]() as session:
+        row = session.get(GitHubInstallation, install_pk)
+        row.revoked_at = datetime.now(timezone.utc)
+        session.commit()
+    r = _post_webhook(env, _pr_payload(), secret="hush")
+    assert r.status_code == 401  # same shape as unknown-install
+
+
+def test_verify_signature_unit():
+    """Locks the HMAC contract that the production endpoint depends on."""
+    from claudestruct.server.routers.github import verify_signature
+    body = b'{"hello":"world"}'
+    good = "sha256=" + _hmac.new(b"shh", body, hashlib.sha256).hexdigest()
+    assert verify_signature("shh", body, good) is True
+    assert verify_signature("shh", body, good.replace("sha256=", "sha1=")) is False
+    assert verify_signature("shh", body, None) is False
+    assert verify_signature("shh", body, "") is False
+    assert verify_signature("wrong", body, good) is False
+
+
+def test_webhook_run_isolated_to_installation_org(env):
+    """A webhook for org-a's installation must NOT be visible to org-b's
+    members (cross-org isolation through the runs table)."""
+    _install(env, installation_id=11111, secret="hush", org_slug="org-a")
+    r = _post_webhook(env, _pr_payload(installation_id=11111))
+    run_id = r.json()["run_id"]
+    g = env["client"].get(f"/v1/runs/{run_id}", headers=_auth(env["keys"]["admin@b"]))
+    assert g.status_code == 404
+    g2 = env["client"].get(f"/v1/runs/{run_id}", headers=_auth(env["keys"]["viewer@a"]))
+    assert g2.status_code == 200
