@@ -50,6 +50,85 @@ AUDIT_RETENTION_DAYS: dict[Tier, int] = {
 }
 
 
+# --- Tenant-scoped sandbox limits (W8.3) ----------------------------
+#
+# These caps gate the W6.1 worker. The worker reads them via
+# ``sandbox_limits_for_org()``; an org over its concurrent limit is
+# skipped (its rows stay queued and get picked up when a slot frees).
+# Higher tiers also win priority via ``TIER_PRIORITY`` so a free-tier
+# burst can't starve paying customers.
+#
+# Rationale for the numbers (revisit when we have telemetry):
+#   - free: 1 concurrent run, 5 min wallclock, $0.50/run cost cap.
+#     The cost cap matches `cs review`'s typical spend; it pushes
+#     `cs plan --effort max` into the paid tiers.
+#   - team: 4 concurrent runs, 15 min wallclock, $5/run.
+#   - business: 16 concurrent runs, 60 min wallclock, $50/run.
+
+class SandboxLimits:
+    """Hard caps applied per run. Stored in code for now; if we ever
+    want per-org overrides, this becomes a DB-backed lookup with the
+    static table as the floor."""
+
+    def __init__(
+        self,
+        *,
+        max_concurrent_runs: int,
+        max_runtime_seconds: int,
+        max_cost_usd: float,
+    ) -> None:
+        self.max_concurrent_runs = max_concurrent_runs
+        self.max_runtime_seconds = max_runtime_seconds
+        self.max_cost_usd = max_cost_usd
+
+    def as_dict(self) -> dict[str, int | float]:
+        return {
+            "max_concurrent_runs": self.max_concurrent_runs,
+            "max_runtime_seconds": self.max_runtime_seconds,
+            "max_cost_usd": self.max_cost_usd,
+        }
+
+
+SANDBOX_LIMITS: dict[Tier, SandboxLimits] = {
+    Tier.free: SandboxLimits(
+        max_concurrent_runs=1, max_runtime_seconds=300, max_cost_usd=0.5,
+    ),
+    Tier.team: SandboxLimits(
+        max_concurrent_runs=4, max_runtime_seconds=900, max_cost_usd=5.0,
+    ),
+    Tier.business: SandboxLimits(
+        max_concurrent_runs=16, max_runtime_seconds=3600, max_cost_usd=50.0,
+    ),
+}
+
+
+# Higher number = picked first when the queue holds runs from
+# multiple tiers simultaneously. business > team > free.
+TIER_PRIORITY: dict[Tier, int] = {
+    Tier.business: 30,
+    Tier.team: 20,
+    Tier.free: 10,
+}
+
+
+def sandbox_limits_for_tier(tier: str) -> SandboxLimits:
+    """Look up the caps for a tier string. Falls back to free-tier on
+    unknown values so a future tier name can't accidentally grant
+    business-tier ceilings."""
+    try:
+        t = Tier(tier)
+    except ValueError:
+        t = Tier.free
+    return SANDBOX_LIMITS.get(t, SANDBOX_LIMITS[Tier.free])
+
+
+def tier_priority_for(tier: str) -> int:
+    try:
+        return TIER_PRIORITY[Tier(tier)]
+    except (ValueError, KeyError):
+        return TIER_PRIORITY[Tier.free]
+
+
 class Subscription(Base):
     """One row per org. Created lazily on first checkout; the absence
     of a row means the org is on the free tier."""

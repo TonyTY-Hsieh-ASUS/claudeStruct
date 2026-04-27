@@ -48,6 +48,7 @@ from claudestruct.context import (
     gather_review_context,
 )
 from claudestruct.runner import run_task_and_log
+from claudestruct.server import billing as billing_mod
 from claudestruct.server.models import Run, RunStatus
 
 log = logging.getLogger("claudestruct.server.worker")
@@ -64,25 +65,67 @@ def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _claim_one(session: Session) -> Run | None:
-    """Atomically move the oldest queued Run to running and return it.
+def _org_concurrency(session: Session, org_id: int) -> int:
+    """How many runs are currently `running` for this org. Used to gate
+    the per-tier concurrency cap (W8.3)."""
+    rows = session.execute(
+        select(Run.id).where(
+            Run.org_id == org_id,
+            Run.status == RunStatus.running.value,
+        )
+    ).all()
+    return len(rows)
 
-    On Postgres this is a SELECT-FOR-UPDATE-SKIP-LOCKED; on SQLite the
-    DB serialises writes so the simpler "select then update" works.
-    The ``in_state_queued`` filter guards a benign race where two
-    workers see the same row simultaneously — the loser's update is a
-    no-op because the row's status already moved.
+
+def _claim_one(session: Session) -> Run | None:
+    """Atomically move the next eligible queued Run to running.
+
+    Selection rules (W8.3 tenant-scoped sandbox):
+      1. Skip orgs that are already at their tier's concurrency cap —
+         their rows stay queued and get picked when a slot frees.
+      2. Among eligible orgs, pick by tier priority (business > team
+         > free), breaking ties on `created_at` (FIFO within a tier).
+
+    On Postgres this would be one SELECT-FOR-UPDATE-SKIP-LOCKED; on
+    SQLite + small queues we fold in Python after a wider fetch,
+    which scales fine to thousands of queued rows. When we move to
+    Postgres the SELECT can include a window function instead.
     """
-    row = session.execute(
-        select(Run).where(Run.status == RunStatus.queued.value).order_by(Run.created_at).limit(1)
-    ).scalar_one_or_none()
-    if row is None:
+    queued = list(session.execute(
+        select(Run).where(Run.status == RunStatus.queued.value).order_by(Run.created_at)
+    ).scalars())
+    if not queued:
         return None
-    row.status = RunStatus.running.value
-    row.started_at = _now_utc()
+
+    # Resolve each org once — the Subscription read is cheap with
+    # the per-org index but doing it per-row would be wasteful.
+    org_to_tier: dict[int, str] = {}
+    org_concurrency: dict[int, int] = {}
+    eligible: list[tuple[int, Run]] = []
+    for run in queued:
+        if run.org_id not in org_to_tier:
+            sub = billing_mod.get_or_default(session, run.org_id)
+            org_to_tier[run.org_id] = sub.tier
+            org_concurrency[run.org_id] = _org_concurrency(session, run.org_id)
+        tier = org_to_tier[run.org_id]
+        limit = billing_mod.sandbox_limits_for_tier(tier).max_concurrent_runs
+        if org_concurrency[run.org_id] >= limit:
+            continue
+        priority = billing_mod.tier_priority_for(tier)
+        eligible.append((priority, run))
+
+    if not eligible:
+        return None
+    # Highest priority first; created_at is already the secondary
+    # order from the `queued` list since stable Python sort preserves it.
+    eligible.sort(key=lambda x: -x[0])
+    chosen = eligible[0][1]
+
+    chosen.status = RunStatus.running.value
+    chosen.started_at = _now_utc()
     session.commit()
-    session.refresh(row)
-    return row
+    session.refresh(chosen)
+    return chosen
 
 
 def process_pending_run(

@@ -394,6 +394,155 @@ def test_drain_queue_processes_all_pending(env):
     assert drain_queue(env["factory"], env["tmp_path"], runner=_stub_runner) == 0
 
 
+# --- W8.3 tenant-scoped sandbox: per-tier limits + queue priority -----
+
+def _set_tier(env, org_slug, tier):
+    """Force-set an org's subscription tier for tests."""
+    from sqlalchemy import select
+
+    from claudestruct.server.billing import Subscription, Tier
+    from claudestruct.server.models import Org
+    with env["factory"]() as session:
+        org = session.execute(
+            select(Org).where(Org.slug == org_slug)
+        ).scalar_one()
+        sub = session.execute(
+            select(Subscription).where(Subscription.org_id == org.id)
+        ).scalar_one_or_none()
+        if sub is None:
+            sub = Subscription(org_id=org.id, tier=Tier(tier).value)
+            session.add(sub)
+        else:
+            sub.tier = Tier(tier).value
+        session.commit()
+
+
+def _running_count(env, org_slug):
+    from sqlalchemy import select
+
+    from claudestruct.server.models import Org, Run, RunStatus
+    with env["factory"]() as session:
+        org = session.execute(select(Org).where(Org.slug == org_slug)).scalar_one()
+        rows = session.execute(
+            select(Run.id).where(
+                Run.org_id == org.id, Run.status == RunStatus.running.value,
+            )
+        ).all()
+        return len(rows)
+
+
+def test_free_tier_concurrent_cap_blocks_second_run(env):
+    """Free tier = 1 concurrent run. While one is running, a second
+    queued run for the same org must NOT be claimed."""
+    from sqlalchemy import select
+
+    from claudestruct.server.models import Run, RunStatus
+    from claudestruct.server.worker import _claim_one
+
+    _set_tier(env, "org-a", "free")
+    # Two queued runs from the same org.
+    _post_run(env, "member@a", description="A")
+    _post_run(env, "member@a", description="B")
+
+    with env["factory"]() as session:
+        first = _claim_one(session)
+        assert first is not None  # row claimed
+        # Second claim while the first is still `running` must
+        # return None — concurrency cap of 1 holds.
+        second = _claim_one(session)
+        assert second is None
+        # The other queued row stayed queued. Use COUNT() so the
+        # row count comes back as one int, not a full row dump.
+        from sqlalchemy import func
+        queued_count = session.execute(
+            select(func.count(Run.id)).where(Run.status == RunStatus.queued.value)
+        ).scalar()
+        assert queued_count == 1
+
+
+def test_team_tier_allows_concurrent_runs_up_to_cap(env):
+    from claudestruct.server.worker import _claim_one
+
+    _set_tier(env, "org-a", "team")  # max_concurrent_runs=4
+    for _ in range(5):
+        _post_run(env, "member@a")
+
+    with env["factory"]() as session:
+        claimed = []
+        for _ in range(5):
+            row = _claim_one(session)
+            if row is not None:
+                claimed.append(row)
+        # Four claims succeed; the fifth blocks because of the cap.
+        assert len(claimed) == 4
+
+
+def test_business_tier_priority_jumps_queue(env):
+    """Even when a free-tier run is queued first, a business-tier
+    run that arrives later must be picked first by the worker."""
+    from claudestruct.server.worker import _claim_one
+
+    _set_tier(env, "org-a", "free")
+    _set_tier(env, "org-b", "business")
+
+    # org-a queues first (older created_at), org-b second.
+    r_a = _post_run(env, "member@a", description="org-a-first").json()["run_id"]
+    r_b = env["client"].post(
+        "/v1/runs",
+        json={"task": "review", "description": "org-b-second"},
+        headers=_auth(env["keys"]["admin@b"]),
+    ).json()["run_id"]
+    assert r_a and r_b
+
+    with env["factory"]() as session:
+        chosen = _claim_one(session)
+    # business beats free even with later created_at.
+    assert chosen is not None
+    assert chosen.run_id == r_b
+
+
+def test_per_tier_limits_in_subscription_response(env):
+    """W8.3: limits surface in /v1/billing/subscription."""
+    _set_tier(env, "org-a", "team")
+    r = env["client"].get(
+        "/v1/billing/subscription", headers=_auth(env["keys"]["admin@a"]),
+    )
+    body = r.json()
+    assert body["tier"] == "team"
+    assert body["sandbox_limits"]["max_concurrent_runs"] == 4
+    assert body["sandbox_limits"]["max_runtime_seconds"] == 900
+    assert body["sandbox_limits"]["max_cost_usd"] == 5.0
+
+
+def test_sandbox_limits_unknown_tier_falls_back_to_free(env):
+    """A future tier value not in the lookup table must NOT silently
+    grant business-tier ceilings."""
+    from claudestruct.server.billing import sandbox_limits_for_tier
+    fallback = sandbox_limits_for_tier("does-not-exist")
+    assert fallback.max_concurrent_runs == 1
+
+
+def test_concurrency_count_is_per_org(env):
+    """An org-A run in flight must NOT block an org-B run."""
+    from claudestruct.server.worker import _claim_one
+
+    _set_tier(env, "org-a", "free")
+    _set_tier(env, "org-b", "free")
+    _post_run(env, "member@a")
+    env["client"].post(
+        "/v1/runs",
+        json={"task": "review", "description": "x"},
+        headers=_auth(env["keys"]["admin@b"]),
+    )
+    with env["factory"]() as session:
+        first = _claim_one(session)
+        assert first is not None
+        second = _claim_one(session)
+        # Both orgs each claim 1 of their 1-cap; both get a run.
+        assert second is not None
+        assert first.org_id != second.org_id
+
+
 # --- W6.5 team dashboard ------------------------------------------------
 
 def test_team_dashboard_empty_for_fresh_org(env):

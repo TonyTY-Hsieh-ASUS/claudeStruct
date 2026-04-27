@@ -149,6 +149,13 @@ def test_subscription_returns_free_tier_for_new_org(env):
     assert body["org_slug"] == "acme"
     assert body["status"] is None
     assert body["stripe_customer_id"] is None
+    # W8.3: sandbox limits surface alongside the tier so the SPA /
+    # CLI can render quota state without re-implementing the lookup.
+    assert body["sandbox_limits"] == {
+        "max_concurrent_runs": 1,
+        "max_runtime_seconds": 300,
+        "max_cost_usd": 0.5,
+    }
 
 
 def test_subscription_member_can_read_admin_can_too(env):
