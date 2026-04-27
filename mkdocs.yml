@@ -52,6 +52,8 @@ nav:
       - claw-squad: claw-squad.md
   - Daemon mode (preview):
       - cs serve: server.md
+      - Audit log: audit.md
+      - Billing: billing.md
   - claw-squad internals:
       - Agents: claw-squad/agents.md
       - Skills: claw-squad/skills.md

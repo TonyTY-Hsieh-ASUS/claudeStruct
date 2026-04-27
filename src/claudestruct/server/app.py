@@ -16,6 +16,12 @@ from fastapi import FastAPI
 from claudestruct import __version__
 from claudestruct.server.db import init_db, make_engine, make_session_factory
 from claudestruct.server.routers import (
+    audit as audit_router,
+)
+from claudestruct.server.routers import (
+    billing as billing_router,
+)
+from claudestruct.server.routers import (
     budget as budget_router,
 )
 from claudestruct.server.routers import (
@@ -74,5 +80,7 @@ def create_app(
     app.include_router(dashboard_router.router)
     app.include_router(budget_router.router)
     app.include_router(runs_router.router)
+    app.include_router(audit_router.router)
+    app.include_router(billing_router.router)
 
     return app

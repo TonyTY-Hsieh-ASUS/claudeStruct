@@ -1,0 +1,32 @@
+apiVersion: v2
+name: claudestruct
+description: |
+  claudeStruct daemon (cs serve) -- HTTP API + multi-tenant RBAC. The
+  control plane for the hosted SaaS layer (Wave 8) and a self-host
+  option for teams that want to run their own.
+
+  Bundles:
+    - 1x deployment running `cs serve run` (uvicorn)
+    - 1x service exposing the API on port 8787
+    - 1x ingress (optional, gated by .Values.ingress.enabled)
+    - 1x secret with the Anthropic API key + Stripe + DB URL
+    - 1x configmap for non-sensitive runtime knobs
+
+  This is a skeleton (W8.1). Production deployments need to layer on:
+    - Postgres (run as a managed service, not in-cluster)
+    - Redis (for ephemeral state in W6.1's job queue)
+    - HPA for the deployment when run autoscaling lands
+type: application
+version: 0.1.0
+appVersion: "0.3.0"
+home: https://github.com/tonyandclaw/claudeStruct
+sources:
+  - https://github.com/tonyandclaw/claudeStruct
+keywords:
+  - claude
+  - llm
+  - dev-tools
+  - code-review
+maintainers:
+  - name: claudestruct contributors
+    url: https://github.com/tonyandclaw/claudeStruct

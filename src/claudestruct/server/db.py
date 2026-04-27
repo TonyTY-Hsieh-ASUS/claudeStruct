@@ -54,6 +54,6 @@ def make_session_factory(engine) -> sessionmaker[Session]:
 def init_db(engine) -> None:
     """Create all tables that don't yet exist. Safe to call repeatedly."""
     # Import for the side effect of registering the models on Base.metadata.
-    from claudestruct.server import models  # noqa: F401
+    from claudestruct.server import audit, billing, models  # noqa: F401
 
     Base.metadata.create_all(engine)
