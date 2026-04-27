@@ -37,6 +37,9 @@ from claudestruct.server.routers import (
     keys as keys_router,
 )
 from claudestruct.server.routers import (
+    oauth as oauth_router,
+)
+from claudestruct.server.routers import (
     runs as runs_router,
 )
 
@@ -86,5 +89,6 @@ def create_app(
     app.include_router(audit_router.router)
     app.include_router(billing_router.router)
     app.include_router(github_router.router)
+    app.include_router(oauth_router.router)
 
     return app

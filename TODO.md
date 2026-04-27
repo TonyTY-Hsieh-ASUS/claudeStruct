@@ -234,9 +234,13 @@ Goal: 5-50 devs share the tool with shared visibility, shared budgets, and team-
   - Roles: `admin` / `member` / `viewer` enforced by `require_role(min_role)` FastAPI dependency
   - `cs serve init-db / add-org / add-user / add-key` covers the bootstrap path
   - Pending: teams (currently flat membership of users → orgs), seeded migration fixtures, Alembic when the schema needs to change shape
-- [ ] **W6.4 — OAuth login**
-  - GitHub + Google login for the daemon's web UI
-  - Reuse existing `claw-squad/src/ui/web.ts` + `web-page.ts` page; swap token-in-URL for cookie session
+- [~] **W6.4 — OAuth login** (GitHub shipped; Google deferred)
+  - `UserSession` SQLAlchemy model: per-row `session_token` (URL-safe random), `provider`, `expires_at` (14d hard cap), `revoked_at` for logout
+  - `src/claudestruct/server/oauth.py` — pure helpers: `load_github_config()` reads env (`CLAUDESTRUCT_GITHUB_OAUTH_CLIENT_ID` / `_SECRET` / `_OAUTH_REDIRECT_BASE`); `build_authorize_url`, `exchange_code_for_token`, `fetch_github_user` (with `/user/emails` fallback when the user's email is private). Injectable `http_client` so tests don't hit GitHub
+  - `routers/oauth.py`: `GET /v1/auth/github/login` (CSRF state cookie + redirect), `GET /v1/auth/github/callback` (state verify, token exchange, user fetch, session mint, HTTPOnly+Lax+Secure cookie); `GET /v1/auth/me` (cookie-driven principal); `POST /v1/auth/logout` (revoke + clear). 503 when env vars unset; 403 (not auto-provision) on unknown email — admin must `cs serve add-user` first to avoid the "any GitHub account in the world creates a tenant" footgun
+  - `auth.py:current_principal` chain: bearer wins, then session-cookie fallback. New `authenticate_session_cookie(session, cookie)` mirrors `authenticate(session, key)`
+  - 14 new tests: login redirect + 503 unconfigured, callback state-mismatch / unregistered-email-403 / token-exchange-failure / happy-path / `/user/emails` fallback, session cookie authenticates downstream `/v1/dashboard`, `/v1/auth/me` shape + 401 path, logout revokes + idempotent without cookie, bearer-wins ordering, revoked cookie falls through to 401
+  - Pending: Google OAuth (structurally identical, separate provider config). Tracked under W8.7 (self-serve signup) so it lands alongside the domain-allowlist feature it depends on
 - [~] **W6.5 — Shared dashboard** (multi-user view shipped; alerts deferred)
   - `GET /v1/dashboard/team` endpoint reads the `runs` table for the caller's org (filtered to terminal states `done`/`failed` so queued/running rows don't skew rollups). Returns `total_runs` + `total_cost_usd` headline numbers, `by_author` leaderboard sorted by spend desc with email + run-count + tokens, `by_task` task-type breakdown, plus `recent` (default 50, max 500) for the activity feed
   - New schemas in `src/claudestruct/server/schema.py`: `AuthorRollup`, `TaskRollup`, `TeamDashboardResponse`. Tenant-scoped via `Run.org_id == principal.org_id` so an org can never see another org's spend
@@ -364,6 +368,11 @@ Reopen criterion: a signed enterprise contract or three serious leads asking for
 
 ## Last Update
 
+- 2026-04-27 — W6.4 GitHub OAuth login ready for PR push:
+  - `UserSession` model + `oauth.py` provider helpers + `routers/oauth.py` with login / callback / me / logout
+  - `auth.current_principal` now accepts a session cookie as fallback when no bearer is present (bearer still wins on conflict)
+  - 14 new tests: redirect / 503 / state mismatch / unregistered-email-403 / token-exchange-failure / happy-path / `/user/emails` fallback / cookie auth on dashboard / `/me` / logout idempotent / bearer-precedence / revoked-cookie. Total Python: 228 passed (2 pre-existing audit failures untouched)
+  - Google OAuth deferred — structurally identical, lands with self-serve signup work
 - 2026-04-27 — W6.6 GitHub webhook receiver ready for PR push:
   - `POST /v1/github/webhook` with HMAC SHA-256 signature verification, installation→org mapping, trigger detection for PR open/sync/reopen + `/cs review` comments, repo substring filter, sentinel bot user attribution
   - `cs serve add-github-install` CLI for registration
