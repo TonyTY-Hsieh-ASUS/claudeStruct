@@ -136,3 +136,81 @@ class CreateRunResponse(BaseModel):
 
 class RunDetail(RunRow):
     pass
+
+
+# --- Audit log (W8.4) ----------------------------------------------
+
+class AuditHeadResponse(BaseModel):
+    """Latest seq + entry_hash. seq=0 means the chain is empty and
+    entry_hash is the genesis sentinel."""
+    seq: int
+    entry_hash: str
+
+
+class AuditEntryResponse(BaseModel):
+    seq: int
+    action: str
+    resource_type: str
+    resource_id: str
+    payload: Optional[object]
+    actor_user_id: Optional[int]
+    created_at: datetime
+    prev_hash: str
+    entry_hash: str
+
+
+class AuditListResponse(BaseModel):
+    entries: list[AuditEntryResponse]
+    next_cursor_seq: Optional[int] = None
+
+
+class AuditVerifyResponse(BaseModel):
+    ok: bool
+    total: int
+    head_seq: Optional[int] = None
+    head_hash: Optional[str] = None
+    broken_at_seq: Optional[int] = None
+    broken_reason: Optional[str] = None
+
+
+# --- Billing (W8.2) ------------------------------------------------
+
+class SubscriptionResponse(BaseModel):
+    """Org's current subscription state. ``tier`` defaults to "free"
+    when no Subscription row exists yet."""
+    org_slug: str
+    tier: Literal["free", "team", "business"]
+    status: Optional[str]  # mirrors Stripe: "active" / "past_due" / "canceled" / null
+    stripe_customer_id: Optional[str]
+    current_period_end: Optional[datetime]
+
+
+class CheckoutRequest(BaseModel):
+    tier: Literal["team", "business"]
+    success_url: str = Field(min_length=8)
+    cancel_url: str = Field(min_length=8)
+
+
+class CheckoutResponse(BaseModel):
+    """Stub: real Stripe Checkout integration ships when the merchant
+    keys are available. The shape is pinned so the frontend can be
+    written against it now."""
+    checkout_session_id: str
+    url: str
+    note: str = (
+        "Stripe checkout sessions are stubbed in the draft -- the route "
+        "returns a deterministic placeholder URL until live merchant "
+        "keys are provisioned."
+    )
+
+
+class UsageResponse(BaseModel):
+    """Period-to-date token usage. Mirrors the budget endpoint shape
+    so dashboards can render either with one renderer."""
+    period_start: datetime
+    period_end: datetime
+    input_tokens: int
+    output_tokens: int
+    cache_read_tokens: int
+    cache_creation_tokens: int
+    cost_usd: float

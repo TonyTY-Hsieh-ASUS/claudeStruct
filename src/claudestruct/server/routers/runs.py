@@ -13,8 +13,10 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from claudestruct import dashboard as dash_mod
+from claudestruct.server import audit as audit_mod
 from claudestruct.server import auth as auth_mod
 from claudestruct.server.models import Role, Run, RunStatus
 from claudestruct.server.schema import (
@@ -33,31 +35,49 @@ router = APIRouter(prefix="/v1/runs", tags=["runs"])
 )
 def create_run(
     body: CreateRunRequest,
-    request: Request,
     principal: auth_mod.Principal = Depends(auth_mod.require_role(Role.member)),
+    session: Session = Depends(auth_mod.get_session),
 ) -> CreateRunResponse:
     """Enqueue a run. Returns 202 immediately; the worker picks it up
     and runs `runner.run_task_and_log` against Anthropic. Poll
-    GET /v1/runs/{id} to follow progress."""
+    GET /v1/runs/{id} to follow progress.
+
+    Also writes a `run.submit` row to the per-org audit chain (W8.4)
+    so subsequent investigations can correlate "who submitted what" by
+    chain seq.
+    """
     # 8 hex bytes → 16 chars; collision-resistant within the per-org
     # key space and short enough for log lines / URL paths.
     run_id = f"run-{secrets.token_hex(8)}"
-
-    factory = request.app.state.session_factory
-    with factory() as session:
-        row = Run(
-            run_id=run_id,
-            org_id=principal.org_id,
-            user_id=principal.user_id,
-            status=RunStatus.queued.value,
-            task=body.task,
-            description=body.description,
-            model=body.model,
-            effort=body.effort,
-            paths_json=json.dumps(body.paths) if body.paths else None,
-        )
-        session.add(row)
-        session.commit()
+    row = Run(
+        run_id=run_id,
+        org_id=principal.org_id,
+        user_id=principal.user_id,
+        status=RunStatus.queued.value,
+        task=body.task,
+        description=body.description,
+        model=body.model,
+        effort=body.effort,
+        paths_json=json.dumps(body.paths) if body.paths else None,
+    )
+    session.add(row)
+    session.flush()
+    audit_mod.record(
+        session,
+        org_id=principal.org_id,
+        actor_user_id=principal.user_id,
+        action="run.submit",
+        resource_type="run",
+        resource_id=run_id,
+        payload={
+            "task": body.task,
+            "model": body.model,
+            "effort": body.effort,
+            "max_tokens": body.max_tokens,
+            "max_bytes": body.max_bytes,
+        },
+    )
+    session.commit()
     return CreateRunResponse(run_id=run_id, status="queued")
 
 

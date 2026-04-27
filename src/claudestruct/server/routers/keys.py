@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from claudestruct.server import audit as audit_mod
 from claudestruct.server import auth as auth_mod
 from claudestruct.server.models import ApiKey, Role
 from claudestruct.server.schema import (
@@ -59,6 +60,16 @@ def create_key(
         name=body.name,
     )
     session.add(row)
+    session.flush()
+    audit_mod.record(
+        session,
+        org_id=principal.org_id,
+        actor_user_id=principal.user_id,
+        action="key.create",
+        resource_type="api_key",
+        resource_id=row.key_id,
+        payload={"name": row.name},
+    )
     session.commit()
     session.refresh(row)
     return CreateKeyResponse(
@@ -87,4 +98,13 @@ def revoke_key(
         raise HTTPException(status_code=404, detail="key not found")
     if row.revoked_at is None:
         row.revoked_at = datetime.now(timezone.utc)
+        audit_mod.record(
+            session,
+            org_id=principal.org_id,
+            actor_user_id=principal.user_id,
+            action="key.revoke",
+            resource_type="api_key",
+            resource_id=row.key_id,
+            payload={},
+        )
         session.commit()

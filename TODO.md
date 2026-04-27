@@ -295,21 +295,27 @@ Goal: distribution. Make the product discoverable, easy to install, and easy to 
 
 Goal: a managed service teams pay for. Open-core split: Waves 4-7 OSS, Wave 8 hosted layer (closed-source or AGPL with separate hosted offering).
 
-- [ ] **W8.1 — Multi-tenant infrastructure**
-  - Postgres-per-region (US, EU); each tenant gets a logical schema
-  - Redis for ephemeral state; deployed via Helm chart on EKS/GKE
-  - Terraform module for self-host evaluators
-- [ ] **W8.2 — Billing & subscription**
-  - Stripe integration; usage-based pricing (per million tokens) + flat seat tier
-  - In-app billing page; invoice PDFs via Stripe-hosted receipts
-  - Free tier: 100k tokens/month for solo accounts
+- [~] **W8.1 — Multi-tenant infrastructure** (skeletons; production layering pending)
+  - `deploy/helm/claudestruct/` — Chart 0.1.0 with Deployment running `cs serve run`, Service on 8787, optional Ingress, Secret (Anthropic / Stripe / DB URL), `_helpers.tpl`. Probes against `/healthz` + `/readyz`. Strict pod securityContext: non-root, read-only root FS, all caps dropped.
+  - `deploy/terraform/main.tf` — VPC across two AZs, RDS Postgres 16 (Multi-AZ when `environment="prod"`), Secrets Manager-managed master password, security group locked to in-VPC traffic. Outputs the DB endpoint + secret ARN for the Helm chart.
+  - `deploy/README.md` documents install + roadmap mapping (what each follow-up PR should layer in).
+  - Pending: EKS cluster module, ALB+ACM ingress, per-region instantiation for W8.5, HPA, Redis for the W6.1 job queue.
+- [~] **W8.2 — Billing & subscription** (skeleton; live Stripe behind `[hosted]` extra)
+  - `src/claudestruct/server/billing.py` — `Subscription` model (one row per org, `free`/`team`/`business` tier), `get_or_default()` lazy-materializes a free placeholder, `current_period_bounds()` falls back to the UTC calendar month when Stripe state is absent, `AUDIT_RETENTION_DAYS` map drives W8.4 pruning.
+  - Routes: `GET /v1/billing/subscription` (viewer+), `POST /v1/billing/checkout` (admin), `GET /v1/billing/usage` (viewer+), `POST /v1/billing/webhook` (unauthenticated, signature-verified).
+  - Stripe SDK lazy-imported via `stripe_sdk_available()`; checkout returns a deterministic stub URL on the OSS path; webhook returns 503 with a clear "install stripe" message. `billing.checkout.create` writes an audit row under the caller's org chain (W8.4 integration).
+  - Tests: `tests/test_billing.py` (17 cases) — model lifecycle, tier retention map, period bounds (incl. December roll-over), stub URL determinism, all four routes including auth gates and audit linkage.
+  - Pending: live Checkout integration, canonical Stripe webhook handlers, per-tier token-cap enforcement at run-submit time, invoice PDF passthrough.
 - [ ] **W8.3 — Tenant-scoped sandbox**
   - One Docker container per orchestrator-run; image is the published `ghcr.io/tonyandclaw/claudestruct` from W4.4
   - Resource quotas (CPU, memory) enforced per-tier
-- [ ] **W8.4 — Append-only hash-chained audit log**
-  - Every state-changing API call writes to an audit table
-  - Chain-root hash exposed via API for tamper-evidence verification
-  - Retention: 7 years for paid, 90 days for free
+  - Depends on W6.1 daemon worker model
+- [x] **W8.4 — Append-only hash-chained audit log**
+  - `src/claudestruct/server/audit.py` — `AuditEntry` model with per-org `seq` + `prev_hash` + `entry_hash` columns, `compute_entry_hash()` over canonical-JSON payload + identity fields + ISO-8601 created_at, `record()` appends with the chain link computed, `verify_chain()` walks forward and reports the first divergence (`broken_at_seq`, `broken_reason`).
+  - `src/claudestruct/server/routers/audit.py` — `GET /v1/audit/head` (viewer+; returns the all-zero genesis sentinel for empty chains), `GET /v1/audit` (admin; paginated, cursor-based), `GET /v1/audit/verify` (admin).
+  - Wired into `keys.create / keys.revoke / runs.submit / billing.checkout.create` so every state-changing call appends exactly one row. Webhook receipt records `stripe.<event_type>` once Stripe is configured.
+  - `prune_audit()` enforces tier-driven retention (free=90d, paid=7y; pulled from `billing.AUDIT_RETENTION_DAYS`). Pruning is intentionally chain-breaking — operators record the post-prune head externally before running it.
+  - Tests: `tests/test_audit.py` (17 cases) — canonical-JSON determinism, per-org isolation, chain happy path, tampered-payload + seq-gap detection, prune semantics, HTTP auth gate + RBAC + pagination, payload round-trip + multi-tenant isolation.
 - [ ] **W8.5 — Data residency**
   - `claudestruct.cloud` resolves to nearest region; org settings can pin storage region
   - Provable via API-returned region tag in every response
