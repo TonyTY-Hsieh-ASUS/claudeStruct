@@ -820,6 +820,81 @@ skillsCmd
   });
 
 
+// --- run logs (W5.3 follow-up) -------------------------------------
+
+const runsCmd = program
+  .command("runs")
+  .description("Inspect / prune the per-run JSONL logs under .claw-squad/runs/.");
+
+runsCmd
+  .command("list")
+  .description("List run-log files (path, age, size).")
+  .option("--root <path>", "repo root", process.cwd())
+  .action(async (opts: { root: string }) => {
+    const { loadAllRuns } = await import("./runs/log.js");
+    const { statSync } = await import("node:fs");
+    const runs = loadAllRuns(opts.root);
+    if (runs.length === 0) {
+      console.log(pc.dim(`No runs under ${opts.root}/.claw-squad/runs/.`));
+      return;
+    }
+    const now = Date.now();
+    for (const r of runs) {
+      let ageDays = 0;
+      let sizeKb = 0;
+      try {
+        const st = statSync(r.path);
+        ageDays = (now - st.mtimeMs) / (24 * 60 * 60 * 1000);
+        sizeKb = st.size / 1024;
+      } catch {
+        /* skip stat errors */
+      }
+      console.log(
+        `${pc.cyan(r.path)}  ${pc.dim(
+          `${ageDays.toFixed(1)}d  ${sizeKb.toFixed(1)}KB`,
+        )}`,
+      );
+    }
+  });
+
+runsCmd
+  .command("purge")
+  .description("Delete run-log files older than --older-than-days.")
+  .option("--root <path>", "repo root", process.cwd())
+  .requiredOption(
+    "--older-than-days <n>",
+    "Delete files whose mtime is older than this many days.",
+  )
+  .option("--dry-run", "List candidates without deleting them.", false)
+  .action(
+    async (opts: {
+      root: string;
+      olderThanDays: string;
+      dryRun: boolean;
+    }) => {
+      const days = Number(opts.olderThanDays);
+      if (!Number.isFinite(days) || days < 0) {
+        console.error(pc.red(`--older-than-days must be a non-negative number`));
+        process.exit(1);
+      }
+      const { purgeRuns, daysToMs } = await import("./runs/purge.js");
+      const victims = purgeRuns(opts.root, {
+        olderThanMs: daysToMs(days),
+        dryRun: opts.dryRun,
+      });
+      if (victims.length === 0) {
+        console.log(pc.dim("No run logs older than the cutoff."));
+        return;
+      }
+      const verb = opts.dryRun ? "Would delete" : "Deleted";
+      console.log(pc.bold(`${verb} ${victims.length} file(s):`));
+      for (const p of victims) {
+        console.log(`  ${p}`);
+      }
+    },
+  );
+
+
 program.parseAsync().catch((err) => {
   console.error(pc.red((err as Error).message));
   process.exit(1);

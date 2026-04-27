@@ -100,3 +100,59 @@ class ApiKey(Base):
 
     def is_active(self) -> bool:
         return self.revoked_at is None
+
+
+class RunStatus(str, Enum):
+    """Run state machine. Linear progression queued → running → done|failed.
+
+    `done` covers normal completion; `failed` is reserved for exceptions
+    that the worker caught (API error, timeout, etc.) so the API can
+    surface a useful message to the requester."""
+
+    queued = "queued"
+    running = "running"
+    done = "done"
+    failed = "failed"
+
+
+class Run(Base):
+    """A daemon-mode submission (W6.1).
+
+    Runs land here via `POST /v1/runs` with `status="queued"`. A worker
+    picks one up, sets `status="running"`, executes
+    `runner.run_task_and_log` synchronously, then writes the final
+    cost/token numbers + `status="done"` (or `"failed"` with `error`).
+
+    The run's JSONL event log still lives at the dashboard's existing
+    `<run_root>/.claudestruct/runs/<run_id>.jsonl` location; the DB row
+    is the queryable index, the JSONL file is the streaming detail.
+    """
+
+    __tablename__ = "runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    org_id: Mapped[int] = mapped_column(ForeignKey("orgs.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    status: Mapped[str] = mapped_column(String(16), default=RunStatus.queued.value, index=True)
+
+    # Request shape — kept on the row for audit + replay even after
+    # the JSONL log is purged.
+    task: Mapped[str] = mapped_column(String(16))
+    description: Mapped[str] = mapped_column(String(8192))
+    model: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    effort: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    paths_json: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+
+    # Outcomes — populated by the worker on success/failure.
+    cost_usd: Mapped[float] = mapped_column(default=0.0)
+    input_tokens: Mapped[int] = mapped_column(default=0)
+    output_tokens: Mapped[int] = mapped_column(default=0)
+    cache_read_tokens: Mapped[int] = mapped_column(default=0)
+    cache_creation_tokens: Mapped[int] = mapped_column(default=0)
+    duration_ms: Mapped[int | None] = mapped_column(nullable=True)
+    error: Mapped[str | None] = mapped_column(String(4096), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now_utc)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

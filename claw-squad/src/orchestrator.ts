@@ -27,6 +27,7 @@ import pc from "picocolors";
 import { runPlanner, recordClarification } from "./agents/planner.js";
 import { runCoder } from "./agents/coder.js";
 import { runReviewer } from "./agents/reviewer.js";
+import { initTracing, withSpan, shutdownTracing } from "./tracing.js";
 import {
   appendLesson,
   readRelevantMemorySnippet,
@@ -420,9 +421,31 @@ export async function runOrchestrator(args: {
     return false;
   };
 
+  // OpenTelemetry: initTracing() is idempotent + zero-cost when
+  // OTEL_EXPORTER_OTLP_ENDPOINT is unset, so it's safe to await
+  // unconditionally. The root span wraps the whole orchestrator
+  // execution; per-call usage is attached to the run log + totals
+  // already, which OTel users can correlate via the run-id label.
+  await initTracing();
+
   let endReason: OrchestratorResult["reason"] = "aborted";
   try {
-    const result = await runPhases();
+    const result = await withSpan(
+      "clawSquad.run",
+      {
+        "clawSquad.requirement": requirement.slice(0, 200),
+        "clawSquad.maxLoops": config.maxLoops,
+        "clawSquad.maxReviewRounds": config.maxReviewRounds,
+        "clawSquad.repoRoot": config.repoRoot,
+      },
+      async (span) => {
+        const r = await runPhases();
+        span.setAttribute("clawSquad.reason", r.reason);
+        span.setAttribute("clawSquad.costUsd", totals.overall.costUsd);
+        span.setAttribute("clawSquad.calls", totals.overall.calls);
+        return r;
+      },
+    );
     endReason = result.reason;
     return result;
   } finally {
@@ -445,6 +468,13 @@ export async function runOrchestrator(args: {
           calls: totals.overall.calls,
         },
       });
+    } catch {
+      /* ignore */
+    }
+    // Flush the span exporter. Best-effort; survives a missing SDK or
+    // a network error against the OTLP endpoint.
+    try {
+      await shutdownTracing();
     } catch {
       /* ignore */
     }

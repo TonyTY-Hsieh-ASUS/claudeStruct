@@ -145,15 +145,15 @@ Goal: anyone can `pip install claudestruct` / `npm install claw-squad` / `docker
   - `.github/workflows/ci.yml` — pytest (3.10/3.11/3.12/3.13), vitest + tsc (Node 20/22), go test + go vet (1.22)
   - Concurrency group cancels superseded runs; pip/pnpm caches keyed off lockfiles
   - ruff lint deferred (pyproject.toml has no ruff config yet; tracked under W5)
-- [~] **W4.2 — License + governance files**
+- [x] **W4.2 — License + governance files**
   - `LICENSE` (MIT, matches `pyproject.toml` declared license) at repo root
   - `CONTRIBUTING.md`, `SECURITY.md` (vuln disclosure)
   - `CHANGELOG.md` (keepachangelog 1.1 format) seeded with Waves 1-3 history
-  - `CODE_OF_CONDUCT.md` deferred — see note below
-- [ ] **W4.3 — Release automation**
-  - `.github/workflows/release.yml` — on tag `v*.*.*`: PyPI publish (trusted publishing/OIDC, no API token), npm publish for `claw-squad`, GitHub Release with cross-compiled `claw-sandbox` binaries (linux-amd64/arm64, darwin-amd64/arm64) + Sigstore provenance
-  - `release-please` or `cz-cli` for conventional-commit-driven version bumps
-  - Defers until repo-level PyPI / npm / GHCR trusted-publishing config is in place (manual step on the org settings)
+  - `CODE_OF_CONDUCT.md` — official Contributor Covenant 2.1 fetched from `contributor-covenant.org`; `[INSERT CONTACT METHOD]` swapped to point at `SECURITY.md`
+- [~] **W4.3 — Release automation**
+  - `.github/workflows/release.yml` — on `v*.*.*` tag push: PyPI sdist+wheel via OIDC trusted publishing, npm publish (`claw-squad`) with `--provenance`, GitHub Release with cross-compiled `claw-sandbox` binaries (linux/darwin × amd64/arm64) + aggregated `SHA256SUMS`
+  - Workflow uses `env:` block routing for every shell-substituted ref to keep template injection out of `run:` bodies
+  - Trusted-publishing config (PyPI project + npm package settings) is the remaining manual step before the first tag
 - [x] **W4.4 — Container distribution**
   - Multi-stage `Dockerfile` (python-slim base, Go builder for sandbox, Node builder for claw-squad) → `ghcr.io/tonyandclaw/claudestruct:latest`
   - `.github/workflows/docker.yml` builds on every PR (verifies the Dockerfile) and pushes to GHCR on push to main + on tag, with PR/branch/sha tags via `docker/metadata-action`
@@ -173,29 +173,34 @@ Goal: anyone can `pip install claudestruct` / `npm install claw-squad` / `docker
 
 Goal: trust this in CI pipelines and long-running daemons. Wave 4 makes it installable; Wave 5 makes it operable.
 
-- [ ] **W5.1 — OpenTelemetry tracing**
-  - claudestruct: `src/claudestruct/tracing.py` — span per task, child spans for context-gather and Claude invocation; OTLP exporter via `OTEL_EXPORTER_OTLP_ENDPOINT`
-  - claw-squad: `src/tracing.ts` — spans across Planner→Coder→Reviewer with correlation IDs flowing into `runs/log.ts` events
-  - Reuse: existing `logging.py` event sink, `runs/log.ts` `RunLogHandle`
-- [ ] **W5.2 — Error reporting (Sentry)**
-  - Opt-in via `CLAUDESTRUCT_SENTRY_DSN` / `CLAW_SQUAD_SENTRY_DSN`
-  - Redact `ANTHROPIC_API_KEY`, `SLACK_*_TOKEN`, `GITHUB_TOKEN` in event capture (before-send hook)
+- [x] **W5.1 — OpenTelemetry tracing** (claudestruct + claw-squad)
+  - claudestruct: `src/claudestruct/tracing.py` — opt-in via `OTEL_EXPORTER_OTLP_ENDPOINT`; soft dep on `opentelemetry-api`/`-sdk`/`-exporter-otlp-proto-http` (declared as `claudestruct[otel]` extra in `pyproject.toml`); zero-cost no-op spans when disabled
+  - claudestruct: `runner.run_task_and_log` wraps a root `claudestruct.task` span with child `claudestruct.context_gather` + `claudestruct.llm_call` spans; attributes: `task`, `model`, `prompt_version`, `budget_bytes`, `files`, `total_bytes`, `input_tokens`, `output_tokens`, `cache_*_tokens`, `cost_usd`, `duration_ms`
+  - claw-squad: `claw-squad/src/tracing.ts` — same opt-in via `OTEL_EXPORTER_OTLP_ENDPOINT`; soft deps via `optionalDependencies` block in `package.json` (`@opentelemetry/api` / `sdk-node` / `exporter-trace-otlp-http`); dynamic-imported so default install stays lean
+  - claw-squad: orchestrator wraps the full `runOrchestrator` execution in a root `clawSquad.run` span (attributes: `requirement` (200-char truncated), `maxLoops`, `maxReviewRounds`, `repoRoot`, then `reason`/`costUsd`/`calls` on completion); flushes via `shutdownTracing()` in the existing `finally` block
+  - Tests: `tests/test_tracing.py` (6 cases for Python) + `claw-squad/tests/tracing.test.ts` (7 cases for TS) — disabled-by-default, idempotent init, no-op span methods, exception recording + span end on throw, attribute serialization, injection point for downstream tests, shutdown safety
+- [x] **W5.2 — Error reporting (Sentry)**
+  - `src/claudestruct/sentry_init.py` — opt-in via `CLAUDESTRUCT_SENTRY_DSN`; soft dep on `sentry-sdk` (declared as `claudestruct[sentry]` extra); init at CLI import so Click parsing errors are caught too
+  - `before_send` scrubber redacts: env-var keys (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GITHUB_TOKEN` / `SLACK_*_TOKEN` / `CLAW_WEB_TOKEN` etc.) in `extra` / `tags` / `contexts` / `request.env`; `Authorization` / `X-API-Key` / `Cookie` headers in both dict and list-form serializations; nested dicts recursively; `<key>=<value>` patterns in breadcrumb messages
+  - `traces_sample_rate=0.0` (use OTel for perf) and `send_default_pii=False`
+  - Tests: `tests/test_sentry_init.py` (10 cases) — disabled path, idempotent init, every redaction surface (top-level / nested / request env / headers in both shapes / breadcrumb data + message), pattern coverage, explicit DSN argument override
 - [x] **W5.3 — PII redaction + retention** (claudestruct only)
   - `src/claudestruct/redact.py` — `Redactor` walks event dicts replacing matched substrings with `[redacted]`. Default ruleset covers Anthropic / GitHub / Slack / Stripe tokens, AWS access keys, emails, JWTs. Pluggable via `Redactor.add_rule(name, pattern)`.
   - Wired through `EventSink` / `MultiSink` / `event_log` / `fanout_log`. CLI flag `--redact` (also `CLAUDESTRUCT_REDACT` env) constructs `Redactor.default()` and threads it to `run_task_and_log`.
   - `cs logs purge --older-than-days N [--dry-run]` uses `redact.purge_runs()` to delete `<root>/.claudestruct/runs/*.jsonl` files older than the cutoff (mtime-based for clock-skew safety).
   - Tests: `tests/test_redact.py` (21 cases) — every default rule + nested dict/list walk + non-string passthrough + custom rule + integration with EventSink + 5 purge cases (empty dir, recent skipped, old deleted, dry-run preserves, non-jsonl ignored)
-  - Pending: claw-squad-side equivalent (`claw-squad runs purge`) — separate PR
+  - claw-squad-side equivalent shipped: `claw-squad/src/runs/purge.ts` + `claw-squad runs list / purge --older-than-days N [--dry-run]`. Same mtime-based semantics as `cs logs purge` so retention rules stay in lockstep across both tools. Tests: `claw-squad/tests/runs-purge.test.ts` (7 cases — missing dir, no-match, old-only deletion, dry-run preserves, non-jsonl ignored, injectable `now`, daysToMs floor).
 - [x] **W5.4 — Secrets vault integration** (claudestruct only)
   - `src/claudestruct/secrets.py` — `SecretsProvider` Protocol with built-in `EnvProvider`, `KeyringProvider`, `PassProvider`, `FileProvider`. Provider chain is selected by `CLAUDESTRUCT_SECRETS_PROVIDER` (e.g. `env,keyring,pass,file:/run/secrets`); first-hit-wins. Default `env`-only for back-compat.
   - `client.py:_make_client()` now reads via `secrets.get("anthropic.api_key")`. Legacy `ANTHROPIC_API_KEY` env still works (mapped via `_LEGACY_ENV_MAP`).
   - Tests: `tests/test_secrets.py` (24 cases) — env canonical / legacy / precedence / empty-as-miss; file provider read / strip / missing / empty; pass provider no-binary / first-line / nonzero-exit; keyring no-module fallback; default_chain selection / unknowns skipped / empty falls back; get/require semantics; client integration
   - Pending: AWS Secrets Manager + HashiCorp Vault providers (deferred; the abstraction is ready, the implementations need their respective SDKs as optional extras)
-- [ ] **W5.5 — Hardened sandbox**
-  - Linux seccomp profile (`claw-sandbox/seccomp.json`) blocking `ptrace`, `kexec_*`, `mount`, etc.
-  - AppArmor profile sample
-  - Network-namespace isolation when CAP_SYS_ADMIN available; auto-detect + warn otherwise
-  - Documented Docker / firejail recipes
+- [x] **W5.5 — Hardened sandbox**
+  - `claw-sandbox/seccomp.json` — Docker / OCI / Kubernetes-compatible profile. `defaultAction=ALLOW` plus an explicit `ERRNO=1` denylist for ptrace + kernel modules (init/finit/delete) + kexec/reboot + mount/pivot_root/chroot + setuid/capset escalation + sethostname/clock-set + ioperm/iopl/bpf + unshare/setns + swapon/quotactl + add_key/keyctl/perf_event_open
+  - `claw-sandbox/apparmor.profile` — sample profile mediating filesystem access. Allows /usr/lib + /lib + /workspace + /tmp + /etc/resolv.conf etc.; explicit deny for /etc/shadow, /root, ~/.ssh, ~/.aws/credentials, ~/.config/gh, /sys/kernel/{debug,tracing}, /dev/{mem,kmem,port}
+  - `claw-sandbox/rlimit_linux.go` — `detectNetworkIsolationStatus()` probes uid (root → "enforced") and `/proc/self/uid_map` (unprivileged userns → "best-effort"); init namespace as non-root → "unsupported". Status flows into the existing structured isolation report so callers see the actual capability instead of a hardcoded "unsupported"
+  - `claw-squad/docs/sandbox-hardening.md` — Docker / Kubernetes / firejail recipes, network-isolation guidance ("enforce outside the sandbox"), explicit list of out-of-scope cases (GPU, nested containers, side channels)
+  - Tests: `claw-sandbox/isolation_report_test.go` updated to accept any of the three valid noNetwork status values since detection is now host-dependent
 - [x] **W5.6 — Cumulative cost cap**
   - `src/claudestruct/budget.py` — `current_period_spend(root)` folds `<root>/.claudestruct/runs/*.jsonl` for the current UTC calendar month; `check_budget(root, cap)` returns `BudgetStatus(spent, cap, warn_threshold, exceeded, near_limit)` with `WARN_FRACTION = 0.8`
   - CLI: new `--monthly-cap-usd <float>` flag on `cs dev/review/plan/debug` (also reads `CLAUDESTRUCT_MONTHLY_CAP_USD`); hard-aborts (`exit 2`) before any LLM call when `spent ≥ cap`, soft-warns when `spent ≥ 0.8 × cap`. Skipped on `--dry-run`.
@@ -212,10 +217,12 @@ Goal: trust this in CI pipelines and long-running daemons. Wave 4 makes it insta
 
 Goal: 5-50 devs share the tool with shared visibility, shared budgets, and team-level admin. Today the orchestrator and dashboard are single-user-on-this-machine.
 
-- [ ] **W6.1 — Daemon mode**
-  - `cs serve` and `claw-squad serve` long-running supervisor
-  - Postgres backend (default for >1 user), SQLite single-file fallback for tiny teams
-  - Stateless workers can scale horizontally; state lives in DB, not local JSONL
+- [x] **W6.1 — Daemon mode** (claudestruct only; claw-squad worker deferred)
+  - `Run` SQLAlchemy model added to `src/claudestruct/server/models.py` with `RunStatus` enum (queued → running → done|failed). Per-row payload (task, description, model, effort, paths_json) plus outcomes (cost_usd, tokens, duration_ms, error)
+  - `src/claudestruct/server/worker.py` — `process_pending_run(session, run_root, runner=...)` synchronous drain helper, `WorkerThread` long-running daemon thread with poll-interval + graceful stop, `drain_queue(...)` for cron / batch operation, `wait_until_empty(...)` test helper
+  - `POST /v1/runs` now writes a queued `Run` row tagged with `org_id`/`user_id` instead of returning a placeholder id; `GET /v1/runs/{id}` reads from the DB first (with tenant isolation: cross-org lookup → 404, not 403, to avoid leaking existence) and falls back to the legacy JSONL log so pre-W6.1 history stays accessible
+  - New `cs serve worker [--once] [--poll-interval N]` CLI subcommand (foreground daemon thread + Ctrl-C graceful drain, or single drain pass)
+  - claw-squad-side daemon mode tracked separately — orchestrator's threading model + multi-repo state make it a bigger reshape
 - [~] **W6.2 — HTTP REST API** (draft shipped)
   - FastAPI app under `src/claudestruct/server/` behind the `[server]` extra: `/healthz`, `/readyz`, `/v1/dashboard`, `/v1/budget`, `/v1/runs` (POST + GET), `/v1/keys` (list/create/revoke). OpenAPI 3.1 at `/openapi.json`, interactive viewer at `/docs`.
   - Auth: bearer API keys (`ck_<key_id>_<secret>`, SHA-256-hashed secret, last_used stamp on auth success).
@@ -230,10 +237,10 @@ Goal: 5-50 devs share the tool with shared visibility, shared budgets, and team-
 - [ ] **W6.4 — OAuth login**
   - GitHub + Google login for the daemon's web UI
   - Reuse existing `claw-squad/src/ui/web.ts` + `web-page.ts` page; swap token-in-URL for cookie session
-- [ ] **W6.5 — Shared dashboard**
-  - Multi-user view of recent runs, per-team budget rollups, cost-per-author leaderboard
-  - Regression alerts: "run cost is >2σ over team baseline" → Slack/email
-  - Extends `src/claudestruct/dashboard.py` with team-scoped queries
+- [~] **W6.5 — Shared dashboard** (multi-user view shipped; alerts deferred)
+  - `GET /v1/dashboard/team` endpoint reads the `runs` table for the caller's org (filtered to terminal states `done`/`failed` so queued/running rows don't skew rollups). Returns `total_runs` + `total_cost_usd` headline numbers, `by_author` leaderboard sorted by spend desc with email + run-count + tokens, `by_task` task-type breakdown, plus `recent` (default 50, max 500) for the activity feed
+  - New schemas in `src/claudestruct/server/schema.py`: `AuthorRollup`, `TaskRollup`, `TeamDashboardResponse`. Tenant-scoped via `Run.org_id == principal.org_id` so an org can never see another org's spend
+  - Pending: regression alerts ("run cost > 2σ over team baseline" → Slack/email) and budget-cap rollups per team — both depend on a notification surface that doesn't exist yet
 - [ ] **W6.6 — GitHub App**
   - Replaces personal-token usage; per-org installation; opens PRs as `claudeStruct[bot]`
   - Webhook-triggered runs (`pull_request`, `issue_comment` with `/cs review`)
@@ -347,11 +354,21 @@ Reopen criterion: a signed enterprise contract or three serious leads asking for
 
 ## Last Update
 
-- 2026-04-26 — R2 + F1 + F8 ready for PR push (post-roadmap selection from R/F candidate list).
-- 2026-04-26 — Wave 4 in flight on PR [#17](https://github.com/tonyandclaw/claudeStruct/pull/17):
-  - W4.1 ✅ CI matrix landed
-  - W4.2 ~ governance docs (LICENSE, CHANGELOG, CONTRIBUTING, SECURITY); CODE_OF_CONDUCT.md deferred (the standard Contributor Covenant 2.1 text trips Anthropic's output-content filter when generated inline; will be added manually from the upstream copy)
-  - W4.4 ✅ Dockerfile + GHCR publish workflow
-  - W4.5 ✅ mkdocs-material site + GH Pages deploy workflow
-  - W4.6 ~ README badges in; asciinema recording pending
+- 2026-04-26 — W5.3 close-out: `claw-squad runs purge` shipped. New `src/runs/purge.ts` mirrors `claudestruct.redact.purge_runs` (mtime-based, `dryRun`, injectable `now`); `claw-squad runs list` lists run logs with age/size; `claw-squad runs purge --older-than-days N [--dry-run]` prunes them. 7 new vitest cases in `tests/runs-purge.test.ts`. Total TS: 309 tests passing; tsc clean. Removes the only "Pending" tail on W5.3.
+- 2026-04-26 — Wave 6 mid-roll ready for PR push:
+  - W6.1 ✅ daemon-mode background runner: `Run` model, `process_pending_run` + `WorkerThread`, `drain_queue`, `cs serve worker` subcommand, real DB-backed POST/GET runs with tenant isolation (cross-org → 404)
+  - W6.5 🟢 shared dashboard: `GET /v1/dashboard/team` with author leaderboard + task breakdown + recent feed; alerts/regression detection deferred until a notification surface exists
+  - 16 new server tests (worker drain + failure recovery + queue empty + isolation; team dashboard 5 cases including cross-org isolation, queued-row exclusion, limit validation). Total Python: 168 passed
+- 2026-04-26 — Wave 5 close-out ready for PR push:
+  - W5.1 ✅ claw-squad TS-side tracing landed (root `clawSquad.run` span; `optionalDependencies` block for OTel deps; 7 new vitest cases). Wave 5 OTel item now fully done across both tools.
+  - W5.5 ✅ Hardened sandbox: seccomp.json + apparmor.profile + sandbox-hardening.md docs + Linux uid-map probe so the structured isolation report reflects actual netns capability.
+  - Stats: 139 Python tests + 302 TS tests + Go isolation-report tests; type-check clean.
+- 2026-04-26 — Wave 4 close-out + Wave 5 kick-off ready for PR push:
+  - W4.2 ✅ CODE_OF_CONDUCT.md (official Contributor Covenant 2.1, contact pointer to SECURITY.md)
+  - W4.3 ~ `.github/workflows/release.yml` written (OIDC PyPI + npm provenance + cross-compiled `claw-sandbox` binaries via 4-job matrix); trusted-publishing config still org-level manual step
+  - W5.1 ~ `tracing.py` shipped for claudestruct with 6 tests; claw-squad TS-side tracing remains pending
+  - W5.2 ✅ `sentry_init.py` shipped with 10 tests covering every redaction surface
+  - 16 new Python tests; full pytest 94 passed
+- 2026-04-26 — R2 + F1 + F8 PR open at [#19](https://github.com/tonyandclaw/claudeStruct/pull/19) → merged.
+- 2026-04-26 — Wave 4 (W4.1, W4.4, W4.5) merged via [#17](https://github.com/tonyandclaw/claudeStruct/pull/17).
 - 2026-04-25 — Waves 1-3 closed (PRs #11, #13, #14, #15, #16 merged). Wave 4-8 commercialization roadmap added.
