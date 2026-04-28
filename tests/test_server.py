@@ -1114,3 +1114,126 @@ def test_webhook_run_isolated_to_installation_org(env):
     assert g.status_code == 404
     g2 = env["client"].get(f"/v1/runs/{run_id}", headers=_auth(env["keys"]["viewer@a"]))
     assert g2.status_code == 200
+
+
+# --- W8.2 token-cap enforcement at run-submit time -----------------
+
+
+def _seed_run_usage(env, *, org_slug: str, email: str,
+                    input_tokens: int, output_tokens: int = 0,
+                    status_val: str | None = None) -> None:
+    """Insert a directly-persisted Run row to simulate prior usage.
+    Bypasses POST /v1/runs so we can pre-load the cap."""
+    import secrets as _secrets
+
+    from sqlalchemy import select
+
+    from claudestruct.server.models import Org, Run, RunStatus, User
+    if status_val is None:
+        status_val = RunStatus.done.value
+    with env["factory"]() as session:
+        org = session.execute(select(Org).where(Org.slug == org_slug)).scalar_one()
+        user = session.execute(select(User).where(User.email == email)).scalar_one()
+        session.add(Run(
+            run_id=f"r-seed-{_secrets.token_hex(4)}",
+            org_id=org.id, user_id=user.id,
+            status=status_val, task="dev", description="seed",
+            input_tokens=input_tokens, output_tokens=output_tokens,
+        ))
+        session.commit()
+
+
+def test_post_run_under_cap_succeeds(env):
+    """Free org with 50k of 100k used: new submit accepted (202)."""
+    _set_tier(env, "org-a", "free")
+    _seed_run_usage(env, org_slug="org-a", email="member@a", input_tokens=50_000)
+    r = _post_run(env, "member@a")
+    assert r.status_code == 202
+
+
+def test_post_run_at_cap_rejected_402(env):
+    """Free org has already exceeded the 100k cap: new submit rejected
+    with 402 + structured body."""
+    _set_tier(env, "org-a", "free")
+    _seed_run_usage(env, org_slug="org-a", email="member@a", input_tokens=100_000)
+    r = _post_run(env, "member@a")
+    assert r.status_code == 402
+    body = r.json()["detail"]
+    assert body["used_tokens"] == 100_000
+    assert body["cap_tokens"] == 100_000
+    assert body["tier"] == "free"
+    assert "period_end" in body
+    assert "cap reached" in body["detail"].lower() or "cap" in body["detail"].lower()
+
+
+def test_post_run_team_tier_unlimited(env):
+    """Team org with massive usage still allowed — no cap on this tier."""
+    _set_tier(env, "org-a", "team")
+    _seed_run_usage(
+        env, org_slug="org-a", email="member@a", input_tokens=1_000_000,
+    )
+    r = _post_run(env, "member@a")
+    assert r.status_code == 202
+
+
+def test_post_run_business_tier_unlimited(env):
+    _set_tier(env, "org-a", "business")
+    _seed_run_usage(
+        env, org_slug="org-a", email="member@a", input_tokens=10_000_000,
+    )
+    r = _post_run(env, "member@a")
+    assert r.status_code == 202
+
+
+def test_post_run_failed_runs_count_against_cap(env):
+    """A failed Run still cost the operator real Anthropic spend, so it
+    must count toward the monthly cap. Verifies the gate doesn't filter
+    them out."""
+    from claudestruct.server.models import RunStatus
+    _set_tier(env, "org-a", "free")
+    # Use only failed runs to reach the cap.
+    _seed_run_usage(
+        env, org_slug="org-a", email="member@a",
+        input_tokens=100_000, status_val=RunStatus.failed.value,
+    )
+    r = _post_run(env, "member@a")
+    assert r.status_code == 402
+    assert r.json()["detail"]["used_tokens"] == 100_000
+
+
+def test_post_run_unknown_tier_falls_back_to_free(env):
+    """Defensive: a Subscription with an unknown tier value must NOT
+    grant business-tier (uncapped) ceilings. Falls back to free."""
+    from sqlalchemy import select
+
+    from claudestruct.server.billing import Subscription
+    from claudestruct.server.models import Org
+    # Bypass _set_tier (which validates via Tier enum) to plant a
+    # forged tier string directly.
+    with env["factory"]() as session:
+        org = session.execute(select(Org).where(Org.slug == "org-a")).scalar_one()
+        sub = Subscription(org_id=org.id, tier="ultimate-platinum")
+        session.add(sub)
+        session.commit()
+    _seed_run_usage(env, org_slug="org-a", email="member@a", input_tokens=100_000)
+    r = _post_run(env, "member@a")
+    assert r.status_code == 402  # rejected because free-fallback applies
+    assert r.json()["detail"]["cap_tokens"] == 100_000
+
+
+def test_post_run_no_subscription_row_treats_as_free(env):
+    """An org with no Subscription row at all (the implicit-free path)
+    must still get the cap enforced. Doubles as a regression check
+    that get_or_default is wired correctly."""
+    _seed_run_usage(env, org_slug="org-a", email="member@a", input_tokens=100_000)
+    r = _post_run(env, "member@a")
+    assert r.status_code == 402
+
+
+def test_post_run_other_orgs_usage_does_not_count(env):
+    """Cross-tenant: org-b's usage must NOT push org-a over the cap."""
+    _set_tier(env, "org-a", "free")
+    _set_tier(env, "org-b", "free")
+    _seed_run_usage(env, org_slug="org-b", email="admin@b", input_tokens=100_000)
+    r = _post_run(env, "member@a")
+    assert r.status_code == 202  # org-a still has full quota
