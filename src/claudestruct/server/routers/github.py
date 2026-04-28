@@ -299,6 +299,7 @@ async def receive_webhook(
             }
 
         run_id = f"run-{secrets.token_hex(8)}"
+        pr_number_val = decision.get("pr_number")
         row = Run(
             run_id=run_id,
             org_id=install.org_id,
@@ -307,6 +308,11 @@ async def receive_webhook(
             task=decision["task"],
             description=decision["description"],
             paths_json=None,
+            # Persist the PR coordinates so the worker can post the
+            # verdict back when the run completes (W6.6 follow-up).
+            github_installation_id=install_id,
+            github_repo_full_name=repo,
+            github_pr_number=pr_number_val if isinstance(pr_number_val, int) else None,
         )
         session.add(row)
         session.commit()

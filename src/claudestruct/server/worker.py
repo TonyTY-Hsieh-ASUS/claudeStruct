@@ -53,6 +53,90 @@ from claudestruct.server.models import Run, RunStatus
 
 log = logging.getLogger("claudestruct.server.worker")
 
+# Process-wide cache shared with the webhook router so the worker
+# loop doesn't mint a token per completed run. Lazy-built at first
+# use to keep cryptography out of the import path on lean installs.
+_verdict_token_cache = None
+
+
+def _get_verdict_token_cache():
+    global _verdict_token_cache
+    if _verdict_token_cache is None:
+        from claudestruct.server.github_app import InstallationTokenCache
+        _verdict_token_cache = InstallationTokenCache()
+    return _verdict_token_cache
+
+
+def _http_client_default():
+    """Lazy-import httpx so non-server installs don't pay for it."""
+    import httpx
+    return httpx.Client()
+
+
+# Override hook for tests — set this to a zero-arg factory returning a
+# stub http client. Module-global rather than per-thread because the
+# worker has only one thread and tests run synchronously.
+http_client_factory: Callable[[], Any] | None = None
+
+
+def _post_verdict_comment_safe(run: Run) -> None:
+    """Post a follow-up "verdict" comment to the originating PR.
+
+    Best-effort: any error is logged and swallowed. A network or
+    auth blip must never roll back the row's terminal status —
+    operators can re-trigger the comment manually if needed, but
+    losing the run state would cost real money to redo.
+    """
+    if not (
+        run.github_installation_id is not None
+        and run.github_repo_full_name is not None
+        and run.github_pr_number is not None
+    ):
+        # Run wasn't webhook-triggered (CLI / REST / cron path).
+        return
+
+    from claudestruct.server.github_app import (
+        GitHubAppError,
+        format_verdict_body,
+        load_app_config,
+        post_ack_comment,
+    )
+
+    cfg = load_app_config()
+    if cfg is None:
+        # Pure-OSS / unconfigured deployments: silent skip.
+        return
+
+    body = format_verdict_body(
+        run_id=run.run_id,
+        status=run.status,
+        cost_usd=run.cost_usd or 0.0,
+        duration_ms=run.duration_ms,
+        error=run.error,
+    )
+
+    factory = http_client_factory or _http_client_default
+    client = factory()
+    try:
+        url = post_ack_comment(
+            cfg=cfg,
+            installation_id=run.github_installation_id,
+            repo_full_name=run.github_repo_full_name,
+            pr_number=run.github_pr_number,
+            body=body,
+            cache=_get_verdict_token_cache(),
+            http_client=client,
+        )
+        log.info("github verdict comment posted for run %s: %s", run.run_id, url)
+    except GitHubAppError as exc:
+        log.warning("github verdict comment failed for run %s: %s", run.run_id, exc)
+    except Exception:  # noqa: BLE001
+        log.exception("github verdict comment unexpected failure for run %s", run.run_id)
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+
 _GATHERERS: dict[str, Callable[..., Any]] = {
     "dev": gather_dev_context,
     "review": gather_review_context,
@@ -164,6 +248,7 @@ def process_pending_run(
         run.ended_at = _now_utc()
         session.commit()
         log.warning("worker rejected run %s: %s", run.run_id, run.error)
+        _post_verdict_comment_safe(run)
         return run
 
     try:
@@ -182,6 +267,7 @@ def process_pending_run(
         run.ended_at = _now_utc()
         session.commit()
         log.warning("worker run %s failed: %s", run.run_id, run.error)
+        _post_verdict_comment_safe(run)
         return run
     except Exception as exc:  # pragma: no cover — last-ditch safety net
         run.status = RunStatus.failed.value
@@ -189,6 +275,7 @@ def process_pending_run(
         run.ended_at = _now_utc()
         session.commit()
         log.exception("worker run %s crashed", run.run_id)
+        _post_verdict_comment_safe(run)
         return run
 
     run.status = RunStatus.done.value
@@ -201,6 +288,7 @@ def process_pending_run(
     run.ended_at = _now_utc()
     session.commit()
     log.info("worker run %s done: cost=$%.4f", run.run_id, run.cost_usd)
+    _post_verdict_comment_safe(run)
     return run
 
 

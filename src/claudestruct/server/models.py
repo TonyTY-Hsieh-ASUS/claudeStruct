@@ -157,6 +157,14 @@ class Run(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # W6.6 verdict-on-completion: when a run was enqueued by the
+    # GitHub App webhook, these track which PR to post the verdict
+    # back to. NULL on runs created via the REST API or CLI — those
+    # have no upstream PR to comment on.
+    github_installation_id: Mapped[int | None] = mapped_column(nullable=True)
+    github_repo_full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    github_pr_number: Mapped[int | None] = mapped_column(nullable=True)
+
 
 class UserSession(Base):
     """OAuth-derived browser session (W6.4).

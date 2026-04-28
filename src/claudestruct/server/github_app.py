@@ -322,3 +322,51 @@ def post_ack_comment(
         install_token=tok.token,
         http_client=http_client,
     )
+
+
+# --- Verdict comment formatter -------------------------------------
+
+
+def format_verdict_body(
+    *,
+    run_id: str,
+    status: str,
+    cost_usd: float = 0.0,
+    duration_ms: int | None = None,
+    error: str | None = None,
+) -> str:
+    """Compose the verdict-comment Markdown body from a completed Run.
+
+    Two shapes:
+      - ``done``: ✅ headline + cost / duration footer.
+      - ``failed``: ❌ headline + truncated error in a fenced block.
+
+    Anything else (including an unexpected enum value) falls back to a
+    neutral "completed" message — the daemon shouldn't go silent on a
+    schema drift it can recover from.
+    """
+    duration_str = (
+        f"{duration_ms / 1000:.1f}s" if isinstance(duration_ms, int) else "unknown"
+    )
+    if status == "done":
+        return (
+            f":white_check_mark: claudeStruct review **completed** "
+            f"(`{run_id}`).\n\n"
+            f"_Cost: ${cost_usd:.4f} · Duration: {duration_str}_"
+        )
+    if status == "failed":
+        # Truncate so a 4KB Anthropic stack trace doesn't blow the
+        # GitHub comment limit (65,536 chars) or paste API keys
+        # accidentally captured in an error message.
+        err_preview = (error or "(no error message)").strip()
+        if len(err_preview) > 1500:
+            err_preview = err_preview[:1500] + "\n…(truncated)"
+        return (
+            f":x: claudeStruct review **failed** (`{run_id}`).\n\n"
+            f"```\n{err_preview}\n```\n\n"
+            f"_Duration: {duration_str}_"
+        )
+    return (
+        f":information_source: claudeStruct run `{run_id}` reached "
+        f"status `{status}`."
+    )
