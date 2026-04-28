@@ -68,7 +68,6 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
-
 # AES-256 key size, in bytes. AES-GCM requires 16, 24, or 32; we pin
 # 32 so the threat model stays consistent regardless of provider.
 DEK_BYTES = 32

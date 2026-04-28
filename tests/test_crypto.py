@@ -8,7 +8,6 @@ pytest.importorskip("fastapi")  # crypto module is server-only
 
 from claudestruct.server import crypto as crypto_mod
 
-
 # --- LocalKMSProvider -----------------------------------------------
 
 def test_local_kms_round_trip(monkeypatch):

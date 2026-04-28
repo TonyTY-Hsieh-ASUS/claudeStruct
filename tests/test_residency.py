@@ -23,7 +23,6 @@ from claudestruct.server.app import create_app, resolve_region
 from claudestruct.server.billing import Subscription
 from claudestruct.server.db import init_db, make_session_factory
 
-
 # --- resolve_region --------------------------------------------------
 
 def test_resolve_region_explicit_override(monkeypatch):
