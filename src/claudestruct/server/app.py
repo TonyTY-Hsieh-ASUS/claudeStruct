@@ -8,10 +8,12 @@ the interactive viewer.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from claudestruct import __version__
 from claudestruct.server.db import init_db, make_engine, make_session_factory
@@ -44,12 +46,47 @@ from claudestruct.server.routers import (
 )
 
 
+# --- W8.5 -----------------------------------------------------------
+
+DEFAULT_REGION = "us-east-1"
+
+
+def resolve_region(override: str | None = None) -> str:
+    """Pick the region tag. Priority: explicit override > env > default.
+
+    The tag is provable on every response via the ``X-CS-Region``
+    header so a client can verify their request didn't cross a
+    residency boundary mid-flight (e.g. mistakenly hit the US shard
+    when their org is pinned to EU). Treat it as advisory metadata --
+    real residency enforcement happens at the load-balancer / DNS
+    layer (per-region deployments + tenant region pin).
+    """
+    if override:
+        return override
+    return os.environ.get("CLAUDESTRUCT_REGION", DEFAULT_REGION)
+
+
+class RegionHeaderMiddleware(BaseHTTPMiddleware):
+    """Stamp every response with ``X-CS-Region`` so clients can
+    verify they reached the expected residency shard."""
+
+    def __init__(self, app: Any, region: str) -> None:
+        super().__init__(app)
+        self.region = region
+
+    async def dispatch(self, request: Request, call_next):  # noqa: D401
+        response = await call_next(request)
+        response.headers["X-CS-Region"] = self.region
+        return response
+
+
 def create_app(
     *,
     db_url: str | None = None,
     run_root: str | Path | None = None,
     engine: Any = None,
     skip_init: bool = False,
+    region: str | None = None,
 ) -> FastAPI:
     """Build the FastAPI app.
 
@@ -63,6 +100,10 @@ def create_app(
         skip_init: Skip the ``Base.metadata.create_all`` call. Useful
             when the engine is shared across test app instances and
             tables already exist.
+        region: W8.5 data-residency tag (e.g. ``us-east-1``,
+            ``eu-west-1``). Surfaced in ``/healthz`` + on every
+            response via ``X-CS-Region``. Defaults to env
+            ``CLAUDESTRUCT_REGION`` or ``us-east-1``.
     """
     eng = engine if engine is not None else make_engine(db_url)
     if not skip_init:
@@ -80,6 +121,8 @@ def create_app(
     app.state.session_factory = make_session_factory(eng)
     app.state.engine = eng
     app.state.run_root = str(run_root) if run_root else "."
+    app.state.region = resolve_region(region)
+    app.add_middleware(RegionHeaderMiddleware, region=app.state.region)
 
     app.include_router(health_router.router)
     app.include_router(keys_router.router)

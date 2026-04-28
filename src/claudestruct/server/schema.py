@@ -15,6 +15,9 @@ from pydantic import BaseModel, Field
 class HealthResponse(BaseModel):
     status: Literal["ok"] = "ok"
     version: str
+    # W8.5: data-residency tag. Mirrors the X-CS-Region response
+    # header so a healthz probe doubles as a residency check.
+    region: Optional[str] = None
 
 
 # --- Auth / keys ----------------------------------------------------

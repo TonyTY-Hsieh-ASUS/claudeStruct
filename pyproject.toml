@@ -29,6 +29,12 @@ server = [
   "uvicorn[standard]>=0.32",
   "sqlalchemy>=2.0",
   "pydantic>=2.0",
+  # AES-GCM envelope encryption for W8.6 CMEK + general at-rest crypto.
+  # The library is a hard dep of the server bundle because every
+  # daemon write path will call into it once envelope-encryption is
+  # turned on for an org -- lazy-loading would just defer the pip
+  # install, not the import cost.
+  "cryptography>=42.0",
 ]
 # `pip install claudestruct[otel]` to enable OpenTelemetry tracing.
 # Without this extra, tracing.py falls back to no-op spans and prints

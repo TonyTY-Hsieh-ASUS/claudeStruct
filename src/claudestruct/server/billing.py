@@ -160,6 +160,19 @@ class Subscription(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now_utc, onupdate=_now_utc,
     )
+    # W8.5: per-tenant residency pin. Defaults to None which means
+    # "no preference, served from any region". The hosted control
+    # plane refuses to dispatch a run for an org whose region tag
+    # doesn't match the worker's deployment region.
+    region: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # W8.6: per-tenant CMEK envelope. ``wrapped_dek_b64`` is the DEK
+    # wrapped under the org's KEK (URL-safe base64, no padding).
+    # ``wrapped_dek_provider`` records which KMSProvider produced it
+    # so a future migration can detect mixed state. Both NULL =
+    # at-rest crypto disabled for this org.
+    wrapped_dek_b64: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    wrapped_dek_provider: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    wrapped_dek_key_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
 
 
 def get_or_default(session: Session, org_id: int) -> Subscription:
