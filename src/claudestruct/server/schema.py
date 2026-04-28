@@ -229,3 +229,35 @@ class UsageResponse(BaseModel):
     cache_read_tokens: int
     cache_creation_tokens: int
     cost_usd: float
+
+
+# --- SLO snapshot (W8.7) -------------------------------------------
+
+class SloWindow(BaseModel):
+    """Per-window rollup. ``None`` percentiles signal an empty window
+    so consumers can render "n/a" rather than a misleading 0."""
+    window: Literal["24h", "7d", "30d"]
+    total_runs: int
+    succeeded: int
+    failed: int
+    success_rate: Optional[float]
+    error_rate: Optional[float]
+    p50_run_start_ms: Optional[int]
+    p95_run_start_ms: Optional[int]
+    p99_run_start_ms: Optional[int]
+    p50_duration_ms: Optional[int]
+    p95_duration_ms: Optional[int]
+    p99_duration_ms: Optional[int]
+
+
+class SloTargetsResponse(BaseModel):
+    success_rate: float
+    p95_run_start_ms: int
+    p95_duration_ms: int
+
+
+class SloSnapshotResponse(BaseModel):
+    """Fleet-wide SLO snapshot powering the public status page."""
+    generated_at: datetime
+    targets: SloTargetsResponse
+    windows: list[SloWindow]

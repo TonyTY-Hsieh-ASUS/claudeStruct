@@ -327,15 +327,23 @@ Goal: a managed service teams pay for. Open-core split: Waves 4-7 OSS, Wave 8 ho
   - Wired into `keys.create / keys.revoke / runs.submit / billing.checkout.create` so every state-changing call appends exactly one row. Webhook receipt records `stripe.<event_type>` once Stripe is configured.
   - `prune_audit()` enforces tier-driven retention (free=90d, paid=7y; pulled from `billing.AUDIT_RETENTION_DAYS`). Pruning is intentionally chain-breaking — operators record the post-prune head externally before running it.
   - Tests: `tests/test_audit.py` (17 cases) — canonical-JSON determinism, per-org isolation, chain happy path, tampered-payload + seq-gap detection, prune semantics, HTTP auth gate + RBAC + pagination, payload round-trip + multi-tenant isolation.
-- [ ] **W8.5 — Data residency**
-  - `claudestruct.cloud` resolves to nearest region; org settings can pin storage region
-  - Provable via API-returned region tag in every response
-- [ ] **W8.6 — Customer-managed encryption keys (CMEK)**
-  - Optional BYOK via AWS KMS / GCP KMS; per-tenant DEK encrypted with customer KEK
-- [ ] **W8.7 — Status page + SLO dashboard**
-  - `status.claudestruct.dev` (statuspage.io or self-hosted Cachet)
-  - SLOs: 99.9% monthly uptime, p95 API latency < 500ms, p95 run-start latency < 5s
-  - Public incident timeline
+- [x] **W8.5 — Data residency**
+  - `resolve_region(override)` in `src/claudestruct/server/app.py` (priority: explicit > `CLAUDESTRUCT_REGION` env > `us-east-1` default); `RegionHeaderMiddleware` stamps every response with `X-CS-Region`; `/healthz` + `/readyz` echo it in their bodies
+  - `Subscription.region` column on the billing model so the hosted control plane can pin a tenant to one residency shard
+  - Real residency enforcement still happens at the load-balancer / DNS layer (per-region deployments + tenant region pin) — the header is the proof, not the gate
+  - Tests: `tests/test_residency.py` (10 cases) — `resolve_region` priority, header on every endpoint (incl. unauthenticated `/healthz` + `/openapi.json`), body fields, DB column round-trip + null default
+- [x] **W8.6 — Customer-managed encryption keys (CMEK)**
+  - `src/claudestruct/server/crypto.py` — `WrappedDEK` dataclass, `LocalKMSProvider` (KEK from `CLAUDESTRUCT_KEK_PASSPHRASE` via PBKDF2-HMAC-SHA256, random fallback for dev), `fresh_dek` / `encrypt_field` / `decrypt_field` (AES-GCM with AAD-bound row identity), `encode_b64` / `decode_b64` URL-safe helpers, `default_provider()` factory keyed off `CLAUDESTRUCT_KMS_PROVIDER`
+  - `Subscription.wrapped_dek_b64` / `wrapped_dek_provider` / `wrapped_dek_key_id` columns store the org-scoped envelope
+  - AWS KMS provider path stubbed (`NotImplementedError`) — abstraction is in place, real SDK integration ships when the merchant story needs it
+  - Tests: `tests/test_crypto.py` (20 cases) — local round-trip, passphrase isolation, AAD binding, wrong-DEK / truncated-blob / wrong-provider rejection, default-provider env wiring
+- [~] **W8.7 — Status page + SLO dashboard** (SLO endpoint shipped; external status page deferred)
+  - `src/claudestruct/server/slo.py` folds the `runs` table into rolling 24h / 7d / 30d windows; emits `success_rate`, `error_rate`, p50/p95/p99 of run-start latency (`started_at - created_at`) and duration (`duration_ms` for `done` runs only). Targets (`SUCCESS_RATE_TARGET=0.999`, `P95_RUN_START_MS_TARGET=5000`, `P95_DURATION_MS_TARGET=600000`) live as code-reviewed constants
+  - `GET /v1/slo` is unauthenticated like `/healthz` so an external status page can scrape without a service token; output is aggregate (no run IDs / payloads / per-tenant data)
+  - Failed runs excluded from duration percentiles (a single crash shouldn't poison p95); negative run-start deltas clamp to 0 (clock-skew defense); `null` percentiles surface for empty windows so consumers render "n/a" not 0
+  - `docs/slo.md` documents the targets, the response shape, what's measured (and what isn't), and the status-page traffic-light mapping
+  - Tests: `tests/test_slo.py` (20 cases) — `_percentile` math (empty / single / odd-count / p0 / p100 / p95 linear interp), windowing (24h excludes 25h-old, 30d excludes 31d-old, queued/running excluded), success/error rate, run-start latency clamps + skips runs with `started_at=NULL`, duration excludes failed runs, endpoint shape + region header
+  - Pending: external `status.claudestruct.dev` (manual infra), per-tenant SLO endpoint, API request-latency metric (needs FastAPI middleware), public incident timeline
 
 ---
 
@@ -371,6 +379,14 @@ Reopen criterion: a signed enterprise contract or three serious leads asking for
 
 ## Last Update
 
+- 2026-04-28 — W8.7 SLO endpoint ready for PR push (PR #33 incoming):
+  - `src/claudestruct/server/slo.py` rolls the `runs` table into 24h / 7d / 30d windows: `success_rate`, p50/p95/p99 of run-start latency + duration. Targets are code-reviewed constants (`0.999` success, 5s p95 run-start, 10min p95 duration)
+  - `GET /v1/slo` is unauthenticated (status-page friendly); response is aggregate-only so leaving it open trades nothing sensitive
+  - `docs/slo.md` documents targets, response shape, traffic-light status-page mapping, and the explicit out-of-scope list (external `status.claudestruct.dev`, per-tenant SLO, API request-latency middleware)
+  - 20 new tests covering percentile math, windowing, success/error rate, run-start clock-skew clamping, failed-run exclusion from duration percentiles, endpoint shape + region header. Total Python: 303 passed; ruff clean
+- 2026-04-28 — W8.5 + W8.6 merged via PR #32:
+  - W8.5: `resolve_region` priority chain + `RegionHeaderMiddleware` (`X-CS-Region` on every response) + `Subscription.region` column. 10 tests
+  - W8.6: `LocalKMSProvider` (passphrase-derived KEK, AES-GCM field-level encrypt/decrypt with AAD), `WrappedDEK` columns on `Subscription`. 20 tests. AWS path stubbed pending merchant integration
 - 2026-04-27 — W8.3 tenant-scoped sandbox (limits + priority) ready for PR push:
   - `SANDBOX_LIMITS` + `TIER_PRIORITY` per-tier tables in billing module; worker `_claim_one()` skips orgs at their concurrency cap and picks highest tier first; `/v1/billing/subscription` surfaces the active limits
   - 6 new tests + 1 augment to existing billing test. Total Python: 234 passed (audit pre-existing failures unchanged); ruff clean
