@@ -18,14 +18,51 @@ from sqlalchemy.orm import Session
 from claudestruct import dashboard as dash_mod
 from claudestruct.server import audit as audit_mod
 from claudestruct.server import auth as auth_mod
+from claudestruct.server import billing as billing_mod
 from claudestruct.server.models import Role, Run, RunStatus
 from claudestruct.server.schema import (
     CreateRunRequest,
     CreateRunResponse,
     RunDetail,
+    TokenCapExceededResponse,
 )
 
 router = APIRouter(prefix="/v1/runs", tags=["runs"])
+
+
+def _enforce_token_cap(session: Session, *, org_id: int) -> None:
+    """Reject the submit if the org has already burned its monthly cap.
+
+    Reads the org's tier (defaulting to free when no Subscription row
+    exists), looks up the cap, sums current-period token usage, and
+    raises 402 with a structured body when the cap is met or exceeded.
+
+    No-op for tiers where ``tier_token_cap`` returns ``None`` (team /
+    business). Defensive on unknown tiers — they fall back to free
+    semantics so a misconfigured row can't grant business ceilings.
+    """
+    sub = billing_mod.get_or_default(session, org_id)
+    cap = billing_mod.tier_token_cap(sub.tier)
+    if cap is None:
+        return
+    used = billing_mod.current_period_token_usage(session, org_id)
+    if used < cap:
+        return
+    _, period_end = billing_mod.current_period_bounds(sub)
+    payload = TokenCapExceededResponse(
+        detail=(
+            f"monthly token cap reached: {used} of {cap} tokens used "
+            f"on the {sub.tier} tier; resets at {period_end.isoformat()}"
+        ),
+        used_tokens=used,
+        cap_tokens=cap,
+        period_end=period_end,
+        tier=sub.tier,
+    )
+    raise HTTPException(
+        status_code=status.HTTP_402_PAYMENT_REQUIRED,
+        detail=payload.model_dump(mode="json"),
+    )
 
 
 @router.post(
@@ -45,7 +82,13 @@ def create_run(
     Also writes a `run.submit` row to the per-org audit chain (W8.4)
     so subsequent investigations can correlate "who submitted what" by
     chain seq.
+
+    W8.2: rejects with 402 Payment Required when the caller's org has
+    already burned its monthly token cap. The 402 body lists usage,
+    cap, period_end, and tier so the SPA / CLI can render a single
+    actionable upgrade prompt without a follow-up call.
     """
+    _enforce_token_cap(session, org_id=principal.org_id)
     # 8 hex bytes → 16 chars; collision-resistant within the per-org
     # key space and short enough for log lines / URL paths.
     run_id = f"run-{secrets.token_hex(8)}"

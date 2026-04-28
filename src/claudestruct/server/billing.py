@@ -237,16 +237,75 @@ def stub_checkout_url(*, org_slug: str, tier: Tier) -> tuple[str, str]:
     return session_id, url
 
 
-# --- Mock period state for the draft -------------------------------
+# --- Token caps + current-period usage (W8.2) ----------------------
 #
-# The real "current period token usage" answer comes from the W6.1
-# daemon's run table summed against the subscription window. For the
-# draft we expose the existing dashboard fold so an org can at least
-# see its self-hosted JSONL spend through the same surface.
+# Per-tier monthly token caps. ``None`` means "no cap at this tier" —
+# the per-run sandbox `max_cost_usd` still applies, but the org isn't
+# bounded by a monthly quota. Hard-aborting on the cap at run-submit
+# time is the W8.2 acceptance criterion: a free user must not be able
+# to burn unlimited Anthropic spend on the operator's keys.
+TIER_TOKEN_CAPS: dict[Tier, int | None] = {
+    Tier.free: 100_000,
+    Tier.team: None,
+    Tier.business: None,
+}
+
 
 def free_tier_token_cap() -> int:
-    """100k tokens / month for solo accounts (per TODO.md W8.2)."""
-    return 100_000
+    """100k tokens / month for solo accounts (per TODO.md W8.2).
+
+    Kept as a back-compat shim — callers should prefer
+    ``tier_token_cap("free")`` so the table stays the single source.
+    """
+    cap = TIER_TOKEN_CAPS[Tier.free]
+    assert cap is not None  # invariant: free always has a cap
+    return cap
+
+
+def tier_token_cap(tier: str | None) -> int | None:
+    """Look up the monthly token cap for a tier string. ``None``
+    return value means uncapped at this tier.
+
+    Defensive: an unknown / ``None`` tier falls back to free-tier
+    semantics so a misconfigured row can't accidentally grant business
+    ceilings (mirrors ``sandbox_limits_for_tier``)."""
+    if tier is None:
+        return TIER_TOKEN_CAPS[Tier.free]
+    try:
+        t = Tier(tier)
+    except ValueError:
+        return TIER_TOKEN_CAPS[Tier.free]
+    return TIER_TOKEN_CAPS.get(t, TIER_TOKEN_CAPS[Tier.free])
+
+
+def current_period_token_usage(
+    session: Session,
+    org_id: int,
+    *,
+    now: datetime | None = None,
+) -> int:
+    """Sum (input_tokens + output_tokens) for ``org_id`` over the
+    current billing window.
+
+    Window boundary comes from ``current_period_bounds`` so it tracks
+    Stripe's `current_period_start/end` when set, otherwise the UTC
+    calendar month. ``failed`` runs still count: the Anthropic API
+    call happened (and was billed) even if the run errored after
+    the response landed.
+    """
+    # Local import to dodge the circular: models -> billing -> models.
+    from claudestruct.server.models import Run
+
+    sub = get_or_default(session, org_id)
+    start, end = current_period_bounds(sub, now=now)
+    rows = session.execute(
+        select(Run.input_tokens, Run.output_tokens).where(
+            Run.org_id == org_id,
+            Run.created_at >= start,
+            Run.created_at < end,
+        )
+    ).all()
+    return sum((r[0] or 0) + (r[1] or 0) for r in rows)
 
 
 def make_period_for_test(

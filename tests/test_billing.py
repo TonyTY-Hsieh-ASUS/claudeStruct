@@ -261,3 +261,105 @@ def test_subscription_endpoint_does_not_require_admin(env):
         "/v1/billing/subscription", headers=_auth(env["keys"]["viewer@a"]),
     )
     assert r.status_code == 200
+
+
+# --- W8.2 token-cap helpers ----------------------------------------
+
+
+def test_tier_token_cap_table():
+    """Free has a finite cap; paid tiers are uncapped at this layer
+    (per-run sandbox cost cap still applies)."""
+    assert billing_mod.tier_token_cap("free") == 100_000
+    assert billing_mod.tier_token_cap("team") is None
+    assert billing_mod.tier_token_cap("business") is None
+
+
+def test_tier_token_cap_unknown_falls_back_to_free():
+    """Defensive: a misconfigured tier string must NOT grant business
+    ceilings. Mirrors `sandbox_limits_for_tier`'s safe-default policy."""
+    assert billing_mod.tier_token_cap("ultimate-platinum") == 100_000
+    assert billing_mod.tier_token_cap("") == 100_000
+    assert billing_mod.tier_token_cap(None) == 100_000
+
+
+def test_current_period_token_usage_sums_runs(env):
+    """Both `done` and `failed` runs count — the API call already
+    happened and is on the operator's bill."""
+    from claudestruct.server.models import Run, RunStatus
+    factory = env["factory"]
+    with factory() as session:
+        org_id = session.query(Org).first().id
+        user_id = session.query(User).first().id
+        for status_val, in_t, out_t in [
+            (RunStatus.done.value, 1000, 500),
+            (RunStatus.done.value, 200, 100),
+            (RunStatus.failed.value, 50, 25),
+        ]:
+            session.add(Run(
+                run_id=f"r-{status_val}-{in_t}",
+                org_id=org_id, user_id=user_id,
+                status=status_val, task="dev", description="x",
+                input_tokens=in_t, output_tokens=out_t,
+            ))
+        session.commit()
+        used = billing_mod.current_period_token_usage(session, org_id)
+    # 1000+500 + 200+100 + 50+25 = 1875 (failed run included)
+    assert used == 1875
+
+
+def test_current_period_token_usage_excludes_other_orgs(env):
+    """Tenant isolation: org A's runs must not show up in org B's tally."""
+    from claudestruct.server.models import Run, RunStatus
+    factory = env["factory"]
+    with factory() as session:
+        org_a_id = session.query(Org).first().id
+        # Build a second org with one user.
+        org_b = Org(slug="other", name="Other")
+        session.add(org_b)
+        session.flush()
+        user_b = User(email="root@other.test")
+        session.add(user_b)
+        session.flush()
+        session.add(Membership(
+            user_id=user_b.id, org_id=org_b.id, role=Role.member.value,
+        ))
+        session.add(Run(
+            run_id="r-noisy-neighbour",
+            org_id=org_b.id, user_id=user_b.id,
+            status=RunStatus.done.value, task="dev", description="x",
+            input_tokens=999_999, output_tokens=0,
+        ))
+        session.commit()
+        used = billing_mod.current_period_token_usage(session, org_a_id)
+    assert used == 0
+
+
+def test_current_period_token_usage_excludes_runs_outside_window(env):
+    """A row with `created_at` before period_start (e.g. an old run
+    that was prune-eligible but kept) must NOT count toward the
+    current-period total."""
+    from claudestruct.server.models import Run, RunStatus
+    factory = env["factory"]
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=timezone.utc)
+    with factory() as session:
+        org_id = session.query(Org).first().id
+        user_id = session.query(User).first().id
+        # 50 days ago: outside the calendar-month default window.
+        old = datetime(2026, 3, 8, 12, 0, tzinfo=timezone.utc)
+        session.add(Run(
+            run_id="r-old", org_id=org_id, user_id=user_id,
+            status=RunStatus.done.value, task="dev", description="x",
+            input_tokens=10_000, output_tokens=10_000,
+            created_at=old,
+        ))
+        # In-window: keep this one in.
+        recent = datetime(2026, 4, 25, 12, 0, tzinfo=timezone.utc)
+        session.add(Run(
+            run_id="r-new", org_id=org_id, user_id=user_id,
+            status=RunStatus.done.value, task="dev", description="x",
+            input_tokens=100, output_tokens=200,
+            created_at=recent,
+        ))
+        session.commit()
+        used = billing_mod.current_period_token_usage(session, org_id, now=now)
+    assert used == 300

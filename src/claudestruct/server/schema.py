@@ -137,6 +137,23 @@ class CreateRunResponse(BaseModel):
     )
 
 
+class TokenCapExceededResponse(BaseModel):
+    """Body returned with HTTP 402 when an org's monthly token cap
+    would be breached by accepting another run.
+
+    The fields let the caller render an actionable message ("you've
+    used X of Y; resets at Z; upgrade for unlimited") without a
+    second round-trip. ``failed`` runs count toward ``used`` because
+    the Anthropic API call still happened — that's already on the
+    operator's bill.
+    """
+    detail: str
+    used_tokens: int
+    cap_tokens: int
+    period_end: datetime
+    tier: str
+
+
 class RunDetail(RunRow):
     pass
 
