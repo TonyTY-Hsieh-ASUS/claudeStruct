@@ -234,16 +234,24 @@ Goal: 5-50 devs share the tool with shared visibility, shared budgets, and team-
   - Roles: `admin` / `member` / `viewer` enforced by `require_role(min_role)` FastAPI dependency
   - `cs serve init-db / add-org / add-user / add-key` covers the bootstrap path
   - Pending: teams (currently flat membership of users → orgs), seeded migration fixtures, Alembic when the schema needs to change shape
-- [ ] **W6.4 — OAuth login**
-  - GitHub + Google login for the daemon's web UI
-  - Reuse existing `claw-squad/src/ui/web.ts` + `web-page.ts` page; swap token-in-URL for cookie session
+- [~] **W6.4 — OAuth login** (GitHub shipped; Google deferred)
+  - `UserSession` SQLAlchemy model: per-row `session_token` (URL-safe random), `provider`, `expires_at` (14d hard cap), `revoked_at` for logout
+  - `src/claudestruct/server/oauth.py` — pure helpers: `load_github_config()` reads env (`CLAUDESTRUCT_GITHUB_OAUTH_CLIENT_ID` / `_SECRET` / `_OAUTH_REDIRECT_BASE`); `build_authorize_url`, `exchange_code_for_token`, `fetch_github_user` (with `/user/emails` fallback when the user's email is private). Injectable `http_client` so tests don't hit GitHub
+  - `routers/oauth.py`: `GET /v1/auth/github/login` (CSRF state cookie + redirect), `GET /v1/auth/github/callback` (state verify, token exchange, user fetch, session mint, HTTPOnly+Lax+Secure cookie); `GET /v1/auth/me` (cookie-driven principal); `POST /v1/auth/logout` (revoke + clear). 503 when env vars unset; 403 (not auto-provision) on unknown email — admin must `cs serve add-user` first to avoid the "any GitHub account in the world creates a tenant" footgun
+  - `auth.py:current_principal` chain: bearer wins, then session-cookie fallback. New `authenticate_session_cookie(session, cookie)` mirrors `authenticate(session, key)`
+  - 14 new tests: login redirect + 503 unconfigured, callback state-mismatch / unregistered-email-403 / token-exchange-failure / happy-path / `/user/emails` fallback, session cookie authenticates downstream `/v1/dashboard`, `/v1/auth/me` shape + 401 path, logout revokes + idempotent without cookie, bearer-wins ordering, revoked cookie falls through to 401
+  - Pending: Google OAuth (structurally identical, separate provider config). Tracked under W8.7 (self-serve signup) so it lands alongside the domain-allowlist feature it depends on
 - [~] **W6.5 — Shared dashboard** (multi-user view shipped; alerts deferred)
   - `GET /v1/dashboard/team` endpoint reads the `runs` table for the caller's org (filtered to terminal states `done`/`failed` so queued/running rows don't skew rollups). Returns `total_runs` + `total_cost_usd` headline numbers, `by_author` leaderboard sorted by spend desc with email + run-count + tokens, `by_task` task-type breakdown, plus `recent` (default 50, max 500) for the activity feed
   - New schemas in `src/claudestruct/server/schema.py`: `AuthorRollup`, `TaskRollup`, `TeamDashboardResponse`. Tenant-scoped via `Run.org_id == principal.org_id` so an org can never see another org's spend
   - Pending: regression alerts ("run cost > 2σ over team baseline" → Slack/email) and budget-cap rollups per team — both depend on a notification surface that doesn't exist yet
-- [ ] **W6.6 — GitHub App**
-  - Replaces personal-token usage; per-org installation; opens PRs as `claudeStruct[bot]`
-  - Webhook-triggered runs (`pull_request`, `issue_comment` with `/cs review`)
+- [~] **W6.6 — GitHub App** (webhook receiver shipped; outbound bot-as-actor + Checks API deferred)
+  - `GitHubInstallation` SQLAlchemy model maps `installation_id` ↔ `org_id` with per-install `webhook_secret` + optional `repo_filter` substring + `bot_user_id` sentinel for attribution
+  - `POST /v1/github/webhook` — auth-bypassing endpoint (signature is the only gate); reads raw body for HMAC stability before JSON-parsing; verifies `X-Hub-Signature-256` via `hmac.compare_digest`; same 401 status on unknown installation AND bad signature so attackers can't enumerate IDs
+  - Trigger detection in `routers/github.py:detect_trigger()` matches `pull_request.opened|synchronize|reopened` and `issue_comment.created` whose body contains `/cs review` (case-insensitive); ignores plain (non-PR) issues; runs are attributed to the install's bot user so the team-dashboard leaderboard shows them as `github-bot@<slug>` rather than mis-crediting a human
+  - `cs serve add-github-install <installation_id> <org_slug> [--secret SECRET] [--repo-filter SUB]` CLI subcommand auto-generates the webhook secret if omitted, prints it once, creates the sentinel bot user + membership idempotently
+  - Tests: 14 cases — unknown install / bad sig / missing-sig 401, PR open/synchronize enqueue + closed ignore, comment with/without `/cs review`, plain-issue rejection, repo filter, ping event short-circuit, revoked install, signature unit, cross-org isolation through the runs table
+  - Pending: outbound API calls (posting the verdict back as a PR review comment, opening PRs as `claudeStruct[bot]`, GitHub Checks API integration) — depends on storing the GitHub App private key + `installation_token` minting, separate PR
 - [x] **W6.7 — GitLab + Bitbucket integrations**
   - `src/claudestruct/integrations/gitlab-ci-cs-review.yml` — MR-triggered job, posts verdict via GitLab Notes API using `CI_JOB_TOKEN`. Honors `ANTHROPIC_API_KEY` + optional `CLAUDESTRUCT_MONTHLY_CAP_USD`.
   - `src/claudestruct/integrations/bitbucket-pipelines-cs-review.yml` — `pull-requests."**"` step, posts via Bitbucket 2.0 Comments API using `BITBUCKET_USER` + `BITBUCKET_APP_PASSWORD`.
@@ -306,10 +314,13 @@ Goal: a managed service teams pay for. Open-core split: Waves 4-7 OSS, Wave 8 ho
   - Stripe SDK lazy-imported via `stripe_sdk_available()`; checkout returns a deterministic stub URL on the OSS path; webhook returns 503 with a clear "install stripe" message. `billing.checkout.create` writes an audit row under the caller's org chain (W8.4 integration).
   - Tests: `tests/test_billing.py` (17 cases) — model lifecycle, tier retention map, period bounds (incl. December roll-over), stub URL determinism, all four routes including auth gates and audit linkage.
   - Pending: live Checkout integration, canonical Stripe webhook handlers, per-tier token-cap enforcement at run-submit time, invoice PDF passthrough.
-- [ ] **W8.3 — Tenant-scoped sandbox**
-  - One Docker container per orchestrator-run; image is the published `ghcr.io/tonyandclaw/claudestruct` from W4.4
-  - Resource quotas (CPU, memory) enforced per-tier
-  - Depends on W6.1 daemon worker model
+- [~] **W8.3 — Tenant-scoped sandbox** (per-tier soft limits shipped; per-run Docker container deferred)
+  - `SandboxLimits` + `SANDBOX_LIMITS` table in `src/claudestruct/server/billing.py`: free=(1 concurrent, 5min, $0.50), team=(4 concurrent, 15min, $5), business=(16 concurrent, 60min, $50). `sandbox_limits_for_tier(tier_str)` falls back to free on unknown tiers (defense-in-depth so a future tier name can't accidentally grant business ceilings)
+  - `TIER_PRIORITY` (business=30 > team=20 > free=10) prevents free-tier bursts from starving paying customers
+  - Worker `_claim_one()` in `src/claudestruct/server/worker.py` rewritten: fetches all queued rows, joins per-org subscription, skips rows whose org is at concurrency cap, picks highest-tier row first (FIFO within tier). Eligible-set materialised in Python — fine for SQLite + thousands of queued rows; Postgres path via SELECT-FOR-UPDATE-SKIP-LOCKED tracked for the W8.3 follow-up
+  - `GET /v1/billing/subscription` now returns `sandbox_limits: { max_concurrent_runs, max_runtime_seconds, max_cost_usd }` so the SPA / CLI can render quota state without re-implementing the lookup table
+  - 6 new tests: free-tier concurrent cap blocks second claim, team-tier 4-of-5 cap, business priority jumps queue past older free run, limits surface in subscription response, unknown-tier falls back to free, per-org concurrency (org-A in flight ≠ org-B in flight)
+  - Pending: per-run Docker container (one container per orchestrator-run with CPU/memory quotas via `--cpus`/`--memory`) — needs the W4.4 GHCR image as the runtime base + a Docker socket policy on the daemon host. Tracked separately because the orchestration layer is sizable
 - [x] **W8.4 — Append-only hash-chained audit log**
   - `src/claudestruct/server/audit.py` — `AuditEntry` model with per-org `seq` + `prev_hash` + `entry_hash` columns, `compute_entry_hash()` over canonical-JSON payload + identity fields + ISO-8601 created_at, `record()` appends with the chain link computed, `verify_chain()` walks forward and reports the first divergence (`broken_at_seq`, `broken_reason`).
   - `src/claudestruct/server/routers/audit.py` — `GET /v1/audit/head` (viewer+; returns the all-zero genesis sentinel for empty chains), `GET /v1/audit` (admin; paginated, cursor-based), `GET /v1/audit/verify` (admin).
@@ -360,6 +371,20 @@ Reopen criterion: a signed enterprise contract or three serious leads asking for
 
 ## Last Update
 
+- 2026-04-27 — W8.3 tenant-scoped sandbox (limits + priority) ready for PR push:
+  - `SANDBOX_LIMITS` + `TIER_PRIORITY` per-tier tables in billing module; worker `_claim_one()` skips orgs at their concurrency cap and picks highest tier first; `/v1/billing/subscription` surfaces the active limits
+  - 6 new tests + 1 augment to existing billing test. Total Python: 234 passed (audit pre-existing failures unchanged); ruff clean
+  - Per-run Docker container with CPU/memory quotas deferred — separate orchestration-layer PR
+- 2026-04-27 — W6.4 GitHub OAuth login ready for PR push:
+  - `UserSession` model + `oauth.py` provider helpers + `routers/oauth.py` with login / callback / me / logout
+  - `auth.current_principal` now accepts a session cookie as fallback when no bearer is present (bearer still wins on conflict)
+  - 14 new tests: redirect / 503 / state mismatch / unregistered-email-403 / token-exchange-failure / happy-path / `/user/emails` fallback / cookie auth on dashboard / `/me` / logout idempotent / bearer-precedence / revoked-cookie. Total Python: 228 passed (2 pre-existing audit failures untouched)
+  - Google OAuth deferred — structurally identical, lands with self-serve signup work
+- 2026-04-27 — W6.6 GitHub webhook receiver ready for PR push:
+  - `POST /v1/github/webhook` with HMAC SHA-256 signature verification, installation→org mapping, trigger detection for PR open/sync/reopen + `/cs review` comments, repo substring filter, sentinel bot user attribution
+  - `cs serve add-github-install` CLI for registration
+  - 14 new tests (signature/install gate, every trigger surface, cross-org isolation). Total Python: 182 passed; ruff clean
+  - Outbound API (PR comments, Checks API, bot-as-actor) deferred — needs GitHub App private key + token minting, separate PR
 - 2026-04-26 — W5.3 close-out: `claw-squad runs purge` shipped. New `src/runs/purge.ts` mirrors `claudestruct.redact.purge_runs` (mtime-based, `dryRun`, injectable `now`); `claw-squad runs list` lists run logs with age/size; `claw-squad runs purge --older-than-days N [--dry-run]` prunes them. 7 new vitest cases in `tests/runs-purge.test.ts`. Total TS: 309 tests passing; tsc clean. Removes the only "Pending" tail on W5.3.
 - 2026-04-26 — Wave 6 mid-roll ready for PR push:
   - W6.1 ✅ daemon-mode background runner: `Run` model, `process_pending_run` + `WorkerThread`, `drain_queue`, `cs serve worker` subcommand, real DB-backed POST/GET runs with tenant isolation (cross-org → 404)

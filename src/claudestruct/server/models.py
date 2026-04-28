@@ -156,3 +156,75 @@ class Run(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now_utc)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class UserSession(Base):
+    """OAuth-derived browser session (W6.4).
+
+    Issued by the OAuth callback after a successful provider exchange;
+    surfaced to the browser as a `claudestruct_session` HTTPOnly cookie.
+    The cookie value is the random `session_token` (NOT the row id), so
+    even DB read access doesn't directly leak active sessions through
+    side-channels like log lines that mention `id=42`.
+
+    `expires_at` is a hard cap independent of the cookie's `Max-Age`
+    so a stolen cookie still rolls over within a bounded window.
+    """
+
+    __tablename__ = "user_sessions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    org_id: Mapped[int] = mapped_column(ForeignKey("orgs.id", ondelete="CASCADE"), index=True)
+    session_token: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    provider: Mapped[str] = mapped_column(String(32))  # "github", "google", ...
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now_utc)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    def is_active(self, *, now: datetime | None = None) -> bool:
+        # SQLite strips tzinfo on round-trip, so we may get a naive
+        # datetime back from the DB even though we wrote a tz-aware
+        # one. Force-attach UTC to make the comparison total-orderable
+        # against `now`, which we always produce as tz-aware.
+        ts = now or _now_utc()
+        exp = self.expires_at
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        return self.revoked_at is None and ts < exp
+
+
+class GitHubInstallation(Base):
+    """GitHub App install ↔ org mapping (W6.6).
+
+    A GitHub App is installed per-org / per-repo on GitHub's side; we
+    receive webhooks tagged with an `installation.id` integer. To
+    enqueue runs against the right tenant we need a row pinning that
+    integer to one of *our* orgs plus the secret we'll use to verify
+    incoming HMACs.
+
+    The `webhook_secret` is what the user types into the GitHub App
+    settings page; we compare against it on every request via
+    constant-time `hmac.compare_digest`. Stored plaintext (not
+    hashed) because verification needs the original bytes — protect
+    via the usual at-rest controls (DB encryption, role separation
+    on the host).
+
+    `repo_filter` (optional) limits which repos in the install can
+    trigger runs. Empty = all repos in the installation. Matched as
+    case-insensitive substring against `<owner>/<name>`.
+    """
+
+    __tablename__ = "github_installations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    installation_id: Mapped[int] = mapped_column(unique=True, index=True)
+    org_id: Mapped[int] = mapped_column(ForeignKey("orgs.id", ondelete="CASCADE"), index=True)
+    webhook_secret: Mapped[str] = mapped_column(String(128))
+    repo_filter: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    bot_user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now_utc)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    def is_active(self) -> bool:
+        return self.revoked_at is None

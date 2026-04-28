@@ -48,12 +48,15 @@ def get_subscription(
 ) -> SubscriptionResponse:
     sub = billing_mod.get_or_default(session, principal.org_id)
     session.commit()
+    limits = billing_mod.sandbox_limits_for_tier(sub.tier)
+    from claudestruct.server.schema import SandboxLimitsResponse
     return SubscriptionResponse(
         org_slug=principal.org_slug,
         tier=billing_mod.Tier(sub.tier).value,  # type: ignore[arg-type]
         status=sub.status,
         stripe_customer_id=sub.stripe_customer_id,
         current_period_end=sub.current_period_end,
+        sandbox_limits=SandboxLimitsResponse(**limits.as_dict()),
     )
 
 

@@ -15,6 +15,9 @@ from pydantic import BaseModel, Field
 class HealthResponse(BaseModel):
     status: Literal["ok"] = "ok"
     version: str
+    # W8.5: data-residency tag. Mirrors the X-CS-Region response
+    # header so a healthz probe doubles as a residency check.
+    region: Optional[str] = None
 
 
 # --- Auth / keys ----------------------------------------------------
@@ -175,6 +178,15 @@ class AuditVerifyResponse(BaseModel):
 
 # --- Billing (W8.2) ------------------------------------------------
 
+class SandboxLimitsResponse(BaseModel):
+    """Per-tier worker quotas surfaced via the subscription endpoint
+    (W8.3). Lets the SPA / CLI render "you're 3/4 of your concurrent
+    runs cap" without re-implementing the lookup table."""
+    max_concurrent_runs: int
+    max_runtime_seconds: int
+    max_cost_usd: float
+
+
 class SubscriptionResponse(BaseModel):
     """Org's current subscription state. ``tier`` defaults to "free"
     when no Subscription row exists yet."""
@@ -183,6 +195,9 @@ class SubscriptionResponse(BaseModel):
     status: Optional[str]  # mirrors Stripe: "active" / "past_due" / "canceled" / null
     stripe_customer_id: Optional[str]
     current_period_end: Optional[datetime]
+    # W8.3: surface the active sandbox caps so callers don't have to
+    # re-derive them from the tier name.
+    sandbox_limits: SandboxLimitsResponse
 
 
 class CheckoutRequest(BaseModel):
