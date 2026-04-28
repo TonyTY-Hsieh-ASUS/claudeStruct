@@ -38,6 +38,96 @@ router = APIRouter(prefix="/v1/github", tags=["github"])
 log = logging.getLogger("claudestruct.server.github")
 
 
+# Process-wide cache so a webhook flood doesn't mint a token per event.
+# Lazy-imported below to keep this module loadable when the [server]
+# extras are missing (cryptography is optional via the server extra).
+_token_cache = None
+
+
+def _get_token_cache():
+    """Lazy singleton accessor for the install-token cache."""
+    global _token_cache
+    if _token_cache is None:
+        from claudestruct.server.github_app import InstallationTokenCache
+        _token_cache = InstallationTokenCache()
+    return _token_cache
+
+
+def _http_client_factory_default():
+    """Lazy-import httpx so the lean install doesn't pay for it."""
+    import httpx
+    return httpx.Client()
+
+
+def _http_client(request: Request):
+    """Override hook: tests inject a fake client via
+    ``app.state.github_app_http_client``. Mirrors the OAuth router's
+    pattern so the test seam is consistent across modules."""
+    factory = getattr(request.app.state, "github_app_http_client", None)
+    if factory is None:
+        return _http_client_factory_default()
+    return factory()
+
+
+def _ack_comment_body(*, run_id: str, trigger: str) -> str:
+    """One-line acknowledgement so a reviewer can confirm the daemon
+    saw the PR. The verdict comment lands in a follow-up PR; this is
+    the "we're on it" receipt."""
+    return (
+        f":robot_face: claudeStruct queued review run `{run_id}` "
+        f"(trigger: `{trigger}`). Verdict will be posted when the run completes."
+    )
+
+
+def _post_ack_comment_safe(
+    *,
+    request: Request,
+    installation_id: int,
+    repo_full_name: str,
+    pr_number: int,
+    run_id: str,
+    trigger: str,
+) -> None:
+    """Try to post an acknowledgement comment back to the PR.
+
+    The whole thing is best-effort: if the App isn't configured, or
+    the network call fails, we log and move on — a missed comment
+    must never break the webhook path that already enqueued the run.
+    """
+    from claudestruct.server.github_app import (
+        GitHubAppError,
+        load_app_config,
+        post_ack_comment,
+    )
+
+    cfg = load_app_config()
+    if cfg is None:
+        # Pure-OSS / test deployments without App credentials skip
+        # silently. The webhook still returned 202 with the run id.
+        return
+    client = _http_client(request)
+    try:
+        url = post_ack_comment(
+            cfg=cfg,
+            installation_id=installation_id,
+            repo_full_name=repo_full_name,
+            pr_number=pr_number,
+            body=_ack_comment_body(run_id=run_id, trigger=trigger),
+            cache=_get_token_cache(),
+            http_client=client,
+        )
+        log.info("github ack comment posted: %s", url)
+    except GitHubAppError as exc:
+        log.warning("github ack comment failed: %s", exc)
+    except Exception:  # noqa: BLE001
+        # Network / unexpected errors — log loudly but do not raise.
+        log.exception("github ack comment unexpected failure")
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+
+
 # ---------------------------------------------------------------------
 # Trigger detection
 # ---------------------------------------------------------------------
@@ -223,6 +313,21 @@ async def receive_webhook(
         log.info(
             "github webhook enqueued run %s for org=%s repo=%s trigger=%s",
             run_id, install.org_id, repo, decision["trigger"],
+        )
+
+    # Post an "ack" comment back to the PR if the GitHub App is
+    # configured. Best-effort — never block the webhook response on
+    # an outbound API call (GitHub will retry if we 5xx, and a slow
+    # POST here would re-trigger the whole flow).
+    pr_number = decision.get("pr_number")
+    if isinstance(pr_number, int):
+        _post_ack_comment_safe(
+            request=request,
+            installation_id=install_id,
+            repo_full_name=repo,
+            pr_number=pr_number,
+            run_id=run_id,
+            trigger=decision["trigger"],
         )
 
     return {
