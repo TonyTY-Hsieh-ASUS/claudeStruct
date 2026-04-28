@@ -44,6 +44,9 @@ from claudestruct.server.routers import (
 from claudestruct.server.routers import (
     runs as runs_router,
 )
+from claudestruct.server.routers import (
+    slo as slo_router,
+)
 
 # --- W8.5 -----------------------------------------------------------
 
@@ -132,5 +135,6 @@ def create_app(
     app.include_router(billing_router.router)
     app.include_router(github_router.router)
     app.include_router(oauth_router.router)
+    app.include_router(slo_router.router)
 
     return app
