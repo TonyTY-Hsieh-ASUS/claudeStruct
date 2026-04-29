@@ -313,6 +313,54 @@ def serve_worker(db_url: str | None, run_root: str, once: bool,
         click.echo("worker stopped")
 
 
+@serve_group.command("alerts")
+@click.option("--db-url", default=None, envvar="CLAUDESTRUCT_DATABASE_URL")
+@click.option("--sigma", type=float, default=2.0, show_default=True,
+              help="Trigger threshold: cost > N standard deviations above org mean.")
+@click.option("--lookback-days", type=int, default=30, show_default=True,
+              help="Baseline window for the mean+stddev calculation.")
+@click.option("--check-recent-hours", type=int, default=24, show_default=True,
+              help="Window of recent runs to evaluate against the baseline.")
+def serve_alerts(db_url: str | None, sigma: float, lookback_days: int,
+                 check_recent_hours: int) -> None:
+    """Compute cost-regression alerts and dispatch via the notifier (W6.5).
+
+    Provider is picked via ``CLAUDESTRUCT_NOTIFY_PROVIDER`` (``log`` by
+    default; set to ``slack`` + ``CLAUDESTRUCT_SLACK_WEBHOOK_URL`` for
+    Slack delivery). Findings flag runs whose cost is more than
+    ``--sigma`` standard deviations above their org's 30-day mean
+    successful-run cost. Run from cron / a Kubernetes CronJob.
+    """
+    _ensure_server_deps()
+    from claudestruct.server.alerts import (
+        compute_cost_regression_alerts,
+        dispatch_findings,
+    )
+    from claudestruct.server.db import init_db, make_engine, make_session_factory
+    from claudestruct.server.notify import default_notifier
+
+    engine = make_engine(db_url)
+    init_db(engine)
+    factory = make_session_factory(engine)
+
+    try:
+        notifier = default_notifier()
+    except RuntimeError as exc:
+        # Misconfigured provider should be a loud, actionable failure
+        # (cron job alerting on its own setup), not a silent skip.
+        raise click.ClickException(str(exc)) from exc
+
+    with factory() as session:
+        findings = compute_cost_regression_alerts(
+            session,
+            sigma=sigma,
+            lookback_days=lookback_days,
+            check_recent_hours=check_recent_hours,
+        )
+        n = dispatch_findings(findings, notifier)
+    click.echo(f"alerts: {n} dispatched via {notifier.name}")
+
+
 def attach_to(main: Any) -> None:
     """Mount the serve subcommand group on the top-level CLI. Called
     from ``claudestruct.cli`` so the import stays optional."""
