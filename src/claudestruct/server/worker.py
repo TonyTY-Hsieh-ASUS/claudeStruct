@@ -137,6 +137,143 @@ def _post_verdict_comment_safe(run: Run) -> None:
         if callable(close):
             close()
 
+
+def _post_in_progress_check_run_safe(session: Session, run: Run) -> None:
+    """Open an `in_progress` check-run on the PR's head SHA so reviewers
+    see "claudeStruct: in progress" in the Checks tab while the worker
+    runs. Best-effort — a failure to open must not abort the run.
+
+    On success persists the returned ``id`` onto ``Run.github_check_run_id``
+    so the terminal-state hook can PATCH the same row instead of
+    leaking duplicates.
+    """
+    if not (
+        run.github_installation_id is not None
+        and run.github_repo_full_name is not None
+        and run.github_head_sha is not None
+    ):
+        # Either not webhook-triggered, or an issue_comment trigger
+        # without a SHA. Nothing to do.
+        return
+
+    from claudestruct.server.github_app import (
+        GitHubAppError,
+        format_check_run_payload,
+        load_app_config,
+        post_check_run_with_token,
+    )
+
+    cfg = load_app_config()
+    if cfg is None:
+        return
+
+    payload = format_check_run_payload(
+        name="claudeStruct",
+        head_sha=run.github_head_sha,
+        status="in_progress",
+        title="claudeStruct review in progress",
+        summary=f"Run `{run.run_id}` started.",
+        external_id=run.run_id,
+    )
+
+    factory = http_client_factory or _http_client_default
+    client = factory()
+    try:
+        body = post_check_run_with_token(
+            cfg=cfg,
+            installation_id=run.github_installation_id,
+            repo_full_name=run.github_repo_full_name,
+            payload=payload,
+            cache=_get_verdict_token_cache(),
+            http_client=client,
+        )
+        run.github_check_run_id = body.get("id")
+        session.commit()
+        log.info(
+            "github check_run opened for run %s: id=%s",
+            run.run_id, run.github_check_run_id,
+        )
+    except GitHubAppError as exc:
+        log.warning("github check_run open failed for run %s: %s", run.run_id, exc)
+    except Exception:  # noqa: BLE001
+        log.exception("github check_run open unexpected failure for run %s", run.run_id)
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+
+
+def _post_completed_check_run_safe(run: Run) -> None:
+    """PATCH the open check-run to ``completed`` (or POST a fresh one
+    if the in_progress open failed earlier). Best-effort.
+    """
+    if not (
+        run.github_installation_id is not None
+        and run.github_repo_full_name is not None
+        and run.github_head_sha is not None
+    ):
+        return
+
+    from claudestruct.server.github_app import (
+        GitHubAppError,
+        format_completed_check_payload,
+        load_app_config,
+        patch_check_run_with_token,
+        post_check_run_with_token,
+    )
+
+    cfg = load_app_config()
+    if cfg is None:
+        return
+
+    payload = format_completed_check_payload(
+        head_sha=run.github_head_sha,
+        run_id=run.run_id,
+        status=run.status,
+        cost_usd=run.cost_usd or 0.0,
+        duration_ms=run.duration_ms,
+        error=run.error,
+    )
+
+    factory = http_client_factory or _http_client_default
+    client = factory()
+    try:
+        if run.github_check_run_id is not None:
+            patch_check_run_with_token(
+                cfg=cfg,
+                installation_id=run.github_installation_id,
+                repo_full_name=run.github_repo_full_name,
+                check_run_id=run.github_check_run_id,
+                payload=payload,
+                cache=_get_verdict_token_cache(),
+                http_client=client,
+            )
+            log.info(
+                "github check_run patched for run %s: id=%s",
+                run.run_id, run.github_check_run_id,
+            )
+        else:
+            # The in-progress open failed earlier; create a fresh
+            # completed check-run so the PR still shows the verdict.
+            post_check_run_with_token(
+                cfg=cfg,
+                installation_id=run.github_installation_id,
+                repo_full_name=run.github_repo_full_name,
+                payload=payload,
+                cache=_get_verdict_token_cache(),
+                http_client=client,
+            )
+            log.info("github check_run created (no open) for run %s", run.run_id)
+    except GitHubAppError as exc:
+        log.warning("github check_run completion failed for run %s: %s", run.run_id, exc)
+    except Exception:  # noqa: BLE001
+        log.exception("github check_run completion unexpected failure for run %s", run.run_id)
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+
+
 _GATHERERS: dict[str, Callable[..., Any]] = {
     "dev": gather_dev_context,
     "review": gather_review_context,
@@ -232,6 +369,11 @@ def process_pending_run(
     if run is None:
         return None
 
+    # Now that the run is `running`, open an in-progress check-run on
+    # the PR so reviewers see "claudeStruct: in progress" while we
+    # work. Best-effort; persists the returned id onto the row.
+    _post_in_progress_check_run_safe(session, run)
+
     paths: list[Path] | None = None
     if run.paths_json:
         try:
@@ -249,6 +391,7 @@ def process_pending_run(
         session.commit()
         log.warning("worker rejected run %s: %s", run.run_id, run.error)
         _post_verdict_comment_safe(run)
+        _post_completed_check_run_safe(run)
         return run
 
     try:
@@ -268,6 +411,7 @@ def process_pending_run(
         session.commit()
         log.warning("worker run %s failed: %s", run.run_id, run.error)
         _post_verdict_comment_safe(run)
+        _post_completed_check_run_safe(run)
         return run
     except Exception as exc:  # pragma: no cover — last-ditch safety net
         run.status = RunStatus.failed.value
@@ -276,6 +420,7 @@ def process_pending_run(
         session.commit()
         log.exception("worker run %s crashed", run.run_id)
         _post_verdict_comment_safe(run)
+        _post_completed_check_run_safe(run)
         return run
 
     run.status = RunStatus.done.value
@@ -289,6 +434,7 @@ def process_pending_run(
     session.commit()
     log.info("worker run %s done: cost=$%.4f", run.run_id, run.cost_usd)
     _post_verdict_comment_safe(run)
+    _post_completed_check_run_safe(run)
     return run
 
 

@@ -154,6 +154,10 @@ def detect_trigger(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
             return None
         title = pr.get("title") or "(no title)"
         body = pr.get("body") or ""
+        # head_sha is required for the Checks API (W6.6 follow-up).
+        # GitHub always populates `pull_request.head.sha` on PR events;
+        # absence here would imply a malformed payload.
+        head_sha = ((pr.get("head") or {}).get("sha")) or None
         return {
             "task": "review",
             "description": (
@@ -162,6 +166,7 @@ def detect_trigger(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
             ).strip(),
             "repo_full_name": repo,
             "pr_number": pr.get("number"),
+            "head_sha": head_sha,
             "trigger": f"pull_request.{action}",
         }
 
@@ -179,6 +184,10 @@ def detect_trigger(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
         repo = (payload.get("repository") or {}).get("full_name")
         if not repo:
             return None
+        # The issue_comment payload doesn't carry the PR head SHA;
+        # fetching it would need a separate API call. The verdict
+        # comment path covers this trigger; Check runs are PR-only
+        # (head_sha=None below skips the Checks-API path in the worker).
         return {
             "task": "review",
             "description": (
@@ -188,6 +197,7 @@ def detect_trigger(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
             ).strip(),
             "repo_full_name": repo,
             "pr_number": issue.get("number"),
+            "head_sha": None,
             "trigger": "issue_comment.cs-review",
         }
 
@@ -300,6 +310,7 @@ async def receive_webhook(
 
         run_id = f"run-{secrets.token_hex(8)}"
         pr_number_val = decision.get("pr_number")
+        head_sha_val = decision.get("head_sha")
         row = Run(
             run_id=run_id,
             org_id=install.org_id,
@@ -313,6 +324,10 @@ async def receive_webhook(
             github_installation_id=install_id,
             github_repo_full_name=repo,
             github_pr_number=pr_number_val if isinstance(pr_number_val, int) else None,
+            # Checks API (W6.6 follow-up): only populated for PR events.
+            # NULL skips the Checks-API path in the worker without
+            # breaking the comment-based verdict path.
+            github_head_sha=head_sha_val if isinstance(head_sha_val, str) else None,
         )
         session.add(row)
         session.commit()

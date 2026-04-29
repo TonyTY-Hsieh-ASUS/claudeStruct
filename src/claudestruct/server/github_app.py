@@ -286,6 +286,290 @@ def post_pr_comment(
     return html_url
 
 
+# --- Checks API ----------------------------------------------------
+
+
+# Conclusion strings GitHub accepts. We use a small whitelist so a
+# typo in the worker can't reach the network and 422 there.
+_VALID_CHECK_CONCLUSIONS = {
+    "success", "failure", "neutral", "cancelled", "skipped",
+    "timed_out", "action_required", "stale",
+}
+
+
+def format_check_run_payload(
+    *,
+    name: str,
+    head_sha: str,
+    status: str,
+    conclusion: str | None = None,
+    title: str | None = None,
+    summary: str | None = None,
+    details_url: str | None = None,
+    external_id: str | None = None,
+) -> dict[str, Any]:
+    """Build the JSON body for ``POST/PATCH /repos/.../check-runs``.
+
+    GitHub's Checks API accepts:
+      - ``status``: ``queued`` / ``in_progress`` / ``completed``.
+      - ``conclusion`` (required iff ``status="completed"``): see the
+        ``_VALID_CHECK_CONCLUSIONS`` set above.
+      - ``output``: optional ``{title, summary, text}`` block rendered
+        in the PR's checks tab.
+
+    Validation here is conservative: an unknown ``status`` or
+    ``conclusion`` raises ``GitHubAppError`` immediately rather than
+    letting GitHub reject with 422 mid-request, which would force the
+    operator to read CloudWatch / journald to debug.
+    """
+    if status not in {"queued", "in_progress", "completed"}:
+        raise GitHubAppError(
+            f"check_run status must be queued|in_progress|completed, got {status!r}"
+        )
+    if status == "completed":
+        if conclusion is None:
+            raise GitHubAppError("completed check_run requires a conclusion")
+        if conclusion not in _VALID_CHECK_CONCLUSIONS:
+            raise GitHubAppError(
+                f"unknown check_run conclusion {conclusion!r}; "
+                f"expected one of {sorted(_VALID_CHECK_CONCLUSIONS)}"
+            )
+    elif conclusion is not None:
+        # Non-completed runs must NOT carry a conclusion — GitHub 422s.
+        raise GitHubAppError(
+            "conclusion is only valid when status='completed'"
+        )
+
+    body: dict[str, Any] = {
+        "name": name,
+        "head_sha": head_sha,
+        "status": status,
+    }
+    if conclusion is not None:
+        body["conclusion"] = conclusion
+    if details_url is not None:
+        body["details_url"] = details_url
+    if external_id is not None:
+        body["external_id"] = external_id
+    if title or summary:
+        # Title is required by GitHub when output is present; default
+        # to the run's name so the operator never has to think about it.
+        body["output"] = {
+            "title": title or name,
+            "summary": summary or "",
+        }
+    return body
+
+
+def post_check_run(
+    *,
+    repo_full_name: str,
+    payload: dict[str, Any],
+    install_token: str,
+    http_client: Any,
+) -> dict[str, Any]:
+    """Create a check-run via the GitHub Checks API.
+
+    Returns the parsed JSON response (the operator wants both ``id``
+    for later updates and ``html_url`` for cross-linking). Raises on
+    non-201 — caller decides whether to log + skip or re-raise.
+    """
+    if "/" not in repo_full_name:
+        raise GitHubAppError(
+            f"repo_full_name must be 'owner/name', got {repo_full_name!r}"
+        )
+    url = f"https://api.github.com/repos/{repo_full_name}/check-runs"
+    resp = http_client.post(
+        url,
+        headers={
+            "Authorization": f"Bearer {install_token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        json=payload,
+        timeout=15.0,
+    )
+    if resp.status_code != 201:
+        raise GitHubAppError(
+            f"post_check_run failed: status={resp.status_code}"
+        )
+    body = resp.json()
+    if not isinstance(body.get("id"), int):
+        raise GitHubAppError("check_run response missing numeric id")
+    return body
+
+
+def patch_check_run(
+    *,
+    repo_full_name: str,
+    check_run_id: int,
+    payload: dict[str, Any],
+    install_token: str,
+    http_client: Any,
+) -> dict[str, Any]:
+    """Update an existing check-run (e.g. ``in_progress`` → ``completed``).
+
+    Used so a single check-run shows progress instead of leaving a
+    stale "in progress" forever. Mirrors ``post_check_run`` but uses
+    PATCH and accepts a 200 (not 201) response.
+    """
+    if "/" not in repo_full_name:
+        raise GitHubAppError(
+            f"repo_full_name must be 'owner/name', got {repo_full_name!r}"
+        )
+    url = (
+        f"https://api.github.com/repos/{repo_full_name}/"
+        f"check-runs/{check_run_id}"
+    )
+    # ``http_client`` matches the `httpx.Client` interface (.post, .get);
+    # for PATCH we either rely on .patch or fall back to .request("PATCH").
+    if hasattr(http_client, "patch"):
+        resp = http_client.patch(
+            url,
+            headers={
+                "Authorization": f"Bearer {install_token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            json=payload,
+            timeout=15.0,
+        )
+    else:
+        # Tests may stub only ``post`` — provide a deterministic
+        # fallback so we don't AttributeError mid-flight.
+        resp = http_client.request(  # type: ignore[attr-defined]
+            "PATCH",
+            url,
+            headers={
+                "Authorization": f"Bearer {install_token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            json=payload,
+            timeout=15.0,
+        )
+    if resp.status_code != 200:
+        raise GitHubAppError(
+            f"patch_check_run failed: status={resp.status_code}"
+        )
+    return resp.json()
+
+
+def post_check_run_with_token(
+    *,
+    cfg: GitHubAppConfig,
+    installation_id: int,
+    repo_full_name: str,
+    payload: dict[str, Any],
+    cache: InstallationTokenCache,
+    http_client: Any,
+) -> dict[str, Any]:
+    """Mint or reuse an install token, then create the check-run.
+
+    Mirrors ``post_ack_comment``'s glue shape so the worker can call a
+    single symbol per outbound action.
+    """
+    def _provider() -> str:
+        return mint_app_jwt(
+            app_id=cfg.app_id, private_key_pem=cfg.private_key_pem,
+        )
+
+    tok = cache.get(
+        installation_id=installation_id,
+        app_jwt_provider=_provider,
+        http_client=http_client,
+    )
+    return post_check_run(
+        repo_full_name=repo_full_name,
+        payload=payload,
+        install_token=tok.token,
+        http_client=http_client,
+    )
+
+
+def patch_check_run_with_token(
+    *,
+    cfg: GitHubAppConfig,
+    installation_id: int,
+    repo_full_name: str,
+    check_run_id: int,
+    payload: dict[str, Any],
+    cache: InstallationTokenCache,
+    http_client: Any,
+) -> dict[str, Any]:
+    """Mint or reuse an install token, then PATCH the check-run."""
+    def _provider() -> str:
+        return mint_app_jwt(
+            app_id=cfg.app_id, private_key_pem=cfg.private_key_pem,
+        )
+
+    tok = cache.get(
+        installation_id=installation_id,
+        app_jwt_provider=_provider,
+        http_client=http_client,
+    )
+    return patch_check_run(
+        repo_full_name=repo_full_name,
+        check_run_id=check_run_id,
+        payload=payload,
+        install_token=tok.token,
+        http_client=http_client,
+    )
+
+
+def format_completed_check_payload(
+    *,
+    head_sha: str,
+    run_id: str,
+    status: str,
+    cost_usd: float = 0.0,
+    duration_ms: int | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    """Translate a terminal ``Run`` row into a check-run completion
+    payload.
+
+    `done` runs map to `conclusion=success`; `failed` to
+    `conclusion=failure`. Anything else maps to `neutral` so an
+    unexpected enum value still produces a valid Checks API call.
+    """
+    if status == "done":
+        conclusion = "success"
+        title = "claudeStruct review passed"
+        duration_str = (
+            f"{duration_ms / 1000:.1f}s" if isinstance(duration_ms, int) else "unknown"
+        )
+        summary = (
+            f"Run `{run_id}` completed successfully.\n\n"
+            f"- Cost: ${cost_usd:.4f}\n"
+            f"- Duration: {duration_str}"
+        )
+    elif status == "failed":
+        conclusion = "failure"
+        title = "claudeStruct review failed"
+        err_preview = (error or "(no error message)").strip()
+        if len(err_preview) > 1500:
+            err_preview = err_preview[:1500] + "\n…(truncated)"
+        summary = (
+            f"Run `{run_id}` failed.\n\n"
+            f"```\n{err_preview}\n```"
+        )
+    else:
+        conclusion = "neutral"
+        title = f"claudeStruct run reached status {status!r}"
+        summary = f"Run `{run_id}` ended in unexpected status `{status}`."
+
+    return format_check_run_payload(
+        name="claudeStruct",
+        head_sha=head_sha,
+        status="completed",
+        conclusion=conclusion,
+        title=title,
+        summary=summary,
+        external_id=run_id,
+    )
+
+
 # --- Convenience: end-to-end ack ------------------------------------
 
 
