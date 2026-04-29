@@ -895,6 +895,19 @@ runsCmd
   );
 
 
+program
+  .command("mcp")
+  .description(
+    "Run claw-squad as an MCP server over stdio. Lets Claude Code (or any MCP client) call claw-squad's read-only tools (dashboard / runs list+purge) directly.",
+  )
+  .action(async () => {
+    // Lazy-import: keeps the SDK + its transitive deps off the
+    // cold-start cost of every other subcommand. Mirrors the
+    // OTel pattern in src/tracing.ts.
+    const { runMcpServer } = await import("./mcp/server.js");
+    await runMcpServer();
+  });
+
 program.parseAsync().catch((err) => {
   console.error(pc.red((err as Error).message));
   process.exit(1);

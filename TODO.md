@@ -390,6 +390,13 @@ Reopen criterion: a signed enterprise contract or three serious leads asking for
 
 ## Last Update
 
+- 2026-04-29 — claw-squad MCP server shipped:
+  - `src/mcp/handlers.ts` with four read-only tools (`claw_squad_dashboard`, `claw_squad_dashboard_diff`, `claw_squad_runs_list`, `claw_squad_runs_purge`) — pure dict-in / dict-out so tests don't need the SDK
+  - `src/mcp/server.ts` stdio bootstrap; lazy-imports `@modelcontextprotocol/sdk` (declared in `optionalDependencies` so default installs stay lean — mirrors the OTel pattern)
+  - `claw-squad mcp` CLI subcommand
+  - `docs/mcp.md` documents the tool surface, setup (`.mcp.json` example), and the rationale for shipping read-only first (full `claw_squad_run` deferred until streaming notifications are designed)
+  - 18 new vitest cases. Total claw-squad: 327 passed; tsc clean
+  - Pending: interactive `claw_squad_run` tool with streaming MCP notifications + non-interactive UI shim
 - 2026-04-29 — W6.5 advance: notification surface + cost-regression alerts shipped:
   - `notify.py` (`Notifier` Protocol + `LogNotifier` + `SlackWebhookNotifier` + `default_notifier` env-driven factory)
   - `alerts.py` (`compute_cost_regression_alerts` mean+stddev detector, `finding_to_alert` severity ladder, `dispatch_findings` notifier glue)
