@@ -164,6 +164,12 @@ class Run(Base):
     github_installation_id: Mapped[int | None] = mapped_column(nullable=True)
     github_repo_full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     github_pr_number: Mapped[int | None] = mapped_column(nullable=True)
+    # W6.6 Checks API: the head commit SHA that the check-run reports
+    # against. Captured from `pull_request.head.sha` on PR events;
+    # NULL for issue_comment-triggered runs (those use the comment
+    # path only — fetching the SHA needs a separate API call).
+    github_head_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    github_check_run_id: Mapped[int | None] = mapped_column(nullable=True)
 
 
 class UserSession(Base):
