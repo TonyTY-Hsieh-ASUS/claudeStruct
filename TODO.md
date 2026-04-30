@@ -241,10 +241,14 @@ Goal: 5-50 devs share the tool with shared visibility, shared budgets, and team-
   - `auth.py:current_principal` chain: bearer wins, then session-cookie fallback. New `authenticate_session_cookie(session, cookie)` mirrors `authenticate(session, key)`
   - 14 new tests: login redirect + 503 unconfigured, callback state-mismatch / unregistered-email-403 / token-exchange-failure / happy-path / `/user/emails` fallback, session cookie authenticates downstream `/v1/dashboard`, `/v1/auth/me` shape + 401 path, logout revokes + idempotent without cookie, bearer-wins ordering, revoked cookie falls through to 401
   - Pending: Google OAuth (structurally identical, separate provider config). Tracked under W8.7 (self-serve signup) so it lands alongside the domain-allowlist feature it depends on
-- [~] **W6.5 — Shared dashboard** (multi-user view shipped; alerts deferred)
+- [~] **W6.5 — Shared dashboard** (multi-user view + cost-regression alerts shipped; budget-cap team rollups deferred)
   - `GET /v1/dashboard/team` endpoint reads the `runs` table for the caller's org (filtered to terminal states `done`/`failed` so queued/running rows don't skew rollups). Returns `total_runs` + `total_cost_usd` headline numbers, `by_author` leaderboard sorted by spend desc with email + run-count + tokens, `by_task` task-type breakdown, plus `recent` (default 50, max 500) for the activity feed
   - New schemas in `src/claudestruct/server/schema.py`: `AuthorRollup`, `TaskRollup`, `TeamDashboardResponse`. Tenant-scoped via `Run.org_id == principal.org_id` so an org can never see another org's spend
-  - Pending: regression alerts ("run cost > 2σ over team baseline" → Slack/email) and budget-cap rollups per team — both depend on a notification surface that doesn't exist yet
+  - **Notification surface (this PR)**: `src/claudestruct/server/notify.py` ships a `Notifier` Protocol with two providers — `LogNotifier` (default; structured JSON to stdlib logging at WARNING/ERROR) and `SlackWebhookNotifier` (POSTs an incoming-webhook payload, swallows non-200 so a delivery failure can't crash the producer). Selected via `CLAUDESTRUCT_NOTIFY_PROVIDER=log|slack` (+ `CLAUDESTRUCT_SLACK_WEBHOOK_URL` for slack). Future `EmailNotifier` slots in via the same Protocol
+  - **Cost-regression detector (this PR)**: `src/claudestruct/server/alerts.py` folds the `runs` table per org and emits findings for runs whose `cost_usd` is more than `--sigma` (default 2.0) population stddev above the org's mean over `--lookback-days` (default 30). Severity ladder: ≥4σ critical, ≥3σ warning, else info. Excludes failed runs from baseline + candidates (partial work is not comparable). Skips orgs with <3 successful runs (no statistical baseline). Stddev=0 → any positive deviation reports as `inf` σ, severity critical. Findings sort by σ descending so operators see the worst regression first
+  - **CLI**: `cs serve alerts [--sigma 2.0] [--lookback-days 30] [--check-recent-hours 24]` runs the detector once and dispatches via the configured notifier — designed for cron / Kubernetes CronJob
+  - 25 new tests covering: stddev math (empty, single, population formula); detector behaviour (insufficient baseline skip, zero-stddev skip, below-mean not flagged, above-threshold flagged, old-spike-not-re-alerted, failed-runs excluded, per-org isolation, sort order); severity ladder (info/warning/critical/inf); dispatch round-trip via `_CapturingNotifier`; LogNotifier WARNING vs ERROR levels; SlackWebhookNotifier (empty URL rejected, payload shape, non-200 swallowed); `default_notifier` factory env-driven selection. Total Python: 381 passed; ruff clean
+  - Pending: budget-cap rollups per team (a "team has burned 80% of monthly cap" alert kind that uses the same notifier surface — small follow-up); long-running scheduler (currently `--once`-only); email provider
 - [~] **W6.6 — GitHub App** (webhook receiver + outbound ack comment + verdict-on-completion + Checks API shipped; bot-as-actor PR opens deferred)
   - `GitHubInstallation` SQLAlchemy model maps `installation_id` ↔ `org_id` with per-install `webhook_secret` + optional `repo_filter` substring + `bot_user_id` sentinel for attribution
   - `POST /v1/github/webhook` — auth-bypassing endpoint (signature is the only gate); reads raw body for HMAC stability before JSON-parsing; verifies `X-Hub-Signature-256` via `hmac.compare_digest`; same 401 status on unknown installation AND bad signature so attackers can't enumerate IDs
@@ -386,6 +390,19 @@ Reopen criterion: a signed enterprise contract or three serious leads asking for
 
 ## Last Update
 
+- 2026-04-29 — claw-squad MCP server shipped:
+  - `src/mcp/handlers.ts` with four read-only tools (`claw_squad_dashboard`, `claw_squad_dashboard_diff`, `claw_squad_runs_list`, `claw_squad_runs_purge`) — pure dict-in / dict-out so tests don't need the SDK
+  - `src/mcp/server.ts` stdio bootstrap; lazy-imports `@modelcontextprotocol/sdk` (declared in `optionalDependencies` so default installs stay lean — mirrors the OTel pattern)
+  - `claw-squad mcp` CLI subcommand
+  - `docs/mcp.md` documents the tool surface, setup (`.mcp.json` example), and the rationale for shipping read-only first (full `claw_squad_run` deferred until streaming notifications are designed)
+  - 18 new vitest cases. Total claw-squad: 327 passed; tsc clean
+  - Pending: interactive `claw_squad_run` tool with streaming MCP notifications + non-interactive UI shim
+- 2026-04-29 — W6.5 advance: notification surface + cost-regression alerts shipped:
+  - `notify.py` (`Notifier` Protocol + `LogNotifier` + `SlackWebhookNotifier` + `default_notifier` env-driven factory)
+  - `alerts.py` (`compute_cost_regression_alerts` mean+stddev detector, `finding_to_alert` severity ladder, `dispatch_findings` notifier glue)
+  - `cs serve alerts` CLI subcommand for cron / Kubernetes CronJob driving
+  - 25 new tests (detector correctness, severity ladder, both providers, factory). Total Python: 381 passed; ruff clean
+  - Pending under W6.5: budget-cap rollups per team (same notifier surface), long-running scheduler, email provider
 - 2026-04-28 — W6.6 close-out: GitHub Checks API integration shipped:
   - `Run` gains nullable `github_head_sha` + `github_check_run_id` columns; webhook persists `pull_request.head.sha` (None for issue_comment triggers — comment-based verdict still fires)
   - `github_app.py` adds `format_check_run_payload` (with status/conclusion validation), `post_check_run`, `patch_check_run`, `format_completed_check_payload`, plus the `_with_token` glue mirroring `post_ack_comment`
