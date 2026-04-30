@@ -1,0 +1,126 @@
+{
+  "name": "claudestruct-vscode",
+  "displayName": "claudeStruct",
+  "description": "Token-efficient Claude Code companion: right-click a file to review/dev/plan/debug via the cs CLI.",
+  "version": "0.1.0",
+  "publisher": "tonyandclaw",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "AI"
+  ],
+  "keywords": [
+    "claude",
+    "anthropic",
+    "code-review",
+    "ai",
+    "claudestruct"
+  ],
+  "main": "./out/extension.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tonyandclaw/claudeStruct.git",
+    "directory": "vscode-extension"
+  },
+  "license": "MIT",
+  "activationEvents": [
+    "onCommand:claudestruct.review",
+    "onCommand:claudestruct.dev",
+    "onCommand:claudestruct.plan",
+    "onCommand:claudestruct.debug",
+    "onCommand:claudestruct.dashboard"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "claudestruct.review",
+        "title": "claudeStruct: Review",
+        "category": "claudeStruct"
+      },
+      {
+        "command": "claudestruct.dev",
+        "title": "claudeStruct: Dev",
+        "category": "claudeStruct"
+      },
+      {
+        "command": "claudestruct.plan",
+        "title": "claudeStruct: Plan",
+        "category": "claudeStruct"
+      },
+      {
+        "command": "claudestruct.debug",
+        "title": "claudeStruct: Debug",
+        "category": "claudeStruct"
+      },
+      {
+        "command": "claudestruct.dashboard",
+        "title": "claudeStruct: Dashboard",
+        "category": "claudeStruct"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "claudestruct.review",
+          "group": "claudestruct@1",
+          "when": "resourceScheme == file"
+        },
+        {
+          "command": "claudestruct.dev",
+          "group": "claudestruct@2",
+          "when": "resourceScheme == file"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "claudestruct.review",
+          "group": "claudestruct@1"
+        },
+        {
+          "command": "claudestruct.dev",
+          "group": "claudestruct@2"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "claudeStruct",
+      "properties": {
+        "claudestruct.cliPath": {
+          "type": "string",
+          "default": "cs",
+          "description": "Path to the `cs` executable. Override if `cs` is not on PATH (e.g. `/Users/me/.venvs/cs/bin/cs`)."
+        },
+        "claudestruct.maxBytes": {
+          "type": "number",
+          "default": 0,
+          "description": "Per-task context byte budget. 0 = use the CLI's per-task default (review 200k, dev 600k, debug 400k, plan 800k)."
+        },
+        "claudestruct.effort": {
+          "type": "string",
+          "enum": ["", "low", "medium", "high", "xhigh", "max"],
+          "default": "",
+          "description": "Override per-task default effort. Empty string = inherit the CLI's per-task default."
+        },
+        "claudestruct.extraArgs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Extra arguments appended to every `cs` invocation. Useful for `--monthly-cap-usd`, `--log-json`, etc."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

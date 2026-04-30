@@ -273,10 +273,14 @@ Goal: 5-50 devs share the tool with shared visibility, shared budgets, and team-
 
 Goal: distribution. Make the product discoverable, easy to install, and easy to extend.
 
-- [ ] **W7.1 — VS Code extension**
-  - Surfaces `cs review` on the diff in SCM gutter; `cs dev`/`cs debug` in command palette
-  - Uses daemon REST API when available, falls back to local CLI
-  - Published to VS Marketplace + Open VSX
+- [~] **W7.1 — VS Code extension** (sideload-only scaffold shipped; marketplace publish + SCM gutter deferred)
+  - `vscode-extension/` standalone TypeScript project with VS Code extension manifest. Not coupled to claw-squad's pnpm workspace — separate publishing target with its own dep tree
+  - Five commands: `claudeStruct: Review` / `Dev` / `Plan` / `Debug` / `Dashboard`. Review is one-click from explorer/editor context menu (palette, right-click on file, multi-select). Dev/Plan/Debug prompt for a description via `showInputBox`
+  - Output streams to a single `claudeStruct` Output Channel — no WebView (3x activation cost for marginal value over Rich's terminal output)
+  - Configuration surface (`claudestruct.cliPath`, `claudestruct.maxBytes`, `claudestruct.effort`, `claudestruct.extraArgs`) lets users point at venv-installed `cs`, override per-task budgets, append `--monthly-cap-usd` / `--log-json` flags
+  - Spawn / arg-build logic split into `runner.ts` so vitest can drive it without the `vscode` API. 13 cases cover every config-knob path (default review prompt, required-description guard, `--max-bytes` / `--effort` / `extraArgs` ordering, multi-path forwarding, full composition order, runCs streaming/spawn-error/non-zero exit)
+  - Sideload via `vsce package` + `code --install-extension` (documented in `vscode-extension/README.md`)
+  - Pending: SCM gutter integration (lights diff lines under `cs review`), daemon REST API client (falls back to local CLI), VS Marketplace + Open VSX publish (needs publisher account + signing)
 - [ ] **W7.2 — JetBrains plugin**
   - Same surface for IntelliJ / PyCharm / WebStorm; tool window for run history
   - Published to JetBrains Marketplace
@@ -390,6 +394,13 @@ Reopen criterion: a signed enterprise contract or three serious leads asking for
 
 ## Last Update
 
+- 2026-04-28 — W7.1 VS Code extension scaffold ready for PR push:
+  - New `vscode-extension/` standalone project (its own package.json + tsconfig + node_modules — separate publishing target from claw-squad's pnpm workspace)
+  - 5 commands (Review / Dev / Plan / Debug / Dashboard) registered with right-click + palette entries; output streams to a single `claudeStruct` Output Channel
+  - Pure-logic `runner.ts` split out for vitest coverage (13 cases passing, type-check clean) so the test suite doesn't need the VS Code API harness
+  - Configurable `cliPath` / `maxBytes` / `effort` / `extraArgs` for venv setups + monthly-cap / log-json passthrough
+  - Sideload-only for now (`vsce package` + `code --install-extension`); marketplace publish + SCM gutter integration tracked in the W7.1 follow-up
+  - Total: 382 Python tests + 13 new VS Code vitest cases pass; ruff clean
 - 2026-04-29 — claw-squad MCP server shipped:
   - `src/mcp/handlers.ts` with four read-only tools (`claw_squad_dashboard`, `claw_squad_dashboard_diff`, `claw_squad_runs_list`, `claw_squad_runs_purge`) — pure dict-in / dict-out so tests don't need the SDK
   - `src/mcp/server.ts` stdio bootstrap; lazy-imports `@modelcontextprotocol/sdk` (declared in `optionalDependencies` so default installs stay lean — mirrors the OTel pattern)
