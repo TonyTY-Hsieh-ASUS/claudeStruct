@@ -57,19 +57,16 @@ function _wrapError(err: unknown): {
  * "install the optional dep" message is the right UX.
  */
 export async function runMcpServer(): Promise<void> {
-  // SDK paths are typed as `any` here because the package lives in
-  // `optionalDependencies` — TypeScript can't resolve the modules at
-  // typecheck time on installs that opted out. The runtime contract
-  // is documented at modelcontextprotocol.io and stable across 1.x.
+  // SDK paths are typed loosely as `any` because the package lives in
+  // `optionalDependencies` — environments that opted out won't have
+  // them resolvable. We dynamic-import inside a try/catch so the
+  // unconfigured path produces an actionable error message.
   let sdkServer: any;
   let sdkStdio: any;
   let sdkTypes: any;
   try {
-    // @ts-expect-error optional dep, may not be installed at typecheck
     sdkServer = await import("@modelcontextprotocol/sdk/server/index.js");
-    // @ts-expect-error optional dep
     sdkStdio = await import("@modelcontextprotocol/sdk/server/stdio.js");
-    // @ts-expect-error optional dep
     sdkTypes = await import("@modelcontextprotocol/sdk/types.js");
   } catch (cause) {
     throw new Error(
