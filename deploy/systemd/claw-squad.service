@@ -1,0 +1,47 @@
+[Unit]
+# claw-squad Web UI as an always-on service. Useful on a GX10-style
+# home server so collaborators can browse run history without ssh.
+# `claw-squad run --web` starts an HTTP server (src/ui/web.ts) — this
+# unit assumes you have a default config at /var/lib/claw-squad/.claw-squad/
+# and just want the dashboard up.
+Description=claw-squad Web UI
+Documentation=https://github.com/tonyandclaw/claudestruct/blob/main/docs/home-server.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=clawsquad
+Group=clawsquad
+WorkingDirectory=/var/lib/claw-squad
+
+EnvironmentFile=-/etc/claudestruct/claw-squad.env
+
+# `node dist/cli.js` instead of the `claw-squad` shim so we don't depend
+# on PATH or npm-link state. Adjust the path if you installed via pnpm
+# global / npm -g (typically /usr/lib/node_modules/claw-squad/dist/cli.js).
+ExecStart=/usr/bin/node /opt/claw-squad/dist/cli.js dashboard --serve --host 127.0.0.1 --port 8788
+
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/claw-squad
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+SystemCallArchitectures=native
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

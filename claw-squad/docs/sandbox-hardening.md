@@ -83,16 +83,25 @@ spec:
 
 ## Network isolation
 
-The built-in `--no-network` flag is `unsupported` on every platform today (see the per-run isolation report stanza). Real network namespacing needs `CAP_SYS_ADMIN` or an unprivileged user namespace plus `unshare(CLONE_NEWNET)` — both of which are themselves blocked by the seccomp profile above by design.
+`--no-network` now delivers real `CLONE_NEWNET` isolation on Linux when the running process holds `CAP_SYS_ADMIN` (real root, or already inside an unprivileged user namespace). On those hosts the flag also defaults to ON — the GX10 home-server case (Linux + root + always-on `claudestruct-worker.service`) gets "private repo never leaves the box" without the operator remembering the flag.
 
-The recommended path is to **enforce isolation outside the sandbox**:
+| Host configuration                                  | `noNetwork` field in isolation report | Default for `--no-network` |
+|-----------------------------------------------------|---------------------------------------|----------------------------|
+| Linux + root (GX10, dedicated worker, CI runner)    | `enforced`                            | **on**                     |
+| Linux + unprivileged userns (rootless container)    | `best-effort`                         | off (operator opts in)     |
+| Linux + non-root, init userns                       | `unsupported`                         | off                        |
+| macOS / Windows                                     | `unsupported`                         | off                        |
+
+Workflows that need outbound network (`npm install`, `pip install`, fetching submodules) should pass `--allow-network` to opt out of the auto-on default. The CLI also accepts the explicit `--no-network` for hosts that haven't been auto-detected — the kernel decides whether the request actually lands and the isolation report records the resulting status.
+
+`--no-network` does not replace network-layer defence-in-depth:
 
 - Docker: `--network=none` or a dedicated bridge with egress rules
 - Kubernetes: a `NetworkPolicy` denying egress except to `api.anthropic.com:443`
 - firejail: `--net=none`
 - VPN / corporate firewall: standard egress allowlist
 
-The sandbox's job is to fence off process-level escape; the network layer's job is to fence off data exfiltration. Don't rely on `--no-network` alone.
+The sandbox's job is to fence off process-level escape; the network layer's job is to fence off data exfiltration. `--no-network` covers a meaningful slice of the second job on Linux+root; treat it as additive, not as a substitute for outer isolation.
 
 ## What the profiles do NOT cover
 

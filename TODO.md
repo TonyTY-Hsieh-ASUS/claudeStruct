@@ -453,11 +453,13 @@ Goal: turn the existing multi-tool stack into a first-class local-AI workstation
   - New `[openai]` extra in `pyproject.toml` brings `openai>=1.50` + `tiktoken>=0.7`. Without it, `CLAUDESTRUCT_PROVIDER=openai` raises a clear `_MissingDepError` pointing at the extra
   - Tests: 14 new cases in `tests/test_providers.py` covering selection / defaults / OpenAI message shape / tokenization fallback / streaming aggregator / `reasoning_effort` gating / soft-dep gating / Anthropic cache-breakpoint regression guard / dispatch / cache telemetry
 
-- [ ] **W10.2 — Always-on home / company control plane**
-  - **Pain**: `cs serve run` already exists but the deploy story is bare — no systemd unit, no reverse-proxy / Tailscale recipe, no self-signed TLS guidance. GitHub App webhooks + cost-regression alerts + SLO endpoint only earn their keep when the daemon is 24/7.
-  - **What**: ship `deploy/systemd/claudestruct.service` + `deploy/systemd/claudestruct-worker.service` + `docs/home-server.md` (Tailscale Funnel for inbound webhooks, Caddy reverse-proxy snippet, port-not-exposed-publicly walkthrough, `cs serve init-db` first-run checklist).
-  - **Scope**: ~150 LOC docs + unit files; no Python changes.
-  - **Win**: the multi-tenant scaffolding from Waves 6–8 actually gets wired up on real hardware.
+- [x] **W10.2 — Always-on home / company control plane** ✅
+  - `deploy/systemd/claudestruct.service` (HTTP API) + `deploy/systemd/claudestruct-worker.service` (queue drainer) ship as drop-in unit files, with `claudestruct` system user + `/var/lib/claudestruct` data dir + `EnvironmentFile=-/etc/claudestruct/claudestruct.env` for secrets. `ExecStartPre=/usr/local/bin/cs serve init-db` makes first-boot idempotent. Hardened with `NoNewPrivileges`, `ProtectSystem=strict`, `ReadWritePaths=…`, restricted address families, and `SystemCallArchitectures=native`
+  - `claudestruct-worker.service` is `PartOf=claudestruct.service` with `TimeoutStopSec=300s` so an in-flight LLM call gets to finish before SIGKILL
+  - `deploy/systemd/claw-squad.service` covers the optional Web UI (separate `clawsquad` user, port 8788)
+  - `docs/home-server.md` walks the GX10-style host through install → service-user → secrets → systemd → Tailscale Funnel (single-path public webhook, rest tailnet-only) **or** Caddy reverse proxy (Let's Encrypt + private-IP allowlist) → org/user/key bootstrap → log streaming → upgrade flow. Calls out the explicit non-goals (HA, multi-worker, TLS-on-loopback)
+  - `deploy/systemd/README.md` is the quick-install crib sheet
+  - Pure ops: zero Python / TypeScript / Go changes. Wave 6–8 scaffolding (multi-tenant, GitHub App, SLO, cost-regression alerts) finally gets a 24/7 home
 
 - [x] **W10.3 — Per-role local-model presets for claw-squad** ✅
   - `claw-squad/configs/{local-gx10,local-laptop,hybrid}.json` ship next to the binary; `--preset <name>` resolves them through `presetPath()` in `src/config.ts`
@@ -499,17 +501,21 @@ Goal: turn the existing multi-tool stack into a first-class local-AI workstation
 
 ### Tier 3 — Push existing abstractions to the limit
 
-- [ ] **W10.8 — Nightly code-health watchdog**
-  - **Pain**: cost-regression alerts (W6.5) need data to be useful; without scheduled runs the dashboard stays sparse.
-  - **What**: `scripts/nightly-review.sh` + `deploy/systemd/claudestruct-nightly.timer`: every night, `cs review` the last 3 commits on `main`, drop results into `.claudestruct/runs/`. Morning `cs dashboard` shows the week's code-quality drift.
-  - **Scope**: ~50 LOC bash + a sample crontab + 1 doc page.
-  - **Win**: feeds the dashboards / alerts you've already built without anyone clicking buttons.
+- [x] **W10.8 — Nightly code-health watchdog** ✅
+  - `scripts/nightly-review.sh` walks `git rev-list --max-count=$DEPTH origin/$BRANCH` and for each commit detaches HEAD, `git reset --soft <parent>`, runs `cs review --redact --log-json $LOG`, then resets back. Per-commit failures log to a sibling `.err` file but don't abort the loop — one bad merge shouldn't poison the night
+  - Configurable via env: `CS_NIGHTLY_REPO` (required), `CS_NIGHTLY_BRANCH` (default `main`), `CS_NIGHTLY_DEPTH` (default `3`), `CS_NIGHTLY_LOG_DIR` (default `$REPO/.claudestruct/runs`)
+  - `deploy/systemd/claudestruct-nightly.service` (Type=oneshot, same hardening profile as the daytime services) + `claudestruct-nightly.timer` (`OnCalendar=*-*-* 03:00:00`, `Persistent=true` so missed runs fire on next boot, `RandomizedDelaySec=15min`)
+  - `docs/nightly-review.md` covers configuration, install (system + drop-in override), cron alternative, "why a wrapper script not a one-liner", and the morning `cs dashboard --root … --limit 20` routine
+  - Pure ops: zero Python / TypeScript / Go changes. Plugs straight into the existing W6.5 cost-regression alerter
 
-- [ ] **W10.9 — Real network isolation for claw-sandbox on GX10**
-  - **Pain**: `--no-network` is `unsupported` on macOS and on non-root Linux. The W1.5 isolation report is honest about it but the actual protection is missing.
-  - **What**: on Linux + root (the GX10 default), use `unshare --net` to truly cut the Coder's network access, leaving only repo I/O. Default `--no-network` to ON when running on a system where the kernel + caps support it; emit a structured `noNetwork=enforced` line via the existing isolation report.
-  - **Scope**: ~30 LOC (mostly default-flag changes in `claw-sandbox/main.go`) + 2 tests + docs.
-  - **Win**: "private repo never leaves the box" upgrades from best-effort to enforced.
+- [x] **W10.9 — Real network isolation for claw-sandbox on GX10** ✅
+  - `tryDisableNetwork()` in `rlimit_linux.go` now sets `cmd.SysProcAttr.Cloneflags |= syscall.CLONE_NEWNET` when `isolationCapabilities().network` is `enforced` or `best-effort`. The kernel does the actual unsharing on `cmd.Start()`; no userspace `unshare` shim required
+  - `shouldDefaultNoNetwork()` (Linux: `network == statusEnforced`; non-Linux: `false`) drives the new auto-on default. `resolveNoNetwork()` in `main.go` is the policy gate — explicit `--no-network` wins, explicit `--allow-network` opts out, both flags resolve to OFF with a stderr warning, neither delegates to the host capability
+  - New `--allow-network` flag for `npm install` / `pip install` workflows. Existing scripts that pass `--no-network` still work; existing scripts that *don't* pass either flag get the new default ON only when running as root on Linux (the GX10 worker case) — non-root callers see no behaviour change
+  - 4 new tests in `claw-sandbox/resolve_test.go` (explicit-on wins, explicit-off opts out, conflict treated as off, no-flags follows host policy)
+  - `claw-squad/docs/sandbox-hardening.md` rewrites the network-isolation section with a host-config matrix and removes the "unsupported on every platform today" claim that's no longer true
+  - Header comments in `main.go` updated; `--help` output now reflects the auto-on default and the new opt-out flag
+  - Pure additive: zero behaviour change for hosts that can't actually enforce isolation
 
 - [x] **W10.10 — Hybrid cloud / local routing** ✅
   - `claw-squad/configs/hybrid.json`: Planner on cloud Anthropic (`claude-opus-4-7`, asymmetric IQ demand + low call volume + prompt-cache savings); Coder + Reviewer on local Ollama (`qwen2.5-coder:32b` + `qwen2.5:7b`, high call volume + lower IQ ceiling)

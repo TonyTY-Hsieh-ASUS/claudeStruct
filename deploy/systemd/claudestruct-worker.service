@@ -1,0 +1,52 @@
+[Unit]
+# Background worker: drains queued Run rows produced by the API
+# (POST /v1/runs and the GitHub-App webhook). See worker.py — single
+# in-process loop with SELECT-FOR-UPDATE, so running multiple workers
+# against the same DB needs an external coordinator we don't ship.
+# One worker per host is the supported topology.
+Description=claudestruct background worker (cs serve worker)
+Documentation=https://github.com/tonyandclaw/claudestruct/blob/main/docs/home-server.md
+After=network-online.target claudestruct.service
+Wants=network-online.target
+# Worker has no hard dep on the API (it talks DB-only), but starting
+# them together keeps the deploy story simple.
+PartOf=claudestruct.service
+
+[Service]
+Type=exec
+User=claudestruct
+Group=claudestruct
+WorkingDirectory=/var/lib/claudestruct
+
+Environment=CLAUDESTRUCT_DATABASE_URL=sqlite:////var/lib/claudestruct/server.db
+EnvironmentFile=-/etc/claudestruct/claudestruct.env
+
+# `cs serve worker` runs forever; --once exists for cron-style operation
+# but the systemd model wants a long-lived process.
+ExecStart=/usr/local/bin/cs serve worker
+
+Restart=on-failure
+RestartSec=10s
+# Worker may be in the middle of a real LLM call (~minutes). Give it
+# room to finish gracefully before SIGKILL.
+TimeoutStopSec=300s
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/claudestruct
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+SystemCallArchitectures=native
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

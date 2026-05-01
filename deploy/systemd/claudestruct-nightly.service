@@ -1,0 +1,40 @@
+[Unit]
+# One-shot nightly code-health review. Triggered by the
+# claudestruct-nightly.timer; runs scripts/nightly-review.sh against a
+# configured repo, drops JSONL run logs under .claudestruct/runs/ so
+# cs dashboard surfaces the week's quality drift in the morning.
+Description=claudestruct nightly code-health review
+Documentation=https://github.com/tonyandclaw/claudestruct/blob/main/docs/home-server.md
+
+[Service]
+Type=oneshot
+User=claudestruct
+Group=claudestruct
+WorkingDirectory=/var/lib/claudestruct
+
+# Same secret bundle the long-running services read.
+EnvironmentFile=-/etc/claudestruct/claudestruct.env
+# Repo-specific knobs; override by deploying a drop-in:
+#   /etc/systemd/system/claudestruct-nightly.service.d/override.conf
+Environment=CS_NIGHTLY_REPO=/var/lib/claudestruct/repo
+Environment=CS_NIGHTLY_BRANCH=main
+Environment=CS_NIGHTLY_DEPTH=3
+
+ExecStart=/usr/local/bin/nightly-review.sh
+
+# Reviews are bounded but each cs call may take minutes against a large
+# diff. Cap the unit so a runaway can't camp on the timer slot.
+TimeoutStartSec=30min
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/claudestruct
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+LockPersonality=true
+
+StandardOutput=journal
+StandardError=journal
