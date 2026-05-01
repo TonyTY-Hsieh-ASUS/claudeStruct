@@ -380,8 +380,7 @@ Goal: make claudeStruct usable end-to-end on a local AI workstation (Asus GX10 /
   - `is_enabled()` reads `CLAUDESTRUCT_LLM_CACHE`; `stats()` + `clear()` for `cs dashboard` integration.
   - 30 new tests. CLI flag `--llm-cache` + integration into `client.py` deferred to W9.1 PR (it'll wire alongside the OpenAI-compat client).
 
-- [ ] **W9.5 — RAG-style smart context gathering** (tracked as W10.5)
-  - Same scope as W10.5. Open until either lands.
+- [x] **W9.5 — RAG-style smart context gathering** ✅ (shipped as W10.5; see Wave 10 entry)
 
 - [x] **W9.6 — Dataset export for fine-tuning** ✅ (Python side shipped as W10.6; claw-squad TS-side deferred)
 - [ ] **W9.7 — Voice REPL (`cs voice` / `claw-squad voice`)** (tracked as W10.7)
@@ -454,11 +453,15 @@ Goal: turn the existing multi-tool stack into a first-class local-AI workstation
   - Cache write is best-effort: `OSError` is logged to stderr and swallowed — the user's run never aborts because the cache failed to grow
   - Tests: 46 cases — `is_enabled_for` policy matrix (auto/Anthropic, auto/OpenAI, explicit on/off, per-run override wins), `cache_key` extensions (effort/max_tokens differs, default-stable), integration (first call misses → write, second hits → no provider call, stream replay still fires, `--no-llm-cache` bypass, Anthropic auto-OFF, opt-in works on Anthropic, write-failure non-fatal)
 
-- [ ] **W10.5 — RAG-style smart context with local embeddings**
-  - **Pain**: `context.py` walks the repo via globs and clips at `--max-bytes`. Large monorepos either OOM or send mostly-irrelevant files.
-  - **What**: `cs index` builds a local embedding index (e.g. `nomic-embed-text` via Ollama) into `~/.claudestruct/index/<repo-sha>.db` (sqlite-vec or hnswlib). New `cs review --semantic` / `cs dev --semantic` flag swaps the gatherer for a top-K semantic retriever; per-task budget still enforced. The 128 GB headroom on GX10 trivially holds embedding model + Coder LLM concurrently.
-  - **Scope**: ~300 LOC + 12 tests (index build, query top-K, budget intersection, opt-out fallback).
-  - **Win**: review quality on 100k+-file repos jumps from "guessed at random" to "actually about the diff".
+- [x] **W10.5 — RAG-style smart context with local embeddings** ✅
+  - `src/claudestruct/embed.py`: stdlib-only OpenAI-compatible `/embeddings` POSTer (urllib + json). Defaults target `http://localhost:11434/v1` + `nomic-embed-text` (Ollama on a GX10); `CLAUDESTRUCT_EMBED_BASE_URL` / `_MODEL` / `_API_KEY` overrides cover cloud OpenAI / vLLM / SGLang / llama.cpp without code changes
+  - `src/claudestruct/index.py`: SQLite store at `~/.claudestruct/index/<repo-fingerprint>.db` (one db per repo path, sha256-of-absolute-root keeps unrelated checkouts from thrashing), pure-Python cosine. Defends against zero-norm rows, dim-mismatch (`ValueError` rather than silent truncation), `CLAUDESTRUCT_INDEX_DIR` override
+  - `src/claudestruct/indexer.py`: walks via existing `_walk_source_files` (gitignore-aware, source-extension allowlist), 16 KB per-file cap to keep request payload + sha-churn down, sha-skip on second build (`cs index build` becomes a no-op for unchanged files), batches 16 inputs per `/embeddings` call
+  - CLI: `cs index build [--root .]` / `cs index stats` / `cs index clear`. New `--smart-context` flag on `cs dev/review/plan/debug` plumbs the description into a top-K (k=20) lookup, then falls into the existing gatherer with those paths as `explicit_paths` — per-task budget still enforced. Embedding-endpoint failure exits 2 with a clear message rather than silently degrading
+  - `[smart-context]` extra in `pyproject.toml` (empty today; declared so docs can pin a stable install command and a future sqlite-vec drop-in lands without breaking anyone's pin)
+  - 21 tests in `tests/test_index.py`: round-trip, replace-on-upsert, per-repo fingerprint, env-dir override, cosine ranking correctness (3-point unit-circle), top-K respect, zero-vector returns empty, zero-norm row skip, dim-mismatch raises, file_sha256 stability, indexer walk + sha-skip + re-embed-after-edit, smart_paths returns top-K + empty-index empty, embedding client env-passthrough + empty-input short-circuit
+  - `docs/smart-context.md`: setup (Ollama + cloud OpenAI), build/stats/clear, failure-modes table, follow-ups (sqlite-vec, hybrid retrieval, claw-squad integration)
+  - 496 Python tests pass (was 475)
 
 - [x] **W10.6 — Reviewer fine-tuning from run-log history (Python side)** ✅
   - Existing logs are observability-only — no prompt + response capture. Added an opt-in `run.io` event in `logging.py` (gated on `CLAUDESTRUCT_LOG_PROMPTS=1`, default off for privacy) and emit it from `runner.run_task_and_log` after the LLM call. Response cap of 100 KB so a runaway model can't blow out the log file

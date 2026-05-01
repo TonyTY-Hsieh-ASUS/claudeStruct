@@ -117,6 +117,7 @@ def _run_common(
     monthly_cap_usd: float | None,
     redact: bool,
     llm_cache: str | None,
+    smart_context: bool = False,
 ) -> None:
 
     if monthly_cap_usd is not None and monthly_cap_usd > 0 and not dry_run:
@@ -138,6 +139,25 @@ def _run_common(
             )
 
     explicit = [Path(p) for p in paths] if paths else None
+    if smart_context and not explicit:
+        from claudestruct.embed import EmbeddingError
+        from claudestruct.indexer import smart_paths
+
+        try:
+            explicit = smart_paths(root, description, k=20)
+        except EmbeddingError as exc:
+            err.print(
+                f"[red]--smart-context failed to reach the embedding "
+                f"endpoint:[/red] {exc}\n"
+                f"[dim]Set CLAUDESTRUCT_EMBED_BASE_URL / CLAUDESTRUCT_EMBED_MODEL "
+                f"or omit the flag.[/dim]"
+            )
+            sys.exit(2)
+        if not explicit:
+            err.print(
+                "[yellow]--smart-context: index returned no hits. "
+                "Run `cs index build` first, or omit the flag.[/yellow]"
+            )
     gatherer = GATHERERS[task]
     budget = max_bytes if max_bytes is not None else BUDGETS_PER_TASK.get(task, 600_000)
     ctx = gatherer(root=root, explicit_paths=explicit, max_total_bytes=budget)
@@ -234,6 +254,11 @@ common_options = [
     click.option("--no-llm-cache", "llm_cache", flag_value="off",
                  help="Force-disable the local LLM response cache for this "
                       "run, even when CLAUDESTRUCT_LLM_CACHE is set."),
+    click.option("--smart-context", is_flag=True,
+                 help="Use the local embedding index to pick the top-K "
+                      "files semantically related to the task description, "
+                      "instead of the default glob/diff walk. Build the "
+                      "index first via `cs index build`."),
 ]
 
 
@@ -267,36 +292,40 @@ except ImportError:
 @click.argument("description", required=True)
 @click.argument("paths", nargs=-1, type=click.Path())
 @_apply_options
-def dev_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact, llm_cache):
+def dev_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact, llm_cache, smart_context):
     _run_common("dev", description, paths, _resolve_root(root), model, max_tokens,
-                effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact, llm_cache)
+                effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact, llm_cache,
+                smart_context=smart_context)
 
 
 @main.command("review", help="Code review on the current branch diff, or specified files.")
 @click.argument("description", required=False, default="Review the code below for bugs, security issues, and maintainability concerns.")
 @click.argument("paths", nargs=-1, type=click.Path())
 @_apply_options
-def review_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact, llm_cache):
+def review_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact, llm_cache, smart_context):
     _run_common("review", description, paths, _resolve_root(root), model, max_tokens,
-                effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact, llm_cache)
+                effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact, llm_cache,
+                smart_context=smart_context)
 
 
 @main.command("plan", help="Architecture / planning mode.")
 @click.argument("description", required=True)
 @click.argument("paths", nargs=-1, type=click.Path())
 @_apply_options
-def plan_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact, llm_cache):
+def plan_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact, llm_cache, smart_context):
     _run_common("plan", description, paths, _resolve_root(root), model, max_tokens,
-                effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact, llm_cache)
+                effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact, llm_cache,
+                smart_context=smart_context)
 
 
 @main.command("debug", help="Debug an error, anchored on a failure description.")
 @click.argument("description", required=True)
 @click.argument("paths", nargs=-1, type=click.Path())
 @_apply_options
-def debug_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact, llm_cache):
+def debug_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact, llm_cache, smart_context):
     _run_common("debug", description, paths, _resolve_root(root), model, max_tokens,
-                effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact, llm_cache)
+                effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact, llm_cache,
+                smart_context=smart_context)
 
 
 @main.command("tokens", help="Count tokens for a given task + context without calling Claude.")
@@ -315,6 +344,57 @@ def tokens_cmd(task, description, paths, root, model):
         err.print(f"[red]{exc}[/red]")
         sys.exit(1)
     console.print(f"{tokens}")
+
+
+@main.group("index", help="Manage the local embedding index for --smart-context (W10.5).")
+def index_group() -> None:
+    pass
+
+
+@index_group.command("build", help="Walk the repo and (re-)embed every source file into the local index.")
+@click.option("--root", type=click.Path(exists=True, file_okay=False), default=None)
+def index_build_cmd(root: str | None) -> None:
+    from claudestruct.embed import EmbeddingError
+    from claudestruct.indexer import build_index
+
+    resolved = _resolve_root(root)
+
+    def _progress(msg: str) -> None:
+        err.print(f"[dim]{msg}[/dim]")
+
+    try:
+        stats = build_index(resolved, progress=_progress)
+    except EmbeddingError as exc:
+        err.print(f"[red]embedding endpoint failed:[/red] {exc}")
+        sys.exit(2)
+    console.print(
+        f"walked {stats.walked} file(s); "
+        f"embedded {stats.embedded}; "
+        f"skipped {stats.skipped_unchanged} unchanged, "
+        f"{stats.skipped_unreadable} unreadable"
+    )
+
+
+@index_group.command("stats", help="Print row count + embedding dimension for the local index.")
+@click.option("--root", type=click.Path(exists=True, file_okay=False), default=None)
+def index_stats_cmd(root: str | None) -> None:
+    from claudestruct.index import Index
+
+    resolved = _resolve_root(root)
+    with Index.open(resolved) as idx:
+        s = idx.stats()
+    console.print(f"entries: {s.entries}\ndimension: {s.dimension}")
+
+
+@index_group.command("clear", help="Drop every row from the local index.")
+@click.option("--root", type=click.Path(exists=True, file_okay=False), default=None)
+def index_clear_cmd(root: str | None) -> None:
+    from claudestruct.index import Index
+
+    resolved = _resolve_root(root)
+    with Index.open(resolved) as idx:
+        n = idx.clear()
+    console.print(f"deleted {n} entr{'y' if n == 1 else 'ies'}")
 
 
 @main.group("dataset", help="Mine the run-log directory for fine-tuning datasets (W10.6).")

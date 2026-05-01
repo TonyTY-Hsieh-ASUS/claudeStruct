@@ -57,6 +57,13 @@ openai = [
   "openai>=1.50.0",
   "tiktoken>=0.7.0",
 ]
+# `pip install claudestruct[smart-context]` enables `cs index build`
+# + the `--smart-context` flag (W10.5). The index module itself uses
+# only stdlib (sqlite3 + urllib + json), so this extra is empty
+# today — declared so the docs can point users at a stable install
+# command and so a future sqlite-vec / hnswlib upgrade can land here
+# without breaking any existing pin.
+smart-context = []
 
 [project.scripts]
 cs = "claudestruct.cli:main"
