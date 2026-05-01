@@ -1,0 +1,84 @@
+# systemd unit for `cs serve run` (W10.2).
+#
+# Drops claudestruct into a single-host always-on deployment — the
+# Asus GX10 / a NUC at home / a small VPS. Pairs with
+# `claudestruct-worker.service` (the daemon-mode background runner)
+# and an optional `caddy.service` reverse proxy.
+#
+# Install:
+#   sudo cp deploy/systemd/claudestruct.service /etc/systemd/system/
+#   sudo cp deploy/systemd/claudestruct.env.example /etc/claudestruct/env
+#   # Edit /etc/claudestruct/env: ANTHROPIC_API_KEY + DB url + region tag.
+#   sudo useradd --system --home /var/lib/claudestruct --create-home claudestruct
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now claudestruct.service
+#
+# Logs: `journalctl -u claudestruct -f`
+#
+# This unit runs the API server only. Run-execution lives in the
+# sibling worker unit so a CPU-bound `cs review` doesn't block the
+# /healthz endpoint on a single thread.
+
+[Unit]
+Description=claudestruct REST API daemon (cs serve run)
+Documentation=https://github.com/tonyandclaw/claudeStruct/blob/main/docs/home-server.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=claudestruct
+Group=claudestruct
+WorkingDirectory=/var/lib/claudestruct
+EnvironmentFile=/etc/claudestruct/env
+
+# Bind to localhost by default so the only ingress is via the reverse
+# proxy / Tailscale Funnel. Override CLAUDESTRUCT_BIND in the env
+# file if you really want public exposure (then turn on
+# CLAW_WEB_TOKEN + token auth as well).
+ExecStart=/usr/local/bin/cs serve run \
+  --host ${CLAUDESTRUCT_BIND:-127.0.0.1} \
+  --port ${CLAUDESTRUCT_PORT:-8787} \
+  --run-root /var/lib/claudestruct
+
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=30
+TimeoutStopSec=30
+
+# --- Hardening (defense-in-depth on top of W5.5 sandbox profiles) ---
+# Numbers chosen so a 32B local LLM through Ollama still works:
+# - the sandbox forbids most syscalls but the daemon needs none of
+#   them (it shells out via Ollama's HTTP API, not directly to
+#   inference primitives).
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=false   # tiktoken / numpy mmap need RWX
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Allow the daemon to write under its data dir + the worker tmpfs.
+ReadWritePaths=/var/lib/claudestruct /run/claudestruct
+StateDirectory=claudestruct
+RuntimeDirectory=claudestruct
+RuntimeDirectoryMode=0750
+
+# Resource caps. Adjust if you push the box into bigger workloads.
+LimitNOFILE=4096
+TasksMax=512
+
+[Install]
+WantedBy=multi-user.target

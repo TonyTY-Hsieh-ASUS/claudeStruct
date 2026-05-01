@@ -1,0 +1,66 @@
+# Caddyfile.example — reverse-proxy for the claudestruct daemon (W10.2).
+#
+# Caddy ships its own TLS automation (Let's Encrypt or any ACME
+# server). Pair this with `claudestruct.service` bound to localhost
+# and Tailscale fronting the public hostname.
+#
+# Install:
+#   sudo apt install caddy        # or `brew install caddy` on a Mac
+#   sudo cp deploy/systemd/Caddyfile.example /etc/caddy/Caddyfile
+#   # Edit the host below.
+#   sudo systemctl restart caddy
+#
+# Two host blocks documented:
+#   1. Tailscale-only (recommended): trusts the tailnet, no TLS
+#      since traffic is already encrypted.
+#   2. Public + Let's Encrypt: ACME-issued cert; pair with a
+#      claudestruct.token CLI flag for bearer-only access.
+
+# --- 1. Tailscale tailnet (recommended for personal / team use) ---
+# After `tailscale up`, your daemon is reachable at
+# https://<machine>.<tailnet>.ts.net — no port-forwarding, no DNS,
+# no firewall holes. Caddy listens on the tailnet IP.
+
+cs.example-tailnet.ts.net {
+	# Health endpoints unauthenticated (matches the daemon's own
+	# /healthz semantics). API + dashboard require bearer or
+	# session cookie per the W6.4 OAuth flow.
+	reverse_proxy 127.0.0.1:8787
+
+	# Surface the tenant region tag the daemon already emits.
+	header X-CS-Origin "tailscale-caddy"
+}
+
+# --- 2. Public Internet (token-authenticated) ----------------------
+# Use only if Tailscale isn't an option. The daemon's W6.4 OAuth
+# flow handles browser auth; the `Authorization: Bearer <ck_…>`
+# header still works for CLI traffic. Caddy adds HSTS + opportunistic
+# HTTP/3.
+#
+# Uncomment and replace the host:
+#
+# cs.your-domain.dev {
+# 	encode gzip zstd
+# 	reverse_proxy 127.0.0.1:8787
+# 	header {
+# 		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+# 		Referrer-Policy "no-referrer"
+# 		X-Content-Type-Options "nosniff"
+# 		# CORS for the W6.4 SPA. Tighten the origin list to your tenants.
+# 		Access-Control-Allow-Origin "https://app.your-domain.dev"
+# 		Access-Control-Allow-Credentials "true"
+# 	}
+# 	@health path /healthz /readyz
+# 	rate_limit @health 10r/m
+# 	@api not path /healthz /readyz
+# 	rate_limit @api 100r/m
+# }
+
+# Caddy global options. Adjust the email so ACME renewal warnings
+# reach you.
+{
+	email admin@example.com
+	# Upgrade ACME certs through the Let's Encrypt staging endpoint
+	# while you're testing; remove for production.
+	# acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}

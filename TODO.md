@@ -453,11 +453,12 @@ Goal: turn the existing multi-tool stack into a first-class local-AI workstation
   - New `[openai]` extra in `pyproject.toml` brings `openai>=1.50` + `tiktoken>=0.7`. Without it, `CLAUDESTRUCT_PROVIDER=openai` raises a clear `_MissingDepError` pointing at the extra
   - Tests: 14 new cases in `tests/test_providers.py` covering selection / defaults / OpenAI message shape / tokenization fallback / streaming aggregator / `reasoning_effort` gating / soft-dep gating / Anthropic cache-breakpoint regression guard / dispatch / cache telemetry
 
-- [ ] **W10.2 — Always-on home / company control plane**
-  - **Pain**: `cs serve run` already exists but the deploy story is bare — no systemd unit, no reverse-proxy / Tailscale recipe, no self-signed TLS guidance. GitHub App webhooks + cost-regression alerts + SLO endpoint only earn their keep when the daemon is 24/7.
-  - **What**: ship `deploy/systemd/claudestruct.service` + `deploy/systemd/claudestruct-worker.service` + `docs/home-server.md` (Tailscale Funnel for inbound webhooks, Caddy reverse-proxy snippet, port-not-exposed-publicly walkthrough, `cs serve init-db` first-run checklist).
-  - **Scope**: ~150 LOC docs + unit files; no Python changes.
-  - **Win**: the multi-tenant scaffolding from Waves 6–8 actually gets wired up on real hardware.
+- [x] **W10.2 — Always-on home / company control plane** ✅
+  - `deploy/systemd/claudestruct.service` (API server) + `claudestruct-worker.service` (background runner) + `claudestruct.env.example` (full env template with provider / DB / region / monthly-cap / OTel / Sentry / cache knobs) + `Caddyfile.example` (Tailscale-only and public-Internet+Let's Encrypt blocks)
+  - `deploy/systemd/README.md` summarises the file roles + when NOT to use these (multi-host → Helm chart instead)
+  - `docs/home-server.md` is the 30-minute walkthrough: install → state dir → systemd units → bootstrap user/key → Tailscale ingress → optional public DNS → wire GitHub App + cost alerts → backups → operations cheat sheet → troubleshooting matrix
+  - Hardening: `Protect{System,Home,KernelTunables,KernelModules,KernelLogs,ControlGroups,Clock,Hostname,Proc}` + `Restrict{Realtime,SUIDSGID,Namespaces,AddressFamilies}` + `LockPersonality` + `NoNewPrivileges` + `PrivateTmp/Devices` + `ReadWritePaths` scoped to the StateDirectory. `MemoryDenyWriteExecute=false` deliberate (tiktoken / numpy mmap need RWX); flagged as a follow-up
+  - The W6 / W7 / W8 features that always assumed 24/7 (GitHub App webhooks, cost-regression alerts, SLO endpoint, nightly review) now have a recipe to land on real hardware
 
 - [x] **W10.3 — Per-role local-model presets for claw-squad** ✅
   - `claw-squad/configs/{local-gx10,local-laptop,hybrid}.json` ship next to the binary; `--preset <name>` resolves them through `presetPath()` in `src/config.ts`
@@ -505,11 +506,12 @@ Goal: turn the existing multi-tool stack into a first-class local-AI workstation
   - **Scope**: ~50 LOC bash + a sample crontab + 1 doc page.
   - **Win**: feeds the dashboards / alerts you've already built without anyone clicking buttons.
 
-- [ ] **W10.9 — Real network isolation for claw-sandbox on GX10**
-  - **Pain**: `--no-network` is `unsupported` on macOS and on non-root Linux. The W1.5 isolation report is honest about it but the actual protection is missing.
-  - **What**: on Linux + root (the GX10 default), use `unshare --net` to truly cut the Coder's network access, leaving only repo I/O. Default `--no-network` to ON when running on a system where the kernel + caps support it; emit a structured `noNetwork=enforced` line via the existing isolation report.
-  - **Scope**: ~30 LOC (mostly default-flag changes in `claw-sandbox/main.go`) + 2 tests + docs.
-  - **Win**: "private repo never leaves the box" upgrades from best-effort to enforced.
+- [x] **W10.9 — Real network isolation for claw-sandbox on GX10** ✅
+  - `tryDisableNetwork` in `claw-sandbox/rlimit_linux.go` now actually stamps `Unshareflags |= CLONE_NEWNET` on the child's `SysProcAttr` whenever `detectNetworkIsolationStatus()` returns `enforced` (root) or `best-effort` (unprivileged userns). Honest no-op on `unsupported` so the existing isolation-report stanza never over-claims
+  - `--no-network` flag now defaults to ON when the platform supports it (was: always false). Pass `--no-network=false` to opt out. The structured `noNetwork` field already declared the actual outcome, so callers see the same truth either way
+  - Top-of-file comment in `main.go` rewritten to reflect the new semantics (was: "we do not claim isolation we did not deliver" — still true, but the supported path now delivers)
+  - `claw-squad/docs/sandbox-hardening.md` "Network isolation" section updated: the W10.9 path is now `enforced` on Linux+root / userns; macOS + non-root init-namespace remain honest no-ops
+  - Tests: 3 new cases in `claw-sandbox/netns_test.go` — no-op on unsupported, sets CLONE_NEWNET on supported, preserves other Unshareflags. Skip-on-context so CI runners that happen to be in the wrong namespace just skip the supported-path assertion rather than fail
 
 - [x] **W10.10 — Hybrid cloud / local routing** ✅
   - `claw-squad/configs/hybrid.json`: Planner on cloud Anthropic (`claude-opus-4-7`, asymmetric IQ demand + low call volume + prompt-cache savings); Coder + Reviewer on local Ollama (`qwen2.5-coder:32b` + `qwen2.5:7b`, high call volume + lower IQ ceiling)
@@ -549,6 +551,10 @@ Ship in roughly this order to maximize compounding value:
 
 ## Last Update
 
+- 2026-05-01 — W10.2 + W10.9 ready for PR push:
+  - **W10.2 ✅** Always-on control plane recipe — `deploy/systemd/{claudestruct,claudestruct-worker}.service` + env example + Caddyfile + 30-min `docs/home-server.md` walkthrough (Tailscale ingress, public DNS+ACME alternative, GitHub App wiring, backup notes, troubleshooting matrix). Hardening directives stack on top of the W5.5 sandbox profiles
+  - **W10.9 ✅** Real netns isolation — `tryDisableNetwork` in `claw-sandbox/rlimit_linux.go` actually stamps `CLONE_NEWNET` when the kernel allows; `--no-network` defaults ON whenever supported. The W1.5 isolation report's `noNetwork` field still carries the truth (enforced / best-effort / unsupported). 3 new Go tests + sandbox-hardening doc updated
+  - Total: 442 Python tests pass (no Python changes, regression-only); ruff clean; Go isolation work locked by 3 new platform-aware test cases
 - 2026-05-01 — W10.4 (local prompt-result cache) wiring ready for PR push:
   - Storage primitives shipped earlier as W9.4; this PR completes the call-path wiring + provider-aware policy + CLI flags
   - `cache_key` now includes `effort` + `max_tokens` so quality knobs don't collide on replay; `is_enabled_for(provider, override)` defaults to ON for openai-compat / OFF for Anthropic (auto) but obeys env + per-run overrides

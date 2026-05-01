@@ -91,13 +91,42 @@ func applyRLimits(cmd *exec.Cmd) {
 	})
 }
 
+// tryDisableNetwork attaches CLONE_NEWNET to the child via SysProcAttr
+// when the kernel will let us — real network isolation, not a no-op
+// (W10.9). Three branches:
+//
+//  1. Root (CAP_SYS_ADMIN): unshare(CLONE_NEWNET) succeeds; the child
+//     boots into a fresh network namespace with no interfaces beyond
+//     loopback. detectNetworkIsolationStatus() already returns
+//     "enforced" for this case so the structured isolation report
+//     matches what the kernel will actually do.
+//
+//  2. Non-root inside an unprivileged user namespace: also allowed —
+//     the child's network surface is whatever the parent userns can
+//     see, which is typically already isolated from the host.
+//     "best-effort".
+//
+//  3. Non-root in the init namespace: CLONE_NEWNET would EPERM. Skip
+//     attaching it; the isolation report has already declared
+//     "unsupported" so the caller knows what they got.
+//
+// Setting `Unshareflags` here means the *child* (the user's command)
+// runs in the new netns. The parent stays in the host network so we
+// can still read /proc/self/uid_map etc. for the report.
 func tryDisableNetwork(cmd *exec.Cmd) {
-	// Real network isolation requires unshare(CLONE_NEWNET) which requires
-	// CAP_SYS_ADMIN. We don't assume root; we print a warning in verbose
-	// mode and leave networking up. Users who need real isolation should
-	// run claw-sandbox inside a docker container or firejail.
-	//
-	// A future version can detect if we're already in an unprivileged
-	// user namespace and opt in. For now: honest no-op.
-	_ = cmd
+	status := detectNetworkIsolationStatus()
+	if status == statusUnsupported {
+		// Honest no-op: the kernel would reject the unshare request
+		// anyway. The isolation report's noNetwork field already
+		// surfaced "unsupported" so the caller has been warned.
+		return
+	}
+
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	// CLONE_NEWNET cuts the child off from the host's network
+	// namespace. The Go exec package handles the unshare() call
+	// post-fork-pre-exec for us.
+	cmd.SysProcAttr.Unshareflags |= syscall.CLONE_NEWNET
 }

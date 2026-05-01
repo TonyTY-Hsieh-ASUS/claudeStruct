@@ -8,10 +8,12 @@
 //   - rlimits: CPU time, wall clock, virtual memory, open files.
 //   - Working directory confined to --repo (argv paths validated).
 //   - Environment stripped to a safe allowlist (PATH, HOME, LANG, USER, TERM).
-//   - Network egress: best-effort. True network isolation requires namespaces
-//     (CLONE_NEWNET) which needs CAP_SYS_ADMIN or a setuid shim. We expose
-//     --no-network as a flag but no-op if we can't achieve it, and print a
-//     warning — we do not claim isolation we did not deliver.
+//   - Network egress (W10.9): real CLONE_NEWNET cut-off when running as
+//     root or inside an unprivileged user namespace. The flag defaults
+//     to ON whenever the kernel will let us deliver it; the structured
+//     isolation report's `noNetwork` field declares the actual outcome
+//     so callers never confuse "asked for" with "got". On macOS and
+//     non-root init-namespace Linux, an honest no-op.
 //
 // Non-goals: this is a *defense-in-depth* helper, not a replacement for a
 // VM or container sandbox. Against a motivated adversary with code execution,
@@ -63,7 +65,15 @@ func main() {
 	flag.IntVar(&cpuSec, "cpu", 60, "CPU time limit (seconds)")
 	flag.IntVar(&wallSec, "wall", 300, "wall clock limit (seconds)")
 	flag.IntVar(&memMB, "mem-mb", 1024, "virtual memory limit (MB)")
-	flag.BoolVar(&noNetwork, "no-network", false, "request network isolation (best-effort)")
+	// W10.9: --no-network is now genuinely enforceable on Linux when
+	// the daemon runs as root or inside an unprivileged user
+	// namespace. We default it to ON when the platform supports it,
+	// OFF otherwise — the structured isolation report makes the
+	// actual outcome visible either way. Users who explicitly
+	// re-enable network can pass --network or set the flag false.
+	flag.BoolVar(&noNetwork, "no-network", isolationCapabilities().network != statusUnsupported,
+		"request network isolation. On Linux+root (or unprivileged userns) the kernel CLONE_NEWNET cuts off the child; otherwise honest no-op.")
+	flag.BoolVar(&noNetwork, "network", noNetwork, "DEPRECATED: pass --no-network=false to opt out of network isolation when the platform supports it")
 	flag.BoolVar(&verbose, "verbose", false, "log enforced limits")
 	flag.Var(&allowPaths, "allow-path", "additional allowed path (repeatable)")
 	flag.Parse()

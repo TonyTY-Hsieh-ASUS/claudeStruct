@@ -1,0 +1,73 @@
+# systemd unit for `cs serve worker` (W10.2).
+#
+# Long-running daemon that drains queued `Run` rows from the DB and
+# executes them against Anthropic / Ollama / vLLM / SGLang. Sibling to
+# `claudestruct.service` (the API server). Both share the same
+# environment file + state dir; the API just enqueues, the worker
+# does the actual LLM call.
+#
+# Install: same flow as claudestruct.service plus
+#   sudo systemctl enable --now claudestruct-worker.service
+#
+# Scaling note: the current worker holds a single SELECT-FOR-UPDATE
+# slot per row, so running multiple instances of this service is
+# safe but wasted past 1× on SQLite. On Postgres, set Replicas in
+# the Helm chart instead — the W6.1 follow-up tracks the
+# coordination story for >1 worker.
+
+[Unit]
+Description=claudestruct background runner (cs serve worker)
+Documentation=https://github.com/tonyandclaw/claudeStruct/blob/main/docs/home-server.md
+After=claudestruct.service
+Wants=claudestruct.service
+Requires=network-online.target
+
+[Service]
+Type=simple
+User=claudestruct
+Group=claudestruct
+WorkingDirectory=/var/lib/claudestruct
+EnvironmentFile=/etc/claudestruct/env
+
+ExecStart=/usr/local/bin/cs serve worker \
+  --run-root /var/lib/claudestruct \
+  --poll-interval ${CLAUDESTRUCT_WORKER_POLL_INTERVAL:-1.0}
+
+# Graceful drain: let the in-flight LLM call finish before exiting.
+# 5 minutes covers a typical Coder/Reviewer round; bump for plan tasks.
+KillSignal=SIGINT
+TimeoutStopSec=300
+
+Restart=on-failure
+RestartSec=5
+
+# --- Hardening (same shape as the API service) ---
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/claudestruct /run/claudestruct
+StateDirectory=claudestruct
+RuntimeDirectory=claudestruct
+RuntimeDirectoryMode=0750
+
+LimitNOFILE=8192
+# Worker may spawn the local LLM client + several HTTP connections.
+TasksMax=1024
+
+[Install]
+WantedBy=multi-user.target

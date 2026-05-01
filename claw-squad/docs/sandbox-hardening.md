@@ -83,7 +83,20 @@ spec:
 
 ## Network isolation
 
-The built-in `--no-network` flag is `unsupported` on every platform today (see the per-run isolation report stanza). Real network namespacing needs `CAP_SYS_ADMIN` or an unprivileged user namespace plus `unshare(CLONE_NEWNET)` — both of which are themselves blocked by the seccomp profile above by design.
+As of **W10.9**, `--no-network` actually works on Linux when the
+sandbox runs as root or inside an unprivileged user namespace —
+`tryDisableNetwork` stamps `CLONE_NEWNET` on the child's
+`SysProcAttr.Unshareflags` and the kernel boots the child into a
+fresh, loopback-only network namespace. The structured isolation
+report's `noNetwork` field declares the actual outcome (`enforced`,
+`best-effort`, or `unsupported`) so callers never confuse "asked for"
+with "got". On macOS and non-root init-namespace Linux it remains
+an honest no-op.
+
+The flag now defaults to **on** whenever the platform supports
+real isolation, off otherwise. Pair it with the seccomp + AppArmor
+profiles above and the network surface from the Coder agent's
+perspective is: loopback only, no host namespace inheritance.
 
 The recommended path is to **enforce isolation outside the sandbox**:
 
