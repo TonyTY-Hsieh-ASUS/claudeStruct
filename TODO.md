@@ -507,11 +507,14 @@ Goal: turn the existing multi-tool stack into a first-class local-AI workstation
   - **Scope**: ~50 LOC bash + a sample crontab + 1 doc page.
   - **Win**: feeds the dashboards / alerts you've already built without anyone clicking buttons.
 
-- [ ] **W10.9 — Real network isolation for claw-sandbox on GX10**
-  - **Pain**: `--no-network` is `unsupported` on macOS and on non-root Linux. The W1.5 isolation report is honest about it but the actual protection is missing.
-  - **What**: on Linux + root (the GX10 default), use `unshare --net` to truly cut the Coder's network access, leaving only repo I/O. Default `--no-network` to ON when running on a system where the kernel + caps support it; emit a structured `noNetwork=enforced` line via the existing isolation report.
-  - **Scope**: ~30 LOC (mostly default-flag changes in `claw-sandbox/main.go`) + 2 tests + docs.
-  - **Win**: "private repo never leaves the box" upgrades from best-effort to enforced.
+- [x] **W10.9 — Real network isolation for claw-sandbox on GX10** ✅
+  - `tryDisableNetwork()` in `rlimit_linux.go` now sets `cmd.SysProcAttr.Cloneflags |= syscall.CLONE_NEWNET` when `isolationCapabilities().network` is `enforced` or `best-effort`. The kernel does the actual unsharing on `cmd.Start()`; no userspace `unshare` shim required
+  - `shouldDefaultNoNetwork()` (Linux: `network == statusEnforced`; non-Linux: `false`) drives the new auto-on default. `resolveNoNetwork()` in `main.go` is the policy gate — explicit `--no-network` wins, explicit `--allow-network` opts out, both flags resolve to OFF with a stderr warning, neither delegates to the host capability
+  - New `--allow-network` flag for `npm install` / `pip install` workflows. Existing scripts that pass `--no-network` still work; existing scripts that *don't* pass either flag get the new default ON only when running as root on Linux (the GX10 worker case) — non-root callers see no behaviour change
+  - 4 new tests in `claw-sandbox/resolve_test.go` (explicit-on wins, explicit-off opts out, conflict treated as off, no-flags follows host policy)
+  - `claw-squad/docs/sandbox-hardening.md` rewrites the network-isolation section with a host-config matrix and removes the "unsupported on every platform today" claim that's no longer true
+  - Header comments in `main.go` updated; `--help` output now reflects the auto-on default and the new opt-out flag
+  - Pure additive: zero behaviour change for hosts that can't actually enforce isolation
 
 - [x] **W10.10 — Hybrid cloud / local routing** ✅
   - `claw-squad/configs/hybrid.json`: Planner on cloud Anthropic (`claude-opus-4-7`, asymmetric IQ demand + low call volume + prompt-cache savings); Coder + Reviewer on local Ollama (`qwen2.5-coder:32b` + `qwen2.5:7b`, high call volume + lower IQ ceiling)

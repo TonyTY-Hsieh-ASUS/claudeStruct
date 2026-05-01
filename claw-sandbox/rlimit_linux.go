@@ -92,12 +92,30 @@ func applyRLimits(cmd *exec.Cmd) {
 }
 
 func tryDisableNetwork(cmd *exec.Cmd) {
-	// Real network isolation requires unshare(CLONE_NEWNET) which requires
-	// CAP_SYS_ADMIN. We don't assume root; we print a warning in verbose
-	// mode and leave networking up. Users who need real isolation should
-	// run claw-sandbox inside a docker container or firejail.
-	//
-	// A future version can detect if we're already in an unprivileged
-	// user namespace and opt in. For now: honest no-op.
-	_ = cmd
+	// Real network isolation via CLONE_NEWNET. Requires CAP_SYS_ADMIN —
+	// either real root (the GX10 home-server default) or an
+	// unprivileged user namespace where the running process holds caps
+	// against its enclosing userns. detectNetworkIsolationStatus()
+	// already gates on those two cases; we only set the flag when it
+	// reports something better than "unsupported" so cmd.Start() doesn't
+	// fail with EPERM on hosts that genuinely can't enforce.
+	caps := isolationCapabilities()
+	if caps.network == statusUnsupported {
+		// Honest no-op. Isolation report still prints "unsupported"
+		// so the operator knows.
+		return
+	}
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Cloneflags |= syscall.CLONE_NEWNET
+}
+
+// shouldDefaultNoNetwork returns true when --no-network should default
+// to ON for this run. The GX10 home-server case (Linux + root) gets
+// "private repo never leaves the box" without the operator having to
+// remember the flag; non-root callers keep today's default-OFF so we
+// don't break existing scripts.
+func shouldDefaultNoNetwork() bool {
+	return isolationCapabilities().network == statusEnforced
 }
