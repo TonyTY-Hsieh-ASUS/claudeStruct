@@ -132,6 +132,7 @@ Legend: `[ ]` pending · `[~]` in progress · `[x]` done
 ⏳ **Wave 6** (Q3a) — team collaboration
 ⏳ **Wave 7** (Q3b) — ecosystem & GTM
 ⏳ **Wave 8** (Q4) — hosted SaaS launch
+🆕 **Wave 9** (opt-in) — local-inference / GX10 ready
 
 The 1-3 roadmap is closed. Wave 4-8 below tracks the path to a "complete and commercializable" product. Target shape: **OSS dev tool + hosted SaaS (open core)**, **teams of 5-50 devs**, **~12 months**.
 
@@ -273,10 +274,14 @@ Goal: 5-50 devs share the tool with shared visibility, shared budgets, and team-
 
 Goal: distribution. Make the product discoverable, easy to install, and easy to extend.
 
-- [ ] **W7.1 — VS Code extension**
-  - Surfaces `cs review` on the diff in SCM gutter; `cs dev`/`cs debug` in command palette
-  - Uses daemon REST API when available, falls back to local CLI
-  - Published to VS Marketplace + Open VSX
+- [~] **W7.1 — VS Code extension** (sideload-only scaffold shipped; marketplace publish + SCM gutter deferred)
+  - `vscode-extension/` standalone TypeScript project with VS Code extension manifest. Not coupled to claw-squad's pnpm workspace — separate publishing target with its own dep tree
+  - Five commands: `claudeStruct: Review` / `Dev` / `Plan` / `Debug` / `Dashboard`. Review is one-click from explorer/editor context menu (palette, right-click on file, multi-select). Dev/Plan/Debug prompt for a description via `showInputBox`
+  - Output streams to a single `claudeStruct` Output Channel — no WebView (3x activation cost for marginal value over Rich's terminal output)
+  - Configuration surface (`claudestruct.cliPath`, `claudestruct.maxBytes`, `claudestruct.effort`, `claudestruct.extraArgs`) lets users point at venv-installed `cs`, override per-task budgets, append `--monthly-cap-usd` / `--log-json` flags
+  - Spawn / arg-build logic split into `runner.ts` so vitest can drive it without the `vscode` API. 13 cases cover every config-knob path (default review prompt, required-description guard, `--max-bytes` / `--effort` / `extraArgs` ordering, multi-path forwarding, full composition order, runCs streaming/spawn-error/non-zero exit)
+  - Sideload via `vsce package` + `code --install-extension` (documented in `vscode-extension/README.md`)
+  - Pending: SCM gutter integration (lights diff lines under `cs review`), daemon REST API client (falls back to local CLI), VS Marketplace + Open VSX publish (needs publisher account + signing)
 - [ ] **W7.2 — JetBrains plugin**
   - Same surface for IntelliJ / PyCharm / WebStorm; tool window for run history
   - Published to JetBrains Marketplace
@@ -358,7 +363,70 @@ Goal: a managed service teams pay for. Open-core split: Waves 4-7 OSS, Wave 8 ho
 
 ---
 
-## Optional Wave 9 — Enterprise top-up (deferred until Wave 8 lands enterprise contracts)
+## Wave 9 — Local-inference / GX10 ready (Q1+, opt-in)
+
+Goal: make claudeStruct usable end-to-end on a local AI workstation (Asus GX10 / NVIDIA DGX Spark, 128GB unified memory) with zero per-token cost. Each item below is independently mergeable; pick by value/effort.
+
+### Tier 1 — unblock the box
+
+- [ ] **W9.1 — claudestruct OpenAI-compat provider**
+  - Add `OpenAICompatClient` in `src/claudestruct/client.py` alongside the existing Anthropic path. Read `CLAUDESTRUCT_PROVIDER=openai|anthropic` (default `anthropic`) + `CLAUDESTRUCT_BASE_URL` + `CLAUDESTRUCT_MODEL`.
+  - Reuses existing prompt versioning + cost tracking (cost = 0 for local).
+  - ~80 LOC + 6-8 tests. Unblocks all four `cs dev/review/plan/debug` modes on local models.
+
+- [ ] **W9.2 — Always-on home-server packaging**
+  - `deploy/systemd/claudestruct.service` + `claw-squad.service` unit files.
+  - `docs/home-server.md` with Tailscale + Caddy reverse-proxy + self-signed TLS recipe; covers `cs serve worker` daemon mode + `claw-squad` Web UI on port 8787.
+  - ~150 LOC docs + units. No code changes; repurposes existing daemon/web-UI/auth surfaces.
+
+- [ ] **W9.3 — claw-squad GX10 preset config**
+  - New `claw-squad/configs/local-gx10.json`: Planner=QwQ-32B, Coder=Qwen2.5-Coder-32B, Reviewer=Qwen2.5-7B, Subagent=Llama-3.2-3B, all targeting `http://localhost:11434/v1` (ollama) or `:8000/v1` (vllm).
+  - `--preset gx10` CLI flag in `claw-squad run` to load it. Docs in `claw-squad/docs/local-models.md`.
+  - ~50 LOC + 3 tests.
+
+### Tier 2 — exploit local-only capabilities
+
+- [x] **W9.4 — Local prompt-cache (content-hashed)** — module shipped; CLI wiring pending
+  - `src/claudestruct/local_cache.py`: SHA-256 of `(provider, model, system, messages)` → cached `(text, usage, created_at)` blob in `~/.claudestruct/llm_cache/<aa>/<sha>.json` (two-level shard for scale). Atomic write-tmp-then-rename; corruption treated as miss (single bad file can't poison reads).
+  - `is_enabled()` reads `CLAUDESTRUCT_LLM_CACHE`; `stats()` + `clear()` for `cs dashboard` integration.
+  - 30 new tests. CLI flag `--llm-cache` + integration into `client.py` deferred to W9.1 PR (it'll wire alongside the OpenAI-compat client).
+
+- [ ] **W9.5 — RAG-style smart context gathering**
+  - `cs index` subcommand: walks the repo, embeds files via local embedding model (`nomic-embed-text` over ollama / sentence-transformers), stores in `sqlite-vec` at `~/.claudestruct/embeddings.db`.
+  - `gather_*_context` consults the index for semantic top-K when `--smart-context` is set; falls back to glob-based today's behaviour otherwise.
+  - ~300 LOC + 12 tests. Requires `[smart-context]` extra (sqlite-vec optional dep).
+
+- [ ] **W9.6 — Dataset export for fine-tuning**
+  - `cs dataset export --out <path>` + `claw-squad dataset export --out <path>` walks `.claudestruct/runs/*.jsonl` / `.claw-squad/runs/*.jsonl`, emits `{prompt, completion, role, outcome}` JSONL pairs. Filters: `--role coder`, `--status done`, `--since YYYY-MM-DD`.
+  - Output is consumable by axolotl / unsloth / TRL on a GX10 for LoRA fine-tuning of the Reviewer or Coder role.
+  - ~230 LOC (export tooling, no training code) + 10 tests.
+
+- [ ] **W9.7 — Voice REPL (`cs voice` / `claw-squad voice`)**
+  - `faster-whisper` (optional dep, declared as `[voice]` extra) lazy-imported. CLI captures mic via `sounddevice`, transcribes, pipes to `cs dev/review/plan/debug` or `claw-squad run`.
+  - `--language zh-tw` flag for Traditional Chinese. STT runs locally on GX10 (latency < 200ms for 5s audio).
+  - ~150 LOC + 4 tests (mocked stream).
+
+### Tier 3 — operational polish
+
+- [ ] **W9.8 — Nightly code-health守門員**
+  - `scripts/nightly-review.sh` + systemd timer: every night runs `cs review` against the last N commits on main, drops events into the run log, alerts via the existing W6.5 cost-regression notifier when quality regresses.
+  - ~50 LOC bash + crontab/systemd timer template. Pure config, no code changes.
+
+- [ ] **W9.9 — claw-sandbox真網路隔離 default-on under Linux**
+  - On Linux + root / userns, switch `--no-network` from "best-effort" to enforced via `unshare --net`. Default `claw-sandbox --no-network` for all `Coder` calls in `claw-squad`; opt-out via `--allow-network` for tasks that need npm install / curl.
+  - ~30 LOC + docs. Closes the "private repo never leaves the network" loop for GX10 Linux hosts.
+
+- [ ] **W9.10 — Hybrid cloud-local mode (config-only)**
+  - Doc-only: a recipe + sample config showing Planner on Anthropic Sonnet (heavy reasoning), Coder + Reviewer on GX10. Uses existing per-role provider override; **0 new LOC** — just docs.
+  - `docs/hybrid-mode.md` with full config example + cost / latency comparison table.
+
+### Reopen criteria
+
+Order matters: W9.1 must land before any `cs *` subcommand can run on GX10. W9.4 + W9.5 both depend on W9.1 (they hook into the LLM call path). W9.6 / W9.7 / W9.10 are independent. W9.8 depends on W6.5 (already shipped).
+
+---
+
+## Optional Wave 10 — Enterprise top-up (deferred until Wave 8 lands enterprise contracts)
 
 - SAML 2.0 SSO (Okta, Azure AD)
 - SCIM 2.0 user provisioning
@@ -368,6 +436,89 @@ Goal: a managed service teams pay for. Open-core split: Waves 4-7 OSS, Wave 8 ho
 - Air-gapped self-hosted edition (Helm chart for fully-isolated installs)
 
 Reopen criterion: a signed enterprise contract or three serious leads asking for any item above.
+
+---
+
+## Wave 10 — GX10 / local-first (Asus GX10: 128 GB unified memory, always-on, Linux)
+
+Goal: turn the existing multi-tool stack into a first-class local-AI workstation experience that **doesn't need cloud Anthropic to be useful**. The Asus GX10's 128 GB unified memory + always-on Linux is the hardware target; items are ranked by how directly they exploit those traits.
+
+### Tier 1 — Hits GX10's strengths head-on
+
+- [ ] **W10.1 — claudestruct OpenAI-compat client** (must-do)
+  - **Pain**: `cs dev/review/plan/debug` is hardwired to `anthropic.Anthropic`, so on GX10 the entire Python CLI is dead weight without cloud access.
+  - **What**: extend `src/claudestruct/client.py` with an `OpenAICompatClient` selectable via `CLAUDESTRUCT_PROVIDER=openai|anthropic` + `CLAUDESTRUCT_BASE_URL`. Reuse the existing streaming + cost accounting code paths; keep prompt-cache breakpoints under Anthropic only.
+  - **Scope**: ~80 LOC + 6–8 tests (`test_client_openai_compat.py`).
+  - **Win**: every `cs` task runs on GX10 against Ollama / vLLM / SGLang at zero cloud cost.
+
+- [ ] **W10.2 — Always-on home / company control plane**
+  - **Pain**: `cs serve run` already exists but the deploy story is bare — no systemd unit, no reverse-proxy / Tailscale recipe, no self-signed TLS guidance. GitHub App webhooks + cost-regression alerts + SLO endpoint only earn their keep when the daemon is 24/7.
+  - **What**: ship `deploy/systemd/claudestruct.service` + `deploy/systemd/claudestruct-worker.service` + `docs/home-server.md` (Tailscale Funnel for inbound webhooks, Caddy reverse-proxy snippet, port-not-exposed-publicly walkthrough, `cs serve init-db` first-run checklist).
+  - **Scope**: ~150 LOC docs + unit files; no Python changes.
+  - **Win**: the multi-tenant scaffolding from Waves 6–8 actually gets wired up on real hardware.
+
+- [ ] **W10.3 — Per-role local-model presets for claw-squad**
+  - **Pain**: claw-squad supports per-role providers (W1.x) but ships no opinionated preset for the local-AI workstation case.
+  - **What**: add `claw-squad/configs/local-gx10.json` — Planner=QwQ-32B (reasoning), Coder=Qwen2.5-Coder-32B (code), Reviewer=Qwen2.5-7B (speed), Subagent=Llama-3.2-3B (delegation). Wire `--preset gx10` (and a sibling `--preset local-laptop` for Apple Silicon) that loads the JSON without disturbing the existing config-merge precedence.
+  - **Scope**: ~50 LOC (preset loader + 2 fixtures) + 4 tests.
+  - **Win**: open-the-box GX10 experience — no model-spelunking required.
+
+### Tier 2 — Things Anthropic can't do (but a beefy local box can)
+
+- [ ] **W10.4 — Local prompt-result cache (content-hashed)**
+  - **Pain**: Anthropic's 1h server-side prompt cache evaporates entirely on local models, so iterating on the same code re-runs the LLM every time.
+  - **What**: new `src/claudestruct/local_cache.py` keyed on `sha256(system + messages + model)`; persist last N responses under `~/.claudestruct/llm_cache/`. Cache hit short-circuits the LLM call and surfaces a "cached" badge in the run log so users know the response is replayed, not fresh. Cache opt-out flag for force-refresh.
+  - **Scope**: ~120 LOC + 8 tests (hash determinism, eviction, opt-out, `--log-json` event).
+  - **Win**: dry-runs and regression tests become sub-second; CI replays of golden runs cost zero.
+
+- [ ] **W10.5 — RAG-style smart context with local embeddings**
+  - **Pain**: `context.py` walks the repo via globs and clips at `--max-bytes`. Large monorepos either OOM or send mostly-irrelevant files.
+  - **What**: `cs index` builds a local embedding index (e.g. `nomic-embed-text` via Ollama) into `~/.claudestruct/index/<repo-sha>.db` (sqlite-vec or hnswlib). New `cs review --semantic` / `cs dev --semantic` flag swaps the gatherer for a top-K semantic retriever; per-task budget still enforced. The 128 GB headroom on GX10 trivially holds embedding model + Coder LLM concurrently.
+  - **Scope**: ~300 LOC + 12 tests (index build, query top-K, budget intersection, opt-out fallback).
+  - **Win**: review quality on 100k+-file repos jumps from "guessed at random" to "actually about the diff".
+
+- [ ] **W10.6 — Reviewer fine-tuning from run-log history**
+  - **Pain**: Reviewer is the role most likely to benefit from "company style" but currently uses generic models.
+  - **What**: extract `(diff, review)` pairs from existing `.claudestruct/runs/*.jsonl` + `.claw-squad/runs/*.jsonl` into a LoRA-friendly dataset. Ship `cs dataset export` + `claw-squad dataset export` (JSONL with `instruction` / `input` / `output` keys, configurable filter on review verdict). Add `scripts/finetune-reviewer.sh` with an unsloth/axolotl invocation that runs natively on GX10's memory budget.
+  - **Scope**: ~150 LOC dataset export + ~80 LOC training scaffold + 5 tests.
+  - **Win**: a Reviewer that codifies your team's style — closer to a senior engineer than a generic Sonnet review.
+
+- [ ] **W10.7 — Voice REPL via local Whisper**
+  - **Pain**: typing a multi-paragraph dev/debug description from scratch is slow; the cs flow has no audio surface.
+  - **What**: `cs voice` subcommand wraps `faster-whisper` (CPU or CUDA via the same Linux box). Streams microphone → STT → `cs dev` / `cs review` with the transcribed text pre-filled (user can edit before send). Sub-200ms STT latency on GX10's compute budget.
+  - **Scope**: ~150 LOC + 4 tests (mock audio stream, mock whisper client, cancel mid-stream, append-vs-replace behavior).
+  - **Win**: hands-busy / car / kitchen workflows stay productive.
+
+### Tier 3 — Push existing abstractions to the limit
+
+- [ ] **W10.8 — Nightly code-health watchdog**
+  - **Pain**: cost-regression alerts (W6.5) need data to be useful; without scheduled runs the dashboard stays sparse.
+  - **What**: `scripts/nightly-review.sh` + `deploy/systemd/claudestruct-nightly.timer`: every night, `cs review` the last 3 commits on `main`, drop results into `.claudestruct/runs/`. Morning `cs dashboard` shows the week's code-quality drift.
+  - **Scope**: ~50 LOC bash + a sample crontab + 1 doc page.
+  - **Win**: feeds the dashboards / alerts you've already built without anyone clicking buttons.
+
+- [ ] **W10.9 — Real network isolation for claw-sandbox on GX10**
+  - **Pain**: `--no-network` is `unsupported` on macOS and on non-root Linux. The W1.5 isolation report is honest about it but the actual protection is missing.
+  - **What**: on Linux + root (the GX10 default), use `unshare --net` to truly cut the Coder's network access, leaving only repo I/O. Default `--no-network` to ON when running on a system where the kernel + caps support it; emit a structured `noNetwork=enforced` line via the existing isolation report.
+  - **Scope**: ~30 LOC (mostly default-flag changes in `claw-sandbox/main.go`) + 2 tests + docs.
+  - **Win**: "private repo never leaves the box" upgrades from best-effort to enforced.
+
+- [ ] **W10.10 — Hybrid cloud / local routing**
+  - **Pain**: pure-local quality < cloud Sonnet for hard reasoning, but pure-cloud is expensive at high agent volume.
+  - **What**: a `configs/hybrid.json` showing Planner=Anthropic Sonnet (strong reasoning, low call volume), Coder + Reviewer = local GX10 (high volume, lower per-call IQ ceiling). Plus `docs/hybrid-routing.md` explaining when each role benefits from cloud vs local. The per-role config in claw-squad already supports this — **0 LOC**, this is purely a recipe + docs item.
+  - **Scope**: ~0 code, 1 config fixture, 1 doc page.
+  - **Win**: 80 % of cloud quality at 20 % of cloud cost for a typical agent run.
+
+### Sequencing recommendation
+
+Ship in roughly this order to maximize compounding value:
+1. **W10.1** (OpenAI-compat client) — unblocks all the others on the Python side.
+2. **W10.3** (preset) + **W10.10** (hybrid recipe) — both are tiny and immediately demonstrate the value of W10.1.
+3. **W10.4** (local cache) — every subsequent dev-loop becomes faster.
+4. **W10.2** (systemd / Tailscale docs) — required before W10.8 nightly + W6.6 webhooks have anywhere reliable to land.
+5. **W10.9** (real netns isolation) — small change, big trust upgrade.
+6. **W10.5** (RAG context) and **W10.6** (Reviewer fine-tune) — biggest engineering lifts; take them last when the feedback loops are tight.
+7. **W10.7** (voice) and **W10.8** (nightly) — polish / habit features.
 
 ---
 
@@ -390,6 +541,14 @@ Reopen criterion: a signed enterprise contract or three serious leads asking for
 
 ## Last Update
 
+- 2026-04-30 — Wave 10 (GX10 / local-first) added: 10 items targeting the Asus GX10 (128 GB unified memory, always-on Linux). Tier 1 (OpenAI-compat client / always-on control plane / per-role local presets) directly unblocks the existing stack on local hardware; Tier 2 (local cache / RAG context / Reviewer fine-tune / voice REPL) leverages the box's headroom; Tier 3 (nightly watchdog / real netns / hybrid routing) polishes existing abstractions. Sequencing recommendation embedded so future PRs pick the highest-leverage item next.
+- 2026-04-28 — W7.1 VS Code extension scaffold ready for PR push:
+  - New `vscode-extension/` standalone project (its own package.json + tsconfig + node_modules — separate publishing target from claw-squad's pnpm workspace)
+  - 5 commands (Review / Dev / Plan / Debug / Dashboard) registered with right-click + palette entries; output streams to a single `claudeStruct` Output Channel
+  - Pure-logic `runner.ts` split out for vitest coverage (13 cases passing, type-check clean) so the test suite doesn't need the VS Code API harness
+  - Configurable `cliPath` / `maxBytes` / `effort` / `extraArgs` for venv setups + monthly-cap / log-json passthrough
+  - Sideload-only for now (`vsce package` + `code --install-extension`); marketplace publish + SCM gutter integration tracked in the W7.1 follow-up
+  - Total: 382 Python tests + 13 new VS Code vitest cases pass; ruff clean
 - 2026-04-29 — claw-squad MCP server shipped:
   - `src/mcp/handlers.ts` with four read-only tools (`claw_squad_dashboard`, `claw_squad_dashboard_diff`, `claw_squad_runs_list`, `claw_squad_runs_purge`) — pure dict-in / dict-out so tests don't need the SDK
   - `src/mcp/server.ts` stdio bootstrap; lazy-imports `@modelcontextprotocol/sdk` (declared in `optionalDependencies` so default installs stay lean — mirrors the OTel pattern)
