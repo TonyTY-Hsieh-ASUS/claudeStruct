@@ -24,8 +24,8 @@ import json
 import os
 import urllib.error
 import urllib.request
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Sequence
 
 DEFAULT_BASE_URL = "http://localhost:11434/v1"
 DEFAULT_MODEL = "nomic-embed-text"

@@ -25,9 +25,9 @@ import json
 import math
 import os
 import sqlite3
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
 
 
 def _repo_fingerprint(root: Path) -> str:
@@ -98,14 +98,14 @@ class Index:
         self._conn = conn
 
     @classmethod
-    def open(cls, root: Path, *, index_root: Path | None = None) -> "Index":
+    def open(cls, root: Path, *, index_root: Path | None = None) -> Index:
         path = index_path(root, index_root=index_root)
         path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(path)
         conn.executescript(_SCHEMA)
         return cls(conn)
 
-    def __enter__(self) -> "Index":
+    def __enter__(self) -> Index:
         return self
 
     def __exit__(self, *exc) -> None:
@@ -221,7 +221,7 @@ def _dot(a: Sequence[float], b: Sequence[float]) -> float:
         raise ValueError(
             f"embedding dim mismatch: {len(a)} vs {len(b)}; rebuild the index"
         )
-    return sum(x * y for x, y in zip(a, b))
+    return sum(x * y for x, y in zip(a, b, strict=True))
 
 
 def _norm(a: Sequence[float]) -> float:

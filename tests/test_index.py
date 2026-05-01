@@ -2,15 +2,14 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
 
 import pytest
 
 from claudestruct import index as index_mod
 from claudestruct import indexer as indexer_mod
-
 
 # --- Index storage --------------------------------------------------
 

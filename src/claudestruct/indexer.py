@@ -80,7 +80,7 @@ def build_index(
             if not pending_paths:
                 return
             vectors = embed.embed_batch(pending_texts)
-            idx.upsert_many(zip(pending_paths, pending_shas, vectors))
+            idx.upsert_many(zip(pending_paths, pending_shas, vectors, strict=True))
             embedded += len(pending_paths)
             if progress is not None:
                 progress(f"embedded batch of {len(pending_paths)} (total: {embedded})")
