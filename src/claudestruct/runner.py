@@ -20,6 +20,7 @@ What does NOT live here:
 """
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -168,6 +169,19 @@ def run_task_and_log(
                 cache_creation_tokens=result.cache_creation_tokens,
                 cost_usd=cost,
             ))
+            # W10.6: opt-in IO capture so the run log can feed
+            # `cs dataset export` for LoRA fine-tuning. The redactor
+            # already runs over every event in fanout_log, so secrets
+            # and PII are stripped before disk write — but operators
+            # should still review their use case before flipping this
+            # on (raw prompts often contain proprietary code).
+            if _log_prompts_enabled():
+                sink.write(event_log.run_io(
+                    task=task,
+                    model=result.model,
+                    description=description,
+                    response_text=result.text,
+                ))
             if result.cache_warning:
                 sink.write(event_log.cache_warning(result.cache_warning))
             duration_ms = int((time.monotonic() - started) * 1000)
@@ -187,3 +201,11 @@ def run_task_and_log(
         context_total_bytes=ctx.total_bytes,
         auto_log_path=auto_path,
     )
+
+
+def _log_prompts_enabled() -> bool:
+    """Privacy default-off. Set ``CLAUDESTRUCT_LOG_PROMPTS=1`` (or
+    ``true``/``yes``/``on``) to capture the prompt + response in the
+    run log for later mining via ``cs dataset export``."""
+    v = os.environ.get("CLAUDESTRUCT_LOG_PROMPTS", "").strip().lower()
+    return v in {"1", "true", "yes", "on"}

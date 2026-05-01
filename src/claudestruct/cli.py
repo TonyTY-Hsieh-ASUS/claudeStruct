@@ -317,6 +317,53 @@ def tokens_cmd(task, description, paths, root, model):
     console.print(f"{tokens}")
 
 
+@main.group("dataset", help="Mine the run-log directory for fine-tuning datasets (W10.6).")
+def dataset_group() -> None:
+    pass
+
+
+@dataset_group.command("export", help="Walk .claudestruct/runs/*.jsonl and write a training-format JSONL.")
+@click.option("--out", "out_path", type=click.Path(dir_okay=False), required=True,
+              help="Output JSONL path. Created (or overwritten) by this command.")
+@click.option("--root", type=click.Path(exists=True, file_okay=False), default=None,
+              help="Repo root whose .claudestruct/runs/ feeds the export. Defaults to cwd.")
+@click.option("--task", type=click.Choice(["dev", "review", "plan", "debug"]), default=None,
+              help="Filter by task. Default: include all four.")
+@click.option("--since", "since_str", type=str, default=None,
+              help="Filter to events on or after this date (YYYY-MM-DD or ISO 8601).")
+@click.option("--format", "fmt", type=click.Choice(["alpaca", "chat"]), default="alpaca",
+              show_default=True,
+              help="Output schema. alpaca = {instruction,input,output}; chat = {messages: [...]}.")
+def dataset_export_cmd(out_path: str, root: str | None, task: str | None,
+                       since_str: str | None, fmt: str) -> None:
+    from claudestruct.dataset import export_dataset, parse_since
+
+    since = None
+    if since_str:
+        try:
+            since = parse_since(since_str)
+        except ValueError as exc:
+            err.print(f"[red]{exc}[/red]")
+            sys.exit(2)
+
+    stats = export_dataset(
+        _resolve_root(root),
+        Path(out_path),
+        fmt=fmt,
+        task=task,
+        since=since,
+    )
+    if stats.rows == 0:
+        err.print(
+            "[yellow]wrote 0 rows. CLAUDESTRUCT_LOG_PROMPTS=1 must be set "
+            "*before* a run for that run's IO to be exported.[/yellow]"
+        )
+    note = ""
+    if stats.skipped_no_io:
+        note = f" ({stats.skipped_no_io} event(s) skipped: missing IO fields)"
+    console.print(f"wrote {stats.rows} row(s) to {stats.output_path}{note}")
+
+
 @main.command("context", help="Print the context that would be gathered for a task.")
 @click.argument("task", type=click.Choice(list(GATHERERS)))
 @click.argument("paths", nargs=-1, type=click.Path())
