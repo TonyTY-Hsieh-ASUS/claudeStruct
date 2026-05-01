@@ -209,3 +209,34 @@ def run_end(
         "durationMs": duration_ms,
         "totalCostUsd": total_cost_usd,
     }
+
+
+# W10.6 — opt-in IO capture for fine-tuning datasets. Off by default
+# because logging the raw prompt + response can leak source code, PII,
+# and credentials into the run-log directory. Enable via
+# CLAUDESTRUCT_LOG_PROMPTS=1 when you specifically want to mine the
+# logs with `cs dataset export`.
+#
+# Response text is capped because some models will happily emit
+# 200k+ tokens before stop_reason fires; uncapped that turns each run
+# log into an unreadable wall.
+_RUN_IO_RESPONSE_CAP = 100 * 1024  # 100 KB
+
+
+def run_io(
+    *,
+    task: str,
+    model: str,
+    description: str,
+    response_text: str,
+) -> dict[str, Any]:
+    truncated = response_text[:_RUN_IO_RESPONSE_CAP]
+    return {
+        "ts": _now_iso(),
+        "type": "run.io",
+        "task": task,
+        "model": model,
+        "description": description,
+        "responseText": truncated,
+        "responseTruncated": len(response_text) > _RUN_IO_RESPONSE_CAP,
+    }
