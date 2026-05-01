@@ -132,6 +132,7 @@ Legend: `[ ]` pending · `[~]` in progress · `[x]` done
 ⏳ **Wave 6** (Q3a) — team collaboration
 ⏳ **Wave 7** (Q3b) — ecosystem & GTM
 ⏳ **Wave 8** (Q4) — hosted SaaS launch
+🆕 **Wave 9** (opt-in) — local-inference / GX10 ready
 
 The 1-3 roadmap is closed. Wave 4-8 below tracks the path to a "complete and commercializable" product. Target shape: **OSS dev tool + hosted SaaS (open core)**, **teams of 5-50 devs**, **~12 months**.
 
@@ -362,7 +363,70 @@ Goal: a managed service teams pay for. Open-core split: Waves 4-7 OSS, Wave 8 ho
 
 ---
 
-## Optional Wave 9 — Enterprise top-up (deferred until Wave 8 lands enterprise contracts)
+## Wave 9 — Local-inference / GX10 ready (Q1+, opt-in)
+
+Goal: make claudeStruct usable end-to-end on a local AI workstation (Asus GX10 / NVIDIA DGX Spark, 128GB unified memory) with zero per-token cost. Each item below is independently mergeable; pick by value/effort.
+
+### Tier 1 — unblock the box
+
+- [ ] **W9.1 — claudestruct OpenAI-compat provider**
+  - Add `OpenAICompatClient` in `src/claudestruct/client.py` alongside the existing Anthropic path. Read `CLAUDESTRUCT_PROVIDER=openai|anthropic` (default `anthropic`) + `CLAUDESTRUCT_BASE_URL` + `CLAUDESTRUCT_MODEL`.
+  - Reuses existing prompt versioning + cost tracking (cost = 0 for local).
+  - ~80 LOC + 6-8 tests. Unblocks all four `cs dev/review/plan/debug` modes on local models.
+
+- [ ] **W9.2 — Always-on home-server packaging**
+  - `deploy/systemd/claudestruct.service` + `claw-squad.service` unit files.
+  - `docs/home-server.md` with Tailscale + Caddy reverse-proxy + self-signed TLS recipe; covers `cs serve worker` daemon mode + `claw-squad` Web UI on port 8787.
+  - ~150 LOC docs + units. No code changes; repurposes existing daemon/web-UI/auth surfaces.
+
+- [ ] **W9.3 — claw-squad GX10 preset config**
+  - New `claw-squad/configs/local-gx10.json`: Planner=QwQ-32B, Coder=Qwen2.5-Coder-32B, Reviewer=Qwen2.5-7B, Subagent=Llama-3.2-3B, all targeting `http://localhost:11434/v1` (ollama) or `:8000/v1` (vllm).
+  - `--preset gx10` CLI flag in `claw-squad run` to load it. Docs in `claw-squad/docs/local-models.md`.
+  - ~50 LOC + 3 tests.
+
+### Tier 2 — exploit local-only capabilities
+
+- [x] **W9.4 — Local prompt-cache (content-hashed)** — module shipped; CLI wiring pending
+  - `src/claudestruct/local_cache.py`: SHA-256 of `(provider, model, system, messages)` → cached `(text, usage, created_at)` blob in `~/.claudestruct/llm_cache/<aa>/<sha>.json` (two-level shard for scale). Atomic write-tmp-then-rename; corruption treated as miss (single bad file can't poison reads).
+  - `is_enabled()` reads `CLAUDESTRUCT_LLM_CACHE`; `stats()` + `clear()` for `cs dashboard` integration.
+  - 30 new tests. CLI flag `--llm-cache` + integration into `client.py` deferred to W9.1 PR (it'll wire alongside the OpenAI-compat client).
+
+- [ ] **W9.5 — RAG-style smart context gathering**
+  - `cs index` subcommand: walks the repo, embeds files via local embedding model (`nomic-embed-text` over ollama / sentence-transformers), stores in `sqlite-vec` at `~/.claudestruct/embeddings.db`.
+  - `gather_*_context` consults the index for semantic top-K when `--smart-context` is set; falls back to glob-based today's behaviour otherwise.
+  - ~300 LOC + 12 tests. Requires `[smart-context]` extra (sqlite-vec optional dep).
+
+- [ ] **W9.6 — Dataset export for fine-tuning**
+  - `cs dataset export --out <path>` + `claw-squad dataset export --out <path>` walks `.claudestruct/runs/*.jsonl` / `.claw-squad/runs/*.jsonl`, emits `{prompt, completion, role, outcome}` JSONL pairs. Filters: `--role coder`, `--status done`, `--since YYYY-MM-DD`.
+  - Output is consumable by axolotl / unsloth / TRL on a GX10 for LoRA fine-tuning of the Reviewer or Coder role.
+  - ~230 LOC (export tooling, no training code) + 10 tests.
+
+- [ ] **W9.7 — Voice REPL (`cs voice` / `claw-squad voice`)**
+  - `faster-whisper` (optional dep, declared as `[voice]` extra) lazy-imported. CLI captures mic via `sounddevice`, transcribes, pipes to `cs dev/review/plan/debug` or `claw-squad run`.
+  - `--language zh-tw` flag for Traditional Chinese. STT runs locally on GX10 (latency < 200ms for 5s audio).
+  - ~150 LOC + 4 tests (mocked stream).
+
+### Tier 3 — operational polish
+
+- [ ] **W9.8 — Nightly code-health守門員**
+  - `scripts/nightly-review.sh` + systemd timer: every night runs `cs review` against the last N commits on main, drops events into the run log, alerts via the existing W6.5 cost-regression notifier when quality regresses.
+  - ~50 LOC bash + crontab/systemd timer template. Pure config, no code changes.
+
+- [ ] **W9.9 — claw-sandbox真網路隔離 default-on under Linux**
+  - On Linux + root / userns, switch `--no-network` from "best-effort" to enforced via `unshare --net`. Default `claw-sandbox --no-network` for all `Coder` calls in `claw-squad`; opt-out via `--allow-network` for tasks that need npm install / curl.
+  - ~30 LOC + docs. Closes the "private repo never leaves the network" loop for GX10 Linux hosts.
+
+- [ ] **W9.10 — Hybrid cloud-local mode (config-only)**
+  - Doc-only: a recipe + sample config showing Planner on Anthropic Sonnet (heavy reasoning), Coder + Reviewer on GX10. Uses existing per-role provider override; **0 new LOC** — just docs.
+  - `docs/hybrid-mode.md` with full config example + cost / latency comparison table.
+
+### Reopen criteria
+
+Order matters: W9.1 must land before any `cs *` subcommand can run on GX10. W9.4 + W9.5 both depend on W9.1 (they hook into the LLM call path). W9.6 / W9.7 / W9.10 are independent. W9.8 depends on W6.5 (already shipped).
+
+---
+
+## Optional Wave 10 — Enterprise top-up (deferred until Wave 8 lands enterprise contracts)
 
 - SAML 2.0 SSO (Okta, Azure AD)
 - SCIM 2.0 user provisioning
