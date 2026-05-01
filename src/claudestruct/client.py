@@ -52,6 +52,11 @@ class RunResult:
     model: str
     cache_warning: str | None = None
     provider: str = "anthropic"
+    # W10.4: True when the response was served from the local
+    # content-hashed cache instead of a fresh LLM call. Renders as
+    # a "(cached)" badge in the CLI summary so users know they're
+    # seeing a replay, not a fresh roll.
+    cached: bool = False
 
     @property
     def cached_fraction(self) -> float:
@@ -126,13 +131,24 @@ def run_task(
     max_tokens: int = DEFAULT_MAX_TOKENS,
     effort: str | None = None,
     stream_callback=None,
+    llm_cache: str | None = None,
 ) -> RunResult:
     """Run a task, streaming output via callback, and return usage stats.
 
     `stream_callback(text_chunk: str)` is invoked for each streamed text delta
     so the CLI can print live. If None, output is silent and only available in
     the returned RunResult.
+
+    `llm_cache` (W10.4) overrides the env-driven local-cache policy:
+      * ``"on"``  — always serve from / write to ``~/.claudestruct/llm_cache``
+      * ``"off"`` — never touch the cache (force a fresh LLM call)
+      * ``None``  — use ``CLAUDESTRUCT_LLM_CACHE`` env (default ``auto``:
+        on for openai-compat, off for anthropic)
+    A cache hit short-circuits the LLM call entirely and returns a
+    `RunResult` with `cached=True` so callers can render a "(cached)"
+    badge.
     """
+    from claudestruct import local_cache
     from claudestruct.prompts import TASK_PROMPTS
 
     if task not in TASK_PROMPTS:
@@ -141,6 +157,38 @@ def run_task(
         )
 
     provider, resolved_model = _resolve_model(model)
+    cache_active = local_cache.is_enabled_for(provider.name, override=llm_cache)
+    cache_key_hex: str | None = None
+    if cache_active:
+        cache_key_hex = local_cache.cache_key(
+            provider=provider.name,
+            model=resolved_model,
+            system=TASK_PROMPTS[task],
+            messages=[{"role": "user", "content": user_message}],
+            effort=effort,
+            max_tokens=max_tokens,
+        )
+        cached = local_cache.get(cache_key_hex)
+        if cached is not None:
+            # Replay the body through the stream callback once so the
+            # caller's render path doesn't have to special-case "no
+            # streaming" — they still see the text scroll, just all at
+            # once. The "(cached)" badge in `_render_usage` tells them
+            # it's a replay.
+            if stream_callback is not None and cached.text:
+                stream_callback(cached.text)
+            return RunResult(
+                text=cached.text,
+                input_tokens=cached.input_tokens,
+                output_tokens=cached.output_tokens,
+                cache_creation_tokens=cached.cache_creation_tokens,
+                cache_read_tokens=cached.cache_read_tokens,
+                stop_reason="cached",
+                model=resolved_model,
+                provider=provider.name,
+                cached=True,
+            )
+
     raw = provider.run_task(
         task=task,
         user_message=user_message,
@@ -159,6 +207,26 @@ def run_task(
         task=task, model=resolved_model,
         cache_creation=cache_creation, cache_read=cache_read,
     )
+
+    # Best-effort cache write. A full disk / permissions issue must not
+    # abort the user's run — we just log a stderr warning and continue.
+    if cache_active and cache_key_hex is not None:
+        try:
+            local_cache.put(
+                cache_key_hex,
+                local_cache.CachedResponse(
+                    text=raw.get("text", ""),
+                    input_tokens=int(raw.get("input_tokens", 0) or 0),
+                    output_tokens=int(raw.get("output_tokens", 0) or 0),
+                    cache_read_tokens=cache_read,
+                    cache_creation_tokens=cache_creation,
+                    created_at=local_cache.now(),
+                ),
+            )
+        except OSError as exc:
+            import sys
+            sys.stderr.write(f"[llm_cache] write failed: {exc}\n")
+
     return RunResult(
         text=raw["text"],
         input_tokens=int(raw.get("input_tokens", 0) or 0),
@@ -169,6 +237,7 @@ def run_task(
         model=raw.get("model") or resolved_model,
         cache_warning=warning,
         provider=provider.name,
+        cached=False,
     )
 
 

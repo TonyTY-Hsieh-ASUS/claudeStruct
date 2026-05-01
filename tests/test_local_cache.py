@@ -176,6 +176,78 @@ def test_is_enabled_falsy_values(monkeypatch, val: str):
     assert local_cache.is_enabled() is False
 
 
+# --- is_enabled_for (provider-aware policy, W10.4) ------------------
+
+
+def test_is_enabled_for_auto_anthropic_off(monkeypatch):
+    """`auto` policy: cloud Anthropic gets cache OFF (the SDK already
+    handles server-side ephemeral caching)."""
+    monkeypatch.delenv("CLAUDESTRUCT_LLM_CACHE", raising=False)
+    assert local_cache.is_enabled_for("anthropic") is False
+
+
+def test_is_enabled_for_auto_openai_on(monkeypatch):
+    """`auto` policy: openai-compat (Ollama / vLLM / SGLang) gets
+    cache ON because no server-side cache fights with us."""
+    monkeypatch.delenv("CLAUDESTRUCT_LLM_CACHE", raising=False)
+    assert local_cache.is_enabled_for("openai") is True
+
+
+def test_is_enabled_for_explicit_on_overrides_provider(monkeypatch):
+    """`CLAUDESTRUCT_LLM_CACHE=on` forces cache even on Anthropic."""
+    monkeypatch.setenv("CLAUDESTRUCT_LLM_CACHE", "on")
+    assert local_cache.is_enabled_for("anthropic") is True
+
+
+def test_is_enabled_for_explicit_off_overrides_provider(monkeypatch):
+    """`CLAUDESTRUCT_LLM_CACHE=off` disables even on openai."""
+    monkeypatch.setenv("CLAUDESTRUCT_LLM_CACHE", "off")
+    assert local_cache.is_enabled_for("openai") is False
+
+
+def test_is_enabled_for_per_run_override_wins(monkeypatch):
+    """`override="off"` argument beats env=`on`."""
+    monkeypatch.setenv("CLAUDESTRUCT_LLM_CACHE", "on")
+    assert local_cache.is_enabled_for("openai", override="off") is False
+    monkeypatch.setenv("CLAUDESTRUCT_LLM_CACHE", "off")
+    assert local_cache.is_enabled_for("openai", override="on") is True
+
+
+# --- cache_key (W10.4: extended with effort + max_tokens) -----------
+
+
+def test_cache_key_differs_when_effort_differs():
+    base = dict(
+        provider="ollama", model="qwen2.5-coder:32b", system="x",
+        messages=[{"role": "user", "content": "hi"}],
+    )
+    assert (
+        local_cache.cache_key(effort="low", max_tokens=1000, **base)
+        != local_cache.cache_key(effort="max", max_tokens=1000, **base)
+    )
+
+
+def test_cache_key_differs_when_max_tokens_differs():
+    base = dict(
+        provider="ollama", model="qwen2.5-coder:32b", system="x",
+        messages=[{"role": "user", "content": "hi"}],
+    )
+    assert (
+        local_cache.cache_key(effort="high", max_tokens=1000, **base)
+        != local_cache.cache_key(effort="high", max_tokens=2000, **base)
+    )
+
+
+def test_cache_key_default_effort_and_max_tokens_stable():
+    """Pre-W10.4 callers that don't pass effort/max_tokens still get
+    a stable key (regression guard for upgrade-in-place users)."""
+    base = dict(
+        provider="ollama", model="qwen2.5-coder:32b", system="x",
+        messages=[{"role": "user", "content": "hi"}],
+    )
+    assert local_cache.cache_key(**base) == local_cache.cache_key(**base)
+
+
 # --- stats / clear --------------------------------------------------
 
 

@@ -469,11 +469,15 @@ Goal: turn the existing multi-tool stack into a first-class local-AI workstation
 
 ### Tier 2 — Things Anthropic can't do (but a beefy local box can)
 
-- [ ] **W10.4 — Local prompt-result cache (content-hashed)**
-  - **Pain**: Anthropic's 1h server-side prompt cache evaporates entirely on local models, so iterating on the same code re-runs the LLM every time.
-  - **What**: new `src/claudestruct/local_cache.py` keyed on `sha256(system + messages + model)`; persist last N responses under `~/.claudestruct/llm_cache/`. Cache hit short-circuits the LLM call and surfaces a "cached" badge in the run log so users know the response is replayed, not fresh. Cache opt-out flag for force-refresh.
-  - **Scope**: ~120 LOC + 8 tests (hash determinism, eviction, opt-out, `--log-json` event).
-  - **Win**: dry-runs and regression tests become sub-second; CI replays of golden runs cost zero.
+- [x] **W10.4 — Local prompt-result cache (content-hashed)** ✅
+  - Storage primitives shipped earlier as W9.4; this PR completes the wiring
+  - `cache_key()` extended with `effort` + `max_tokens` so a `--effort low` replay never silently serves a `--effort max` response. Defaults `(None, 0)` keep pre-W10.4 callers working
+  - New `is_enabled_for(provider_name, override=None)` policy: `auto` (default) → ON for openai-compat, OFF for Anthropic (the SDK already negotiates server-side ephemeral caching). `CLAUDESTRUCT_LLM_CACHE=on|off` env + per-run `--llm-cache` / `--no-llm-cache` flags override
+  - `client.run_task` short-circuits on hit, replays the body through `stream_callback` once, returns `RunResult(cached=True, stop_reason="cached")`. New `cached: bool = False` field on `RunResult`
+  - `runner.run_task_and_log` threads `llm_cache` through, sets `claudestruct.local_cache_hit` span attr, emits a structured `cache.local_hit` JSONL event so dashboards / alerts can count replays separately from real LLM calls
+  - CLI: `--llm-cache` (force on) / `--no-llm-cache` (force off) on every `cs dev/review/plan/debug`. `_render_usage` shows a green `(cached)` badge when served from disk
+  - Cache write is best-effort: `OSError` is logged to stderr and swallowed — the user's run never aborts because the cache failed to grow
+  - Tests: 46 cases — `is_enabled_for` policy matrix (auto/Anthropic, auto/OpenAI, explicit on/off, per-run override wins), `cache_key` extensions (effort/max_tokens differs, default-stable), integration (first call misses → write, second hits → no provider call, stream replay still fires, `--no-llm-cache` bypass, Anthropic auto-OFF, opt-in works on Anthropic, write-failure non-fatal)
 
 - [ ] **W10.5 — RAG-style smart context with local embeddings**
   - **Pain**: `context.py` walks the repo via globs and clips at `--max-bytes`. Large monorepos either OOM or send mostly-irrelevant files.
@@ -545,6 +549,11 @@ Ship in roughly this order to maximize compounding value:
 
 ## Last Update
 
+- 2026-05-01 — W10.4 (local prompt-result cache) wiring ready for PR push:
+  - Storage primitives shipped earlier as W9.4; this PR completes the call-path wiring + provider-aware policy + CLI flags
+  - `cache_key` now includes `effort` + `max_tokens` so quality knobs don't collide on replay; `is_enabled_for(provider, override)` defaults to ON for openai-compat / OFF for Anthropic (auto) but obeys env + per-run overrides
+  - `RunResult.cached: bool` + green `(cached)` CLI badge + structured `cache.local_hit` event in the JSONL run log
+  - 46 tests cover policy matrix + key collisions + first-miss-then-hit + stream replay + `--no-llm-cache` bypass + write-failure non-fatal. Total Python: 442 passed; ruff clean
 - 2026-05-01 — Wave 10 first batch (W10.1 + W10.3 + W10.10) ready for PR push:
   - **W10.1 ✅** OpenAI-compat client — provider abstraction in `providers.py`, runtime selection via `CLAUDESTRUCT_PROVIDER`, new `[openai]` extra, 14 tests; cloud Anthropic path is byte-identical (cache breakpoint preserved)
   - **W10.3 ✅** claw-squad presets — `--preset {gx10,local-laptop,hybrid}` shipped alongside the binary under `configs/`, precedence layered below user config + CLI flags, 5 tests
