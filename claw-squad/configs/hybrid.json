@@ -1,0 +1,21 @@
+{
+  "agents": {
+    "planner": {
+      "name": "anthropic",
+      "model": "claude-opus-4-7",
+      "effort": "max"
+    },
+    "coder": {
+      "name": "ollama",
+      "model": "qwen2.5-coder:32b",
+      "baseURL": "http://localhost:11434/v1",
+      "effort": "high"
+    },
+    "reviewer": {
+      "name": "ollama",
+      "model": "qwen2.5:7b",
+      "baseURL": "http://localhost:11434/v1",
+      "effort": "high"
+    }
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "agents": {
+    "planner": {
+      "name": "ollama",
+      "model": "qwq:32b",
+      "baseURL": "http://localhost:11434/v1",
+      "effort": "max"
+    },
+    "coder": {
+      "name": "ollama",
+      "model": "qwen2.5-coder:32b",
+      "baseURL": "http://localhost:11434/v1",
+      "effort": "high"
+    },
+    "reviewer": {
+      "name": "ollama",
+      "model": "qwen2.5:7b",
+      "baseURL": "http://localhost:11434/v1",
+      "effort": "high"
+    }
+  },
+  "subagents": [
+    {
+      "name": "research-helper",
+      "description": "Quick lookups + summarisation for the Planner. Latency-sensitive: the subagent is invoked synchronously while the Planner is thinking.",
+      "systemPrompt": "You are a fast research assistant. Answer the Planner's question in under 200 words. If the answer needs a code snippet, paste it verbatim — no editorial.",
+      "provider": {
+        "name": "ollama",
+        "model": "llama3.2:3b",
+        "baseURL": "http://localhost:11434/v1"
+      }
+    }
+  ]
+}

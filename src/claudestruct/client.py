@@ -1,60 +1,40 @@
-"""Anthropic client wrapper with prompt caching and streaming.
+"""Public client surface for claudestruct.
 
-Efficiency design:
-- System prompt per task is FROZEN and marked with cache_control ephemeral
-  (1h TTL). After the first call, cached reads cost ~10% of normal input.
-- User turn carries the volatile content (task description + collected
-  context). Never placed in the system prompt.
-- Streaming is always on — avoids SDK HTTP timeouts at high max_tokens and
-  gives the user live feedback.
-- Adaptive thinking is the default; effort is tunable per task.
-- Model is `claude-opus-4-7` by default (most capable); callable can override.
+History: this module wrapped the Anthropic SDK directly. As of W10.1
+the actual SDK call lives in ``providers.py`` (Anthropic + OpenAI-
+compat); this file is the thin compatibility seam everything else in
+the package imports from. Behavior on the Anthropic path is byte-
+identical to the pre-W10.1 implementation.
 
-The token savings from caching compound: across 10 calls with the same task
-type, total input tokens cost ~1.9x the system prompt size instead of 10x.
+Provider selection:
+    CLAUDESTRUCT_PROVIDER=anthropic   (default; preserves prompt cache)
+    CLAUDESTRUCT_PROVIDER=openai      (Ollama / vLLM / SGLang / cloud OpenAI)
+    CLAUDESTRUCT_BASE_URL=http://...  (openai only; e.g. http://localhost:11434/v1)
+    CLAUDESTRUCT_MODEL_DEFAULT=...    (overrides the per-provider default)
+
+The Anthropic prompt-cache state machine (``cache_state.py``) only
+fires on the Anthropic path — OpenAI-compat returns 0 cache tokens by
+construction, so the silent-cache-miss detector stays quiet.
 """
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 
-import anthropic
+from claudestruct import providers
+from claudestruct.providers import (  # noqa: F401  (re-exported for back-compat)
+    DEFAULT_HTTP_TIMEOUT_SECONDS,
+    DEFAULT_MAX_RETRIES,
+    _env_float,
+    _env_int,
+)
 
-from claudestruct import cache_state
-from claudestruct.prompts import TASK_EFFORT, TASK_PROMPTS
-
-DEFAULT_MODEL = "claude-opus-4-7"
+# `DEFAULT_MODEL` historically pointed at Anthropic's flagship. We keep
+# the symbol pointing there for backwards compatibility (existing CLI
+# `--model` defaults import this), but every fresh call should go
+# through `providers.default_model_for(...)` so the OpenAI path picks
+# a reasonable default when the env asks for it.
+DEFAULT_MODEL = providers.DEFAULT_ANTHROPIC_MODEL
 DEFAULT_MAX_TOKENS = 16000
-
-# HTTP timeout for the Anthropic SDK. The default is 600s; we tighten
-# it to 5 min because long agent-style tasks should still respond in
-# bursts, and a hung connection beyond that is almost certainly a
-# transport problem worth surfacing as a timeout error.
-DEFAULT_HTTP_TIMEOUT_SECONDS = 300.0
-# The Anthropic SDK retries 5xx + 429 with exponential backoff; this
-# is the cap. Default 2; we go to 3 to absorb a brief regional blip
-# without hand-coding our own retry loop.
-DEFAULT_MAX_RETRIES = 3
-
-
-def _env_float(name: str, default: float) -> float:
-    raw = os.environ.get(name)
-    if raw is None or raw == "":
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        return default
-
-
-def _env_int(name: str, default: int) -> int:
-    raw = os.environ.get(name)
-    if raw is None or raw == "":
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        return default
 
 
 class ClaudestructError(Exception):
@@ -71,6 +51,7 @@ class RunResult:
     stop_reason: str | None
     model: str
     cache_warning: str | None = None
+    provider: str = "anthropic"
 
     @property
     def cached_fraction(self) -> float:
@@ -80,56 +61,68 @@ class RunResult:
         return self.cache_read_tokens / total
 
 
-def _make_client() -> anthropic.Anthropic:
-    # The secrets module checks env first (incl. legacy ANTHROPIC_API_KEY)
-    # and then any further providers selected via CLAUDESTRUCT_SECRETS_PROVIDER
-    # (keyring / pass / file). See claudestruct.secrets.
-    from claudestruct import secrets as secrets_mod
-
-    api_key = secrets_mod.get("anthropic.api_key")
-    if not api_key:
-        raise ClaudestructError(
-            "ANTHROPIC_API_KEY is not set. Export it in your shell, store it in "
-            "your OS keychain (`keyring set claudestruct anthropic.api_key`), "
-            "or in `pass` and set CLAUDESTRUCT_SECRETS_PROVIDER=keyring,pass."
-        )
-    timeout = _env_float("CLAUDESTRUCT_TIMEOUT", DEFAULT_HTTP_TIMEOUT_SECONDS)
-    max_retries = _env_int("CLAUDESTRUCT_MAX_RETRIES", DEFAULT_MAX_RETRIES)
-    return anthropic.Anthropic(api_key=api_key, timeout=timeout, max_retries=max_retries)
-
-
-def _system_blocks(task: str) -> list[dict]:
-    """Build the cached system prompt for a task.
-
-    Placing the only cache_control breakpoint on the final block caches the
-    entire system prefix (plus any tools rendered before it, if we add any
-    later). 1h TTL because dev sessions commonly span more than 5 minutes.
+def _make_client():
+    """Back-compat shim for callers (tests, external scripts) that
+    instantiated the Anthropic SDK client directly. Returns the raw
+    `anthropic.Anthropic` instance for the active provider when
+    Anthropic is selected; raises `ClaudestructError` on missing
+    creds. New code should call `run_task` / `count_tokens` instead.
     """
-    system_text = TASK_PROMPTS[task]
-    return [
-        {
-            "type": "text",
-            "text": system_text,
-            "cache_control": {"type": "ephemeral", "ttl": "1h"},
-        }
-    ]
+    name = providers.active_provider_name()
+    try:
+        provider = providers.make_provider(name)
+    except providers._MissingCredsError as exc:
+        raise ClaudestructError(str(exc)) from None
+    except providers._MissingDepError as exc:
+        raise ClaudestructError(str(exc)) from None
+    # `_client` exists on both providers; the Anthropic case returns
+    # the SDK instance the original `_make_client` did, the OpenAI
+    # case returns the OpenAI SDK instance — both behave like the
+    # underlying SDK clients.
+    return provider._client
 
 
-def count_tokens(task: str, user_message: str, model: str = DEFAULT_MODEL) -> int:
-    client = _make_client()
-    resp = client.messages.count_tokens(
-        model=model,
-        system=_system_blocks(task),
-        messages=[{"role": "user", "content": user_message}],
+def _resolve_model(model: str | None) -> tuple[providers.Provider, str]:
+    """Build the active provider and resolve a model name. Lets callers
+    pass `None` and get the right default for whichever backend is
+    selected — important so `cs dev` on an Ollama-pointed env doesn't
+    silently try `claude-opus-4-7` against a local server."""
+    name = providers.active_provider_name()
+    try:
+        provider = providers.make_provider(name)
+    except providers._MissingCredsError as exc:
+        raise ClaudestructError(str(exc)) from None
+    except providers._MissingDepError as exc:
+        raise ClaudestructError(str(exc)) from None
+    resolved_model = model or providers.default_model_for(name)
+    return provider, resolved_model
+
+
+def count_tokens(task: str, user_message: str, model: str | None = None) -> int:
+    """Count input tokens for a task without making the actual call.
+
+    On Anthropic this hits `messages.count_tokens` (exact). On OpenAI-
+    compat, falls back to tiktoken when available else a chars/4
+    heuristic — accurate to ~10% for English code + prose, which is
+    plenty for the dry-run preview.
+    """
+    from claudestruct.prompts import TASK_PROMPTS
+
+    if task not in TASK_PROMPTS:
+        raise ClaudestructError(
+            f"Unknown task {task!r}. Valid tasks: {', '.join(TASK_PROMPTS)}"
+        )
+    provider, resolved_model = _resolve_model(model)
+    return provider.count_tokens(
+        task=task, user_message=user_message, model=resolved_model,
     )
-    return resp.input_tokens
 
 
 def run_task(
     task: str,
     user_message: str,
     *,
-    model: str = DEFAULT_MODEL,
+    model: str | None = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     effort: str | None = None,
     stream_callback=None,
@@ -140,62 +133,50 @@ def run_task(
     so the CLI can print live. If None, output is silent and only available in
     the returned RunResult.
     """
+    from claudestruct.prompts import TASK_PROMPTS
+
     if task not in TASK_PROMPTS:
         raise ClaudestructError(
             f"Unknown task {task!r}. Valid tasks: {', '.join(TASK_PROMPTS)}"
         )
-    client = _make_client()
-    effort_value = effort or TASK_EFFORT[task]
 
-    collected: list[str] = []
-    with client.messages.stream(
-        model=model,
+    provider, resolved_model = _resolve_model(model)
+    raw = provider.run_task(
+        task=task,
+        user_message=user_message,
+        model=resolved_model,
         max_tokens=max_tokens,
-        system=_system_blocks(task),
-        thinking={"type": "adaptive"},
-        output_config={"effort": effort_value},
-        messages=[{"role": "user", "content": user_message}],
-    ) as stream:
-        for text in stream.text_stream:
-            collected.append(text)
-            if stream_callback is not None:
-                stream_callback(text)
-        final = stream.get_final_message()
-
-    usage = final.usage
-    cache_creation = getattr(usage, "cache_creation_input_tokens", 0) or 0
-    cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
-    p_hash = cache_state.prompt_hash(TASK_PROMPTS[task])
-    warning = cache_state.check_for_silent_miss(
-        task=task,
-        model=model,
-        current_prompt_hash=p_hash,
-        cache_read_tokens=cache_read,
+        effort=effort,
+        stream_callback=stream_callback,
     )
-    cache_state.record_cache_write(
-        task=task,
-        model=model,
-        current_prompt_hash=p_hash,
-        cache_creation_tokens=cache_creation,
-        cache_read_tokens=cache_read,
+
+    cache_creation = int(raw.get("cache_creation_tokens", 0) or 0)
+    cache_read = int(raw.get("cache_read_tokens", 0) or 0)
+    # Cache telemetry is only meaningful on the Anthropic path; on the
+    # OpenAI-compat path both numbers are zero by construction so the
+    # silent-miss detector stays quiet without an explicit branch.
+    warning = providers.record_cache_telemetry(
+        task=task, model=resolved_model,
+        cache_creation=cache_creation, cache_read=cache_read,
     )
     return RunResult(
-        text="".join(collected),
-        input_tokens=usage.input_tokens,
-        output_tokens=usage.output_tokens,
+        text=raw["text"],
+        input_tokens=int(raw.get("input_tokens", 0) or 0),
+        output_tokens=int(raw.get("output_tokens", 0) or 0),
         cache_creation_tokens=cache_creation,
         cache_read_tokens=cache_read,
-        stop_reason=final.stop_reason,
-        model=final.model,
+        stop_reason=raw.get("stop_reason"),
+        model=raw.get("model") or resolved_model,
         cache_warning=warning,
+        provider=provider.name,
     )
 
 
 def build_user_message(task_description: str, context_render: str) -> str:
     """Compose the user turn: instruction first, then the context block.
 
-    Keeping the task description first makes it easy for Claude to latch onto
-    the intent before reading through potentially large context.
+    Keeping the task description first makes it easy for the model to
+    latch onto the intent before reading through potentially large context.
     """
     parts = [task_description.strip()]
     if context_render.strip():
@@ -204,3 +185,18 @@ def build_user_message(task_description: str, context_render: str) -> str:
         parts.append("")
         parts.append(context_render)
     return "\n".join(parts)
+
+
+# Back-compat: a few external callers reach in for these helpers. Re-
+# export so we don't break anyone's import on this refactor.
+__all__ = [
+    "DEFAULT_MODEL",
+    "DEFAULT_MAX_TOKENS",
+    "DEFAULT_HTTP_TIMEOUT_SECONDS",
+    "DEFAULT_MAX_RETRIES",
+    "ClaudestructError",
+    "RunResult",
+    "count_tokens",
+    "run_task",
+    "build_user_message",
+]

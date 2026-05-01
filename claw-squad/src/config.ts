@@ -13,7 +13,8 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { AgentRole, RepoSpec, RunConfig } from "./types.js";
 import type { ProviderConfig, ProviderName } from "./providers/types.js";
 import { validateConfigFile } from "./config-schema.js";
@@ -86,26 +87,88 @@ export interface ConfigInput {
   cliOverrides?: Partial<Record<AgentRole, AgentCliOverride>>;
   /** Absolute path to a config file. Overrides the auto-detected one. */
   configPath?: string;
+  /**
+   * Preset name (W10.3). Resolves to `<package>/configs/<name>.json`
+   * shipped with the binary, e.g. `gx10` → `local-gx10.json`. Layered
+   * BELOW user config so a project's `.claw-squad/config.json` (and
+   * CLI flags) still win — the preset is a starting point, not a
+   * lock-in.
+   */
+  presetName?: string;
+}
+
+
+/** Available preset names. Extend by adding a JSON file to ../configs/. */
+const PRESET_FILES: Record<string, string> = {
+  "gx10": "local-gx10.json",
+  "local-laptop": "local-laptop.json",
+  "hybrid": "hybrid.json",
+};
+
+
+function presetPath(name: string): string | undefined {
+  const filename = PRESET_FILES[name];
+  if (!filename) return undefined;
+  // Resolve relative to this module's compiled location. tsc emits
+  // ESM under `dist/`; the configs ship one level up at the package
+  // root, so `<__dirname>/../configs/<file>` works for both `tsx
+  // src/cli.ts` (dev) and `node dist/cli.js` (release) layouts.
+  const here = dirname(fileURLToPath(import.meta.url));
+  return join(here, "..", "configs", filename);
+}
+
+
+export function availablePresets(): string[] {
+  return Object.keys(PRESET_FILES);
 }
 
 export function loadAgentConfig(input: ConfigInput): AgentConfig {
+  // Resolve the optional preset slice first. Treated as a layer
+  // BELOW user config so a project's `.claw-squad/config.json` and
+  // CLI flags still win — the preset is a starting point, not a lock-in.
+  let fromPreset: ConfigFile | undefined;
+  if (input.presetName) {
+    const path = presetPath(input.presetName);
+    if (!path) {
+      throw new Error(
+        `unknown preset "${input.presetName}". Available: ${availablePresets().join(", ")}`,
+      );
+    }
+    fromPreset = readConfigFile(path);
+    if (!fromPreset) {
+      throw new Error(
+        `preset "${input.presetName}" resolved to ${path} but the file is missing or unreadable`,
+      );
+    }
+  }
+
   const parsed = readConfigFile(
     input.configPath ?? autoConfigPath(input.repoRoot),
   );
+  const presetAgents = fromPreset?.agents;
   const fromFile = parsed?.agents;
-  // Layer defaults -> file -> CLI, then validate.
+  // Layer defaults -> preset -> file -> CLI, then validate.
   const merged: AgentConfig = {
-    planner: mergeOne("planner", fromFile?.planner, input.cliOverrides?.planner),
-    coder: mergeOne("coder", fromFile?.coder, input.cliOverrides?.coder),
-    reviewer: mergeOne("reviewer", fromFile?.reviewer, input.cliOverrides?.reviewer),
+    planner: mergeOne("planner", presetAgents?.planner, fromFile?.planner, input.cliOverrides?.planner),
+    coder: mergeOne("coder", presetAgents?.coder, fromFile?.coder, input.cliOverrides?.coder),
+    reviewer: mergeOne("reviewer", presetAgents?.reviewer, fromFile?.reviewer, input.cliOverrides?.reviewer),
   };
   for (const role of (["planner", "coder", "reviewer"] as AgentRole[])) {
     validateConfig(role, merged[role]);
   }
-  // Subagents come from the config file verbatim. Validate each one's
-  // provider slice the same way.
-  if (parsed?.subagents && Array.isArray(parsed.subagents)) {
-    merged.subagents = parsed.subagents.map((s, i) => {
+  // Subagents come from the user config file when present, falling back
+  // to the preset's catalog when the user didn't define their own. We
+  // don't merge the two — a project's explicit subagent list should
+  // fully replace the preset's defaults so per-team customisation is
+  // not surprised by zombie entries.
+  const subagentsSource =
+    parsed?.subagents && Array.isArray(parsed.subagents) && parsed.subagents.length > 0
+      ? parsed.subagents
+      : fromPreset?.subagents && Array.isArray(fromPreset.subagents)
+      ? fromPreset.subagents
+      : undefined;
+  if (subagentsSource) {
+    merged.subagents = subagentsSource.map((s, i) => {
       if (!s || typeof s.name !== "string" || s.name.length === 0) {
         throw new Error(`subagents[${i}]: missing name`);
       }
@@ -127,12 +190,17 @@ export function loadAgentConfig(input: ConfigInput): AgentConfig {
 
 function mergeOne(
   role: AgentRole,
+  fromPreset: Partial<ProviderConfig> | undefined,
   fromFile: Partial<ProviderConfig> | undefined,
   fromCli: AgentCliOverride | undefined,
 ): ProviderConfig {
+  // Precedence (low → high): built-in default < preset < file < CLI.
+  // Each layer is partial so a preset that only sets `model` doesn't
+  // erase the default `effort`, etc.
   const base = DEFAULT_AGENT_CONFIG[role];
   const merged: ProviderConfig = {
     ...base,
+    ...(fromPreset ?? {}),
     ...(fromFile ?? {}),
   };
   // Explicit `!== undefined` so an empty-string CLI value hits validation

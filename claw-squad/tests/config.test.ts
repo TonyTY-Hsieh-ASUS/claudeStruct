@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   DEFAULT_AGENT_CONFIG,
+  availablePresets,
   loadAgentConfig,
   loadReposFromFile,
   resolveRepos,
@@ -140,6 +141,113 @@ describe("loadAgentConfig", () => {
     });
     expect(cfg.reviewer.baseURL).toBe("http://farcorner:11434/v1");
     expect(cfg.reviewer.apiKey).toBe("k");
+  });
+
+  // --- W10.3 preset support ----------------------------------------
+
+  it("availablePresets enumerates the shipped names", () => {
+    const names = availablePresets();
+    // Two presets ship today (gx10, local-laptop). Lock the floor;
+    // adding more later doesn't break this test.
+    expect(names).toContain("gx10");
+    expect(names).toContain("local-laptop");
+  });
+
+  it("preset 'gx10' replaces the cloud Anthropic defaults with local Ollama models", () => {
+    const cfg = loadAgentConfig({ repoRoot: root, presetName: "gx10" });
+    // All three roles flip to ollama / qwen.
+    expect(cfg.planner.name).toBe("ollama");
+    expect(cfg.coder.name).toBe("ollama");
+    expect(cfg.reviewer.name).toBe("ollama");
+    expect(cfg.coder.model).toBe("qwen2.5-coder:32b");
+    expect(cfg.planner.baseURL).toBe("http://localhost:11434/v1");
+    // Subagent catalog comes from the preset.
+    expect(cfg.subagents).toBeDefined();
+    expect(cfg.subagents!.map((s) => s.name)).toContain("research-helper");
+  });
+
+  it("preset 'local-laptop' picks smaller models suited to 32 GB hardware", () => {
+    const cfg = loadAgentConfig({ repoRoot: root, presetName: "local-laptop" });
+    expect(cfg.coder.model).toBe("qwen2.5-coder:14b");
+    expect(cfg.planner.model).toBe("qwen2.5:14b");
+    // No subagents in the laptop preset — laptop budget can't host
+    // an extra concurrent process.
+    expect(cfg.subagents).toBeUndefined();
+  });
+
+  it("CLI flags still win over the preset", () => {
+    const cfg = loadAgentConfig({
+      repoRoot: root,
+      presetName: "gx10",
+      cliOverrides: {
+        coder: { provider: "anthropic", model: "claude-sonnet-4-6" },
+      },
+    });
+    // Coder switched to Anthropic by CLI; planner + reviewer remain
+    // on the gx10 preset.
+    expect(cfg.coder.name).toBe("anthropic");
+    expect(cfg.coder.model).toBe("claude-sonnet-4-6");
+    expect(cfg.planner.name).toBe("ollama");
+    expect(cfg.reviewer.name).toBe("ollama");
+  });
+
+  it("user config.json wins over the preset", () => {
+    mkdirSync(join(root, ".claw-squad"), { recursive: true });
+    writeFileSync(
+      join(root, ".claw-squad", "config.json"),
+      JSON.stringify({
+        agents: {
+          reviewer: {
+            name: "openai",
+            model: "gpt-5",
+            effort: "max",
+          },
+        },
+      }),
+    );
+    const cfg = loadAgentConfig({ repoRoot: root, presetName: "gx10" });
+    expect(cfg.reviewer.name).toBe("openai");
+    expect(cfg.reviewer.model).toBe("gpt-5");
+    // Planner unchanged from preset.
+    expect(cfg.planner.name).toBe("ollama");
+  });
+
+  it("user config subagents fully replace preset subagents (no merge)", () => {
+    mkdirSync(join(root, ".claw-squad"), { recursive: true });
+    writeFileSync(
+      join(root, ".claw-squad", "config.json"),
+      JSON.stringify({
+        subagents: [
+          {
+            name: "my-helper",
+            description: "team-specific lookup tool",
+            systemPrompt: "answer briefly",
+            provider: { name: "anthropic", model: "claude-haiku-4-5" },
+          },
+        ],
+      }),
+    );
+    const cfg = loadAgentConfig({ repoRoot: root, presetName: "gx10" });
+    expect(cfg.subagents).toBeDefined();
+    expect(cfg.subagents!.map((s) => s.name)).toEqual(["my-helper"]);
+  });
+
+  it("unknown preset name throws with the available list", () => {
+    expect(() =>
+      loadAgentConfig({ repoRoot: root, presetName: "made-up-preset" }),
+    ).toThrowError(/unknown preset.*Available:/);
+  });
+
+  it("preset 'hybrid' splits Planner cloud / Coder + Reviewer local (W10.10)", () => {
+    const cfg = loadAgentConfig({ repoRoot: root, presetName: "hybrid" });
+    // Planner on cloud Anthropic — frontier IQ for plan/replan.
+    expect(cfg.planner.name).toBe("anthropic");
+    expect(cfg.planner.model).toBe("claude-opus-4-7");
+    // Coder + Reviewer on local Ollama — high call volume, lower IQ ceiling.
+    expect(cfg.coder.name).toBe("ollama");
+    expect(cfg.coder.model).toBe("qwen2.5-coder:32b");
+    expect(cfg.reviewer.name).toBe("ollama");
+    expect(cfg.reviewer.model).toBe("qwen2.5:7b");
   });
 });
 
