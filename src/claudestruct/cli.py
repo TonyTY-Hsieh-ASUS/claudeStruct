@@ -74,6 +74,13 @@ def _render_usage(result, task: str) -> None:
     err.print(f"[dim]cached fraction of input: {pct:.1f}%[/dim]")
     err.print(f"[dim]model: {result.model} | stop: {result.stop_reason}[/dim]")
     err.print(f"[dim]prompt: {_prompt_label(task)}[/dim]")
+    if getattr(result, "cached", False):
+        # W10.4: replay badge so users see "this isn't a fresh roll".
+        err.print(
+            "[green](cached)[/green] response served from "
+            "~/.claudestruct/llm_cache/ — no LLM call. "
+            "Use --no-llm-cache to force-refresh.",
+        )
     if result.cache_warning:
         err.print(f"[yellow]warning:[/yellow] {result.cache_warning}")
 
@@ -109,6 +116,7 @@ def _run_common(
     max_bytes: int | None,
     monthly_cap_usd: float | None,
     redact: bool,
+    llm_cache: str | None,
 ) -> None:
 
     if monthly_cap_usd is not None and monthly_cap_usd > 0 and not dry_run:
@@ -176,6 +184,7 @@ def _run_common(
             log_json=log_json,
             on_chunk=on_chunk,
             redactor=redact_mod.Redactor.default() if redact else None,
+            llm_cache=llm_cache,
         )
     except ClaudestructError as exc:
         err.print(f"\n[red]{exc}[/red]")
@@ -215,6 +224,16 @@ common_options = [
                  help="Strip emails / API keys / JWTs from JSONL run logs before "
                       "they hit disk. Reads CLAUDESTRUCT_REDACT to default-on for "
                       "shared environments."),
+    click.option("--llm-cache", "llm_cache", flag_value="on", default=None,
+                 help="Force-enable the local LLM response cache "
+                      "(~/.claudestruct/llm_cache/). On a cache hit, the LLM "
+                      "call is skipped and the saved response replays — "
+                      "useful for `cs review` regression-testing the same "
+                      "diff repeatedly. Default policy: on for openai-compat, "
+                      "off for anthropic (the SDK already caches there)."),
+    click.option("--no-llm-cache", "llm_cache", flag_value="off",
+                 help="Force-disable the local LLM response cache for this "
+                      "run, even when CLAUDESTRUCT_LLM_CACHE is set."),
 ]
 
 
@@ -248,36 +267,36 @@ except ImportError:
 @click.argument("description", required=True)
 @click.argument("paths", nargs=-1, type=click.Path())
 @_apply_options
-def dev_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact):
+def dev_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact, llm_cache):
     _run_common("dev", description, paths, _resolve_root(root), model, max_tokens,
-                effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact)
+                effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact, llm_cache)
 
 
 @main.command("review", help="Code review on the current branch diff, or specified files.")
 @click.argument("description", required=False, default="Review the code below for bugs, security issues, and maintainability concerns.")
 @click.argument("paths", nargs=-1, type=click.Path())
 @_apply_options
-def review_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact):
+def review_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact, llm_cache):
     _run_common("review", description, paths, _resolve_root(root), model, max_tokens,
-                effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact)
+                effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact, llm_cache)
 
 
 @main.command("plan", help="Architecture / planning mode.")
 @click.argument("description", required=True)
 @click.argument("paths", nargs=-1, type=click.Path())
 @_apply_options
-def plan_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact):
+def plan_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact, llm_cache):
     _run_common("plan", description, paths, _resolve_root(root), model, max_tokens,
-                effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact)
+                effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact, llm_cache)
 
 
 @main.command("debug", help="Debug an error, anchored on a failure description.")
 @click.argument("description", required=True)
 @click.argument("paths", nargs=-1, type=click.Path())
 @_apply_options
-def debug_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact):
+def debug_cmd(description, paths, root, model, max_tokens, effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact, llm_cache):
     _run_common("debug", description, paths, _resolve_root(root), model, max_tokens,
-                effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact)
+                effort, dry_run, show_context, verbose, log_json, max_bytes, monthly_cap_usd, redact, llm_cache)
 
 
 @main.command("tokens", help="Count tokens for a given task + context without calling Claude.")
