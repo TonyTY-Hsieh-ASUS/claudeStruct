@@ -453,11 +453,13 @@ Goal: turn the existing multi-tool stack into a first-class local-AI workstation
   - New `[openai]` extra in `pyproject.toml` brings `openai>=1.50` + `tiktoken>=0.7`. Without it, `CLAUDESTRUCT_PROVIDER=openai` raises a clear `_MissingDepError` pointing at the extra
   - Tests: 14 new cases in `tests/test_providers.py` covering selection / defaults / OpenAI message shape / tokenization fallback / streaming aggregator / `reasoning_effort` gating / soft-dep gating / Anthropic cache-breakpoint regression guard / dispatch / cache telemetry
 
-- [ ] **W10.2 — Always-on home / company control plane**
-  - **Pain**: `cs serve run` already exists but the deploy story is bare — no systemd unit, no reverse-proxy / Tailscale recipe, no self-signed TLS guidance. GitHub App webhooks + cost-regression alerts + SLO endpoint only earn their keep when the daemon is 24/7.
-  - **What**: ship `deploy/systemd/claudestruct.service` + `deploy/systemd/claudestruct-worker.service` + `docs/home-server.md` (Tailscale Funnel for inbound webhooks, Caddy reverse-proxy snippet, port-not-exposed-publicly walkthrough, `cs serve init-db` first-run checklist).
-  - **Scope**: ~150 LOC docs + unit files; no Python changes.
-  - **Win**: the multi-tenant scaffolding from Waves 6–8 actually gets wired up on real hardware.
+- [x] **W10.2 — Always-on home / company control plane** ✅
+  - `deploy/systemd/claudestruct.service` (HTTP API) + `deploy/systemd/claudestruct-worker.service` (queue drainer) ship as drop-in unit files, with `claudestruct` system user + `/var/lib/claudestruct` data dir + `EnvironmentFile=-/etc/claudestruct/claudestruct.env` for secrets. `ExecStartPre=/usr/local/bin/cs serve init-db` makes first-boot idempotent. Hardened with `NoNewPrivileges`, `ProtectSystem=strict`, `ReadWritePaths=…`, restricted address families, and `SystemCallArchitectures=native`
+  - `claudestruct-worker.service` is `PartOf=claudestruct.service` with `TimeoutStopSec=300s` so an in-flight LLM call gets to finish before SIGKILL
+  - `deploy/systemd/claw-squad.service` covers the optional Web UI (separate `clawsquad` user, port 8788)
+  - `docs/home-server.md` walks the GX10-style host through install → service-user → secrets → systemd → Tailscale Funnel (single-path public webhook, rest tailnet-only) **or** Caddy reverse proxy (Let's Encrypt + private-IP allowlist) → org/user/key bootstrap → log streaming → upgrade flow. Calls out the explicit non-goals (HA, multi-worker, TLS-on-loopback)
+  - `deploy/systemd/README.md` is the quick-install crib sheet
+  - Pure ops: zero Python / TypeScript / Go changes. Wave 6–8 scaffolding (multi-tenant, GitHub App, SLO, cost-regression alerts) finally gets a 24/7 home
 
 - [x] **W10.3 — Per-role local-model presets for claw-squad** ✅
   - `claw-squad/configs/{local-gx10,local-laptop,hybrid}.json` ship next to the binary; `--preset <name>` resolves them through `presetPath()` in `src/config.ts`
