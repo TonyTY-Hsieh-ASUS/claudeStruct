@@ -68,6 +68,7 @@ def run_task_and_log(
     log_json: str | None = None,
     on_chunk: Callable[[str], None] | None = None,
     redactor: object | None = None,
+    llm_cache: str | None = None,
 ) -> TaskRunOutcome:
     """Run one task, emit structured events, return the outcome.
 
@@ -126,11 +127,23 @@ def run_task_and_log(
                         max_tokens=max_tokens,
                         effort=effort,
                         stream_callback=on_chunk,
+                        llm_cache=llm_cache,
                     )
                     call_span.set_attribute("claudestruct.input_tokens", result.input_tokens)
                     call_span.set_attribute("claudestruct.output_tokens", result.output_tokens)
                     call_span.set_attribute("claudestruct.cache_read_tokens", result.cache_read_tokens)
                     call_span.set_attribute("claudestruct.cache_creation_tokens", result.cache_creation_tokens)
+                    call_span.set_attribute("claudestruct.local_cache_hit", result.cached)
+                # W10.4: surface a structured `cache.local_hit` event so
+                # downstream consumers (dashboard, alerts) can count
+                # replays separately from real LLM calls.
+                if result.cached:
+                    sink.write({
+                        "type": "cache.local_hit",
+                        "task": task,
+                        "model": result.model,
+                        "provider": result.provider,
+                    })
             except ClaudestructError:
                 sink.write(event_log.run_end(
                     reason="error",

@@ -64,6 +64,11 @@ const runCmd = program
   .argument("<requirement>", "the feature / task / question in plain language")
   .option("--root <path>", "repo root (defaults to cwd)", process.cwd())
   .option("--config <path>", "path to .claw-squad/config.json (otherwise auto-detected)")
+  .option(
+    "--preset <name>",
+    "starting-point preset shipped with the binary. Available: gx10, local-laptop, hybrid. " +
+    "User config + CLI flags still win on top.",
+  )
   .option("--max-clarifications <n>", "max Planner Q&A rounds", "3")
   .option("--max-review-rounds <n>", "max Coder↔Reviewer rounds per task", "3")
   .option("--max-loops <n>", "max tasks to complete in one run", "10")
@@ -233,6 +238,7 @@ runCmd.action(async (requirement: string, opts: Record<string, unknown>) => {
       agentConfig = loadAgentConfig({
         repoRoot: config.repoRoot,
         configPath: opts.config as string | undefined,
+        presetName: opts.preset as string | undefined,
         cliOverrides: extractCliOverrides(opts),
       });
     } catch (err) {

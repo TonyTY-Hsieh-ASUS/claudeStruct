@@ -48,6 +48,15 @@ otel = [
 sentry = [
   "sentry-sdk>=2.0.0",
 ]
+# `pip install claudestruct[openai]` to enable the OpenAI-compat
+# provider (W10.1). Targets local servers (Ollama / vLLM / SGLang /
+# llama.cpp) plus cloud OpenAI; selected at runtime via
+# CLAUDESTRUCT_PROVIDER=openai. tiktoken is included so the dry-run
+# token counter is accurate against models with known tokenizers.
+openai = [
+  "openai>=1.50.0",
+  "tiktoken>=0.7.0",
+]
 
 [project.scripts]
 cs = "claudestruct.cli:main"
