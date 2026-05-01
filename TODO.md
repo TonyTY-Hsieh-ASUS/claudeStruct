@@ -445,11 +445,13 @@ Goal: turn the existing multi-tool stack into a first-class local-AI workstation
 
 ### Tier 1 — Hits GX10's strengths head-on
 
-- [ ] **W10.1 — claudestruct OpenAI-compat client** (must-do)
-  - **Pain**: `cs dev/review/plan/debug` is hardwired to `anthropic.Anthropic`, so on GX10 the entire Python CLI is dead weight without cloud access.
-  - **What**: extend `src/claudestruct/client.py` with an `OpenAICompatClient` selectable via `CLAUDESTRUCT_PROVIDER=openai|anthropic` + `CLAUDESTRUCT_BASE_URL`. Reuse the existing streaming + cost accounting code paths; keep prompt-cache breakpoints under Anthropic only.
-  - **Scope**: ~80 LOC + 6–8 tests (`test_client_openai_compat.py`).
-  - **Win**: every `cs` task runs on GX10 against Ollama / vLLM / SGLang at zero cloud cost.
+- [x] **W10.1 — claudestruct OpenAI-compat client** ✅
+  - New `src/claudestruct/providers.py` with `Provider` Protocol + `AnthropicProvider` (preserves the existing `cache_control: ephemeral` breakpoint exactly) + `OpenAICompatProvider` (chat-completions wire format with injectable `base_url`)
+  - Selection at runtime via env: `CLAUDESTRUCT_PROVIDER=anthropic|openai`, `CLAUDESTRUCT_BASE_URL=...`, `CLAUDESTRUCT_MODEL_DEFAULT=...`. Unknown values fall back to anthropic so typos don't break unrelated commands
+  - `client.py` refactored to dispatch through the Protocol; `RunResult` gains a `provider` field; cache telemetry only fires on the Anthropic path so the silent-miss detector stays quiet on local runs
+  - OpenAI provider: streams via `chat.completions.create(stream=True, stream_options={"include_usage": True})`, maps `prompt_tokens`/`completion_tokens` into the existing `RunResult` shape, forwards `effort` as `reasoning_effort` only when set, falls back to chars/4 for `count_tokens` when tiktoken isn't importable
+  - New `[openai]` extra in `pyproject.toml` brings `openai>=1.50` + `tiktoken>=0.7`. Without it, `CLAUDESTRUCT_PROVIDER=openai` raises a clear `_MissingDepError` pointing at the extra
+  - Tests: 14 new cases in `tests/test_providers.py` covering selection / defaults / OpenAI message shape / tokenization fallback / streaming aggregator / `reasoning_effort` gating / soft-dep gating / Anthropic cache-breakpoint regression guard / dispatch / cache telemetry
 
 - [ ] **W10.2 — Always-on home / company control plane**
   - **Pain**: `cs serve run` already exists but the deploy story is bare — no systemd unit, no reverse-proxy / Tailscale recipe, no self-signed TLS guidance. GitHub App webhooks + cost-regression alerts + SLO endpoint only earn their keep when the daemon is 24/7.
@@ -457,11 +459,13 @@ Goal: turn the existing multi-tool stack into a first-class local-AI workstation
   - **Scope**: ~150 LOC docs + unit files; no Python changes.
   - **Win**: the multi-tenant scaffolding from Waves 6–8 actually gets wired up on real hardware.
 
-- [ ] **W10.3 — Per-role local-model presets for claw-squad**
-  - **Pain**: claw-squad supports per-role providers (W1.x) but ships no opinionated preset for the local-AI workstation case.
-  - **What**: add `claw-squad/configs/local-gx10.json` — Planner=QwQ-32B (reasoning), Coder=Qwen2.5-Coder-32B (code), Reviewer=Qwen2.5-7B (speed), Subagent=Llama-3.2-3B (delegation). Wire `--preset gx10` (and a sibling `--preset local-laptop` for Apple Silicon) that loads the JSON without disturbing the existing config-merge precedence.
-  - **Scope**: ~50 LOC (preset loader + 2 fixtures) + 4 tests.
-  - **Win**: open-the-box GX10 experience — no model-spelunking required.
+- [x] **W10.3 — Per-role local-model presets for claw-squad** ✅
+  - `claw-squad/configs/{local-gx10,local-laptop,hybrid}.json` ship next to the binary; `--preset <name>` resolves them through `presetPath()` in `src/config.ts`
+  - Precedence: defaults → preset → user `.claw-squad/config.json` → CLI flags. Subagent catalog is fully replaced (not merged) when user config defines `subagents` so per-team customisation isn't surprised by zombie entries
+  - GX10 preset: Planner=`qwq:32b`, Coder=`qwen2.5-coder:32b`, Reviewer=`qwen2.5:7b`, plus a `research-helper` subagent on `llama3.2:3b`. All at `http://localhost:11434/v1` (Ollama default)
+  - Laptop preset: smaller 14B Coder + Planner that fit in 32 GB without swapping; no subagents
+  - `claw-squad/configs/README.md` explains the rationale + the `ollama pull …` recipe for the four-model GX10 set
+  - Tests: 5 new vitest cases (`gx10`/`local-laptop`/`hybrid` round-trip, CLI flags win, user config wins, subagents replace not merge, unknown preset raises)
 
 ### Tier 2 — Things Anthropic can't do (but a beefy local box can)
 
@@ -503,11 +507,11 @@ Goal: turn the existing multi-tool stack into a first-class local-AI workstation
   - **Scope**: ~30 LOC (mostly default-flag changes in `claw-sandbox/main.go`) + 2 tests + docs.
   - **Win**: "private repo never leaves the box" upgrades from best-effort to enforced.
 
-- [ ] **W10.10 — Hybrid cloud / local routing**
-  - **Pain**: pure-local quality < cloud Sonnet for hard reasoning, but pure-cloud is expensive at high agent volume.
-  - **What**: a `configs/hybrid.json` showing Planner=Anthropic Sonnet (strong reasoning, low call volume), Coder + Reviewer = local GX10 (high volume, lower per-call IQ ceiling). Plus `docs/hybrid-routing.md` explaining when each role benefits from cloud vs local. The per-role config in claw-squad already supports this — **0 LOC**, this is purely a recipe + docs item.
-  - **Scope**: ~0 code, 1 config fixture, 1 doc page.
-  - **Win**: 80 % of cloud quality at 20 % of cloud cost for a typical agent run.
+- [x] **W10.10 — Hybrid cloud / local routing** ✅
+  - `claw-squad/configs/hybrid.json`: Planner on cloud Anthropic (`claude-opus-4-7`, asymmetric IQ demand + low call volume + prompt-cache savings); Coder + Reviewer on local Ollama (`qwen2.5-coder:32b` + `qwen2.5:7b`, high call volume + lower IQ ceiling)
+  - `claw-squad/docs/hybrid-routing.md` walks through the cost math (~25 % of all-cloud spend on a 5-TODO run with 2 review rounds), failure modes (Ollama cold start, OOM mitigation, network split + `--resume` recovery), and migration path
+  - Wired as the third entry in `PRESET_FILES`; `--preset hybrid` works out of the box. 1 new vitest case pins the role-by-role split
+  - Per-role config existed since W1.x — this item was config + docs as planned
 
 ### Sequencing recommendation
 
@@ -541,6 +545,12 @@ Ship in roughly this order to maximize compounding value:
 
 ## Last Update
 
+- 2026-05-01 — Wave 10 first batch (W10.1 + W10.3 + W10.10) ready for PR push:
+  - **W10.1 ✅** OpenAI-compat client — provider abstraction in `providers.py`, runtime selection via `CLAUDESTRUCT_PROVIDER`, new `[openai]` extra, 14 tests; cloud Anthropic path is byte-identical (cache breakpoint preserved)
+  - **W10.3 ✅** claw-squad presets — `--preset {gx10,local-laptop,hybrid}` shipped alongside the binary under `configs/`, precedence layered below user config + CLI flags, 5 tests
+  - **W10.10 ✅** hybrid cloud/local routing — `configs/hybrid.json` + `docs/hybrid-routing.md` (cost math, failure modes, migration path), 1 test
+  - Total: 396 Python (+14 new) + 348 TS (+6 new) tests pass; ruff clean
+  - Per the W10 sequencing recommendation, this knocks out the keystone (W10.1) plus both immediate compounding wins (W10.3 + W10.10) in one PR — local-first claudestruct is now functional on Ollama / vLLM / SGLang
 - 2026-04-30 — Wave 10 (GX10 / local-first) added: 10 items targeting the Asus GX10 (128 GB unified memory, always-on Linux). Tier 1 (OpenAI-compat client / always-on control plane / per-role local presets) directly unblocks the existing stack on local hardware; Tier 2 (local cache / RAG context / Reviewer fine-tune / voice REPL) leverages the box's headroom; Tier 3 (nightly watchdog / real netns / hybrid routing) polishes existing abstractions. Sequencing recommendation embedded so future PRs pick the highest-leverage item next.
 - 2026-04-28 — W7.1 VS Code extension scaffold ready for PR push:
   - New `vscode-extension/` standalone project (its own package.json + tsconfig + node_modules — separate publishing target from claw-squad's pnpm workspace)
