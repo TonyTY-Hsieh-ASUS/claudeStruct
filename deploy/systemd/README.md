@@ -5,11 +5,13 @@ on a Linux host (Asus GX10, NUC, VPS, …). See
 [`docs/home-server.md`](../../docs/home-server.md) for the full setup
 walkthrough.
 
-| Unit                              | What                                              | Default port      |
-|-----------------------------------|---------------------------------------------------|-------------------|
-| `claudestruct.service`            | HTTP API (`cs serve run`)                         | `127.0.0.1:8787`  |
-| `claudestruct-worker.service`     | Background worker (`cs serve worker`)             | n/a (DB consumer) |
-| `claw-squad.service`              | claw-squad dashboard / Web UI                     | `127.0.0.1:8788`  |
+| Unit                                | What                                              | Default port      |
+|-------------------------------------|---------------------------------------------------|-------------------|
+| `claudestruct.service`              | HTTP API (`cs serve run`)                         | `127.0.0.1:8787`  |
+| `claudestruct-worker.service`       | Background worker (`cs serve worker`)             | n/a (DB consumer) |
+| `claudestruct-nightly.service`      | One-shot `cs review` of last N commits (W10.8)    | n/a               |
+| `claudestruct-nightly.timer`        | Triggers nightly.service @ 03:00                  | n/a               |
+| `claw-squad.service`                | claw-squad dashboard / Web UI                     | `127.0.0.1:8788`  |
 
 All three units bind to localhost — the assumption is that a reverse
 proxy (Caddy, nginx, Tailscale Funnel) terminates TLS and exposes

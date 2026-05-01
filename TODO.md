@@ -501,11 +501,12 @@ Goal: turn the existing multi-tool stack into a first-class local-AI workstation
 
 ### Tier 3 — Push existing abstractions to the limit
 
-- [ ] **W10.8 — Nightly code-health watchdog**
-  - **Pain**: cost-regression alerts (W6.5) need data to be useful; without scheduled runs the dashboard stays sparse.
-  - **What**: `scripts/nightly-review.sh` + `deploy/systemd/claudestruct-nightly.timer`: every night, `cs review` the last 3 commits on `main`, drop results into `.claudestruct/runs/`. Morning `cs dashboard` shows the week's code-quality drift.
-  - **Scope**: ~50 LOC bash + a sample crontab + 1 doc page.
-  - **Win**: feeds the dashboards / alerts you've already built without anyone clicking buttons.
+- [x] **W10.8 — Nightly code-health watchdog** ✅
+  - `scripts/nightly-review.sh` walks `git rev-list --max-count=$DEPTH origin/$BRANCH` and for each commit detaches HEAD, `git reset --soft <parent>`, runs `cs review --redact --log-json $LOG`, then resets back. Per-commit failures log to a sibling `.err` file but don't abort the loop — one bad merge shouldn't poison the night
+  - Configurable via env: `CS_NIGHTLY_REPO` (required), `CS_NIGHTLY_BRANCH` (default `main`), `CS_NIGHTLY_DEPTH` (default `3`), `CS_NIGHTLY_LOG_DIR` (default `$REPO/.claudestruct/runs`)
+  - `deploy/systemd/claudestruct-nightly.service` (Type=oneshot, same hardening profile as the daytime services) + `claudestruct-nightly.timer` (`OnCalendar=*-*-* 03:00:00`, `Persistent=true` so missed runs fire on next boot, `RandomizedDelaySec=15min`)
+  - `docs/nightly-review.md` covers configuration, install (system + drop-in override), cron alternative, "why a wrapper script not a one-liner", and the morning `cs dashboard --root … --limit 20` routine
+  - Pure ops: zero Python / TypeScript / Go changes. Plugs straight into the existing W6.5 cost-regression alerter
 
 - [x] **W10.9 — Real network isolation for claw-sandbox on GX10** ✅
   - `tryDisableNetwork()` in `rlimit_linux.go` now sets `cmd.SysProcAttr.Cloneflags |= syscall.CLONE_NEWNET` when `isolationCapabilities().network` is `enforced` or `best-effort`. The kernel does the actual unsharing on `cmd.Start()`; no userspace `unshare` shim required
