@@ -115,6 +115,32 @@ class BudgetResponse(BaseModel):
     remaining_usd: float
 
 
+class TeamBudgetResponse(BaseModel):
+    """Per-org rollup of the current billing period (W6.5).
+
+    Two parallel views — tokens and USD — because tier caps gate on
+    different units. ``None`` cap fields mean "uncapped at this tier"
+    (team / business). ``percent_used`` reflects whichever cap exists;
+    when neither does, it's 0 so a frontend can render "uncapped"
+    safely.
+    """
+
+    org_id: int
+    org_slug: str
+    tier: str
+    period_start: str
+    period_end: str
+    tokens_used: int
+    tokens_cap: Optional[int]
+    cost_used_usd: float
+    cost_cap_usd: Optional[float]
+    # Highest of the two ratios (tokens / cap) and (cost / cap), 0..1+.
+    # >= 0.8 = warn, >= 1 = exceeded. Frontend can colour accordingly.
+    percent_used: float
+    near_limit: bool
+    exceeded: bool
+
+
 # --- Runs (W6.1 will fill in execution semantics) -------------------
 
 class CreateRunRequest(BaseModel):

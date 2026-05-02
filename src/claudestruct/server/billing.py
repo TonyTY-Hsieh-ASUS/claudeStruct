@@ -308,6 +308,62 @@ def current_period_token_usage(
     return sum((r[0] or 0) + (r[1] or 0) for r in rows)
 
 
+# --- Per-tier monthly USD caps (W6.5 — budget-cap team rollups) ----
+#
+# Sibling of ``TIER_TOKEN_CAPS``. ``None`` means "no monthly USD cap
+# at this tier" (tokens may still be capped, and per-run sandbox
+# `max_cost_usd` always applies). The free-tier number is set so that
+# a typical day's `cs review` usage stays comfortably under the cap
+# while runaway `cs plan --effort max` runs trip the warning.
+TIER_USD_CAPS: dict[Tier, float | None] = {
+    Tier.free: 10.0,
+    Tier.team: None,
+    Tier.business: None,
+}
+
+
+def tier_usd_cap(tier: str | None) -> float | None:
+    """Look up the monthly USD cap for a tier string. ``None`` return
+    means uncapped at this tier. Same defensive fallback as
+    ``tier_token_cap``: unknown tier → free-tier."""
+    if tier is None:
+        return TIER_USD_CAPS[Tier.free]
+    try:
+        t = Tier(tier)
+    except ValueError:
+        return TIER_USD_CAPS[Tier.free]
+    return TIER_USD_CAPS.get(t, TIER_USD_CAPS[Tier.free])
+
+
+def current_period_cost(
+    session: Session,
+    org_id: int,
+    *,
+    now: datetime | None = None,
+) -> float:
+    """Sum ``cost_usd`` for ``org_id`` over the current billing window.
+
+    Mirror of :func:`current_period_token_usage` for the dollars side.
+    Counts ``failed`` runs (the Anthropic call still incurred cost),
+    excludes ``queued``/``running`` rows where ``cost_usd`` hasn't been
+    finalised — those default to 0 in the schema so the SUM is robust
+    either way; explicit filter kept for readability.
+    """
+    from claudestruct.server.models import Run, RunStatus
+
+    sub = get_or_default(session, org_id)
+    start, end = current_period_bounds(sub, now=now)
+    rows = session.execute(
+        select(Run.cost_usd).where(
+            Run.org_id == org_id,
+            Run.created_at >= start,
+            Run.created_at < end,
+            Run.status.in_((RunStatus.done.value, RunStatus.failed.value)),
+        )
+    ).all()
+    return float(sum((r[0] or 0.0) for r in rows))
+
+
 def make_period_for_test(
     *,
     days: int = 30,
