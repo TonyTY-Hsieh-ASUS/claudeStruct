@@ -386,7 +386,7 @@ Goal: make claudeStruct usable end-to-end on a local AI workstation (Asus GX10 /
 
 - [x] **W9.5 — RAG-style smart context gathering** ✅ (shipped as W10.5; see Wave 10 entry)
 
-- [x] **W9.6 — Dataset export for fine-tuning** ✅ (Python side shipped as W10.6; claw-squad TS-side deferred)
+- [x] **W9.6 — Dataset export for fine-tuning** ✅ (both sides shipped: Python as W10.6, TS via `claw-squad dataset export`)
 - [x] **W9.7 — Voice REPL (`cs voice` / `claw-squad voice`)** ✅ (Python side shipped as W10.7; claw-squad TS-side deferred)
 
 ### Tier 3 — operational polish
@@ -473,7 +473,7 @@ Goal: turn the existing multi-tool stack into a first-class local-AI workstation
   - `scripts/finetune-reviewer.sh`: thin wrapper that exports the last-90-days dataset, drops a default axolotl YAML targeting Qwen2.5-Coder-7B QLoRA on a GX10, invokes `axolotl train`. Prints a clear warning when row count < 50 so the operator knows the LoRA won't actually learn anything yet
   - `docs/dataset-export.md`: privacy gate, flags table, train workflow, serve via W10.1's OpenAI-compat path, sanity-check `jq` recipes
   - 34 tests in `tests/test_dataset.py`: walker filter matrix, corrupt-line handling, sort-determinism, alpaca/chat format conversion, empty-result, unknown-format error, parent-dir creation, `parse_since` (date / ISO / Z-suffix / garbage), `run_io` schema + truncation cap, `_log_prompts_enabled` env-gate matrix
-  - claw-squad-side `dataset export` deferred to a separate TS PR — same shape will land there when the worker run logs grow IO capture
+  - claw-squad-side `dataset export` shipped: `claw-squad/src/runs/dataset.ts` (walker + alpaca/chat conversion + `parseSince` mirroring the Python helper); new `run-io` event in `claw-squad/src/runs/log.ts`; `claw-squad dataset export --out PATH [--role coder] [--since YYYY-MM-DD] [--format alpaca|chat]` CLI subcommand; `makeRunIoEvent()` + `runIoEnabled()` (gated on `CLAW_SQUAD_LOG_PROMPTS=1`) ready for the orchestrator to call once IO emission is wired in (deferred to a focused follow-up); 33 vitest cases covering walker filter matrix + corrupt-line handling + chronological sort + alpaca/chat conversion + empty-result + parent-dir creation + truncation + parseSince. `claw-squad/docs/dataset-export.md` covers prereqs, flags, cross-tool corpus combine recipe, follow-ups
 
 - [x] **W10.7 — Voice REPL via local Whisper** ✅
   - `src/claudestruct/voice.py`: `VoiceConfig` dataclass (defaults target GX10 — `base.en`, 16 kHz mono, 5 s capture, auto device), `record_audio()` via sounddevice, `transcribe_audio()` via faster-whisper, `capture_and_transcribe()` orchestrator with `recorder` / `transcriber` injection points so tests skip the real audio + Whisper paths

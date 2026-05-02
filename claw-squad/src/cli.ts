@@ -901,6 +901,108 @@ runsCmd
   );
 
 
+// W10.6 — TS-side dataset export. Mirrors `cs dataset export` from
+// claudestruct so a single team can mine both tools' run logs into
+// one fine-tune corpus without writing custom scripts.
+const datasetCmd = program
+  .command("dataset")
+  .description(
+    "Mine the .claw-squad/runs/ JSONL logs for fine-tuning datasets (W10.6). " +
+      "Requires runs that were captured with CLAW_SQUAD_LOG_PROMPTS=1.",
+  );
+
+datasetCmd
+  .command("export")
+  .description(
+    "Walk .claw-squad/runs/*.jsonl and write a training-format JSONL.",
+  )
+  .requiredOption(
+    "--out <path>",
+    "Output JSONL path. Created (or overwritten) by this command.",
+  )
+  .option("--root <path>", "repo root", process.cwd())
+  .option(
+    "--role <bucket>",
+    "Filter to one of: planner / coder / reviewer / subagent. Default: include all.",
+  )
+  .option(
+    "--since <date>",
+    "Filter to events on or after this date (YYYY-MM-DD or ISO 8601).",
+  )
+  .option<"alpaca" | "chat">(
+    "--format <fmt>",
+    "Output schema: 'alpaca' (default) = {instruction,input,output}; 'chat' = {messages: [...]}",
+    (val): "alpaca" | "chat" => {
+      if (val !== "alpaca" && val !== "chat") {
+        throw new Error(
+          `--format must be 'alpaca' or 'chat'; got ${JSON.stringify(val)}`,
+        );
+      }
+      return val;
+    },
+    "alpaca",
+  )
+  .action(
+    async (opts: {
+      out: string;
+      root: string;
+      role?: string;
+      since?: string;
+      format: "alpaca" | "chat";
+    }) => {
+      const { exportDataset, parseSince } = await import("./runs/dataset.js");
+      const { ROLE_BUCKETS } = await import("./types.js");
+
+      let role: import("./types.js").RoleBucket | undefined;
+      if (opts.role) {
+        if (!(ROLE_BUCKETS as readonly string[]).includes(opts.role)) {
+          console.error(
+            pc.red(
+              `--role must be one of ${ROLE_BUCKETS.join(" / ")}; got ${
+                opts.role
+              }`,
+            ),
+          );
+          process.exit(2);
+        }
+        role = opts.role as import("./types.js").RoleBucket;
+      }
+
+      let since: Date | undefined;
+      if (opts.since) {
+        const parsed = parseSince(opts.since);
+        if (parsed === null) {
+          console.error(
+            pc.red(
+              `--since ${JSON.stringify(opts.since)}: expected YYYY-MM-DD or ISO 8601`,
+            ),
+          );
+          process.exit(2);
+        }
+        since = parsed;
+      }
+
+      const stats = exportDataset(opts.root, opts.out, {
+        role,
+        since,
+        format: opts.format,
+      });
+
+      if (stats.rows === 0) {
+        console.error(
+          pc.yellow(
+            "wrote 0 rows. CLAW_SQUAD_LOG_PROMPTS=1 must be set *before* a run for that run's IO to be exported.",
+          ),
+        );
+      }
+      const note = stats.skippedNoIo
+        ? ` (${stats.skippedNoIo} event(s) skipped: missing prompt/response)`
+        : "";
+      console.log(`wrote ${stats.rows} row(s) to ${stats.outputPath}${note}`);
+    },
+  );
+
+
 program
   .command("mcp")
   .description(
