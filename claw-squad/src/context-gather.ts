@@ -53,6 +53,14 @@ export interface GatherOptions {
   todoDescription: string;
   maxFiles?: number;
   maxTotalBytes?: number;
+  /**
+   * Extra repo-relative paths to bias toward the front of the
+   * candidate list. Used by the `--smart-context` integration to
+   * inject embedding-index top-K hits ahead of the keyword-rank
+   * results, while still letting the byte/file budgets clamp the
+   * final set.
+   */
+  extraExplicitPaths?: string[];
 }
 
 export function gatherInitialContext(opts: GatherOptions): ContextResult {
@@ -75,11 +83,21 @@ export function gatherInitialContext(opts: GatherOptions): ContextResult {
 
   const ranked = rankByPathKeywords(allFiles, keywords);
 
-  // Explicit path candidates jump to the top, deduped.
+  // Explicit path candidates jump to the top, deduped. Smart-context
+  // top-K paths come right after the literal-mention paths (above
+  // the keyword-rank list) on the theory that "the user named this
+  // file" is stronger evidence than "the embedding model agrees".
   const ordered: string[] = [];
   const seen = new Set<string>();
+  const knownFiles = new Set(allFiles);
   for (const p of explicitPaths) {
-    if (!seen.has(p) && allFiles.includes(p)) {
+    if (!seen.has(p) && knownFiles.has(p)) {
+      ordered.push(p);
+      seen.add(p);
+    }
+  }
+  for (const p of opts.extraExplicitPaths ?? []) {
+    if (!seen.has(p) && knownFiles.has(p)) {
       ordered.push(p);
       seen.add(p);
     }

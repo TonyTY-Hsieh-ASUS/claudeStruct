@@ -149,6 +149,12 @@ const runCmd = program
   .option(
     "--log-json <path>",
     "mirror every run-log event (run-start, usage, phase, todo-complete, run-end) to this JSONL file in addition to .claw-squad/runs/",
+  )
+  .option(
+    "--smart-context",
+    "use the local embedding index (built via `claw-squad index build`) " +
+      "to pick top-K relevant files for round 1 of each Coder task. " +
+      "Biggest payoff on local 32B Coders with 32K context windows.",
   );
 
 // Per-role provider flags. Commander can't easily do templated option
@@ -198,6 +204,7 @@ runCmd.action(async (requirement: string, opts: Record<string, unknown>) => {
       dryRun: Boolean(opts.dryRun),
       logJsonPath:
         typeof opts.logJson === "string" ? opts.logJson : undefined,
+      smartContext: Boolean(opts.smartContext),
     };
 
     // Pull multi-repo spec out of the config file if present. When
