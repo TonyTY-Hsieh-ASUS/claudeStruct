@@ -11,6 +11,8 @@
 
 import { loadPrompt } from "../prompts.js";
 import type { InvokeResult, Provider } from "../providers/types.js";
+import { appendEvent, type RunLogHandle } from "../runs/log.js";
+import { emitRunIoIfEnabled } from "../runs/dataset.js";
 import type { ReviewVerdict, TodoItem } from "../types.js";
 
 export interface ReviewerOutcome {
@@ -25,6 +27,11 @@ interface ReviewerInput {
   coderRationale?: string;
   provider: Provider;
   onText?: (chunk: string) => void;
+  // Optional: when present + CLAW_SQUAD_LOG_PROMPTS is set, the run
+  // log captures (prompt, response) so `claw-squad dataset export`
+  // has training data to mine. Off by default; the orchestrator
+  // threads the handle through.
+  runLog?: RunLogHandle;
 }
 
 function buildUserMessage(input: ReviewerInput): string {
@@ -93,6 +100,13 @@ export async function runReviewer(
     systemPrompt,
     userMessage,
     onText: input.onText,
+  });
+
+  emitRunIoIfEnabled((e) => appendEvent(input.runLog!, e), {
+    runLog: input.runLog,
+    role: "reviewer",
+    prompt: userMessage,
+    responseText: usage.text,
   });
 
   return {

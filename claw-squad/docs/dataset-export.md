@@ -71,12 +71,6 @@ cat cs.jsonl clawsquad.jsonl > review-corpus.jsonl
 
 ## What this exporter doesn't do
 
-- **Capture run-io automatically.** As of W10.6 the TS-side opt-in
-  emit isn't wired into the orchestrator; the dataset module is
-  ready to consume `run-io` events but the orchestrator agent loop
-  hasn't been instrumented yet. The Python side already emits via
-  `runner.run_task_and_log`, so cs-only deployments work end-to-end
-  today.
 - **Filter on review verdict.** Today every captured run-io ships in
   the dataset. Post-filter the JSONL with `jq` if you only want runs
   whose verdict was "ship it" — verdict-aware filtering is a
@@ -84,3 +78,15 @@ cat cs.jsonl clawsquad.jsonl > review-corpus.jsonl
 - **Train models.** This is data-prep only; the actual training is
   axolotl / unsloth / TRL. `scripts/finetune-reviewer.sh` (Python
   side) is a reference invocation.
+
+## Implementation note
+
+The Planner / Coder / Reviewer agents accept an optional `runLog`
+field on their input. The orchestrator threads its existing run-log
+handle through, and the agents call `emitRunIoIfEnabled()` after each
+`provider.invoke()`. The env-var gate (`CLAW_SQUAD_LOG_PROMPTS`) lives
+in `runs/dataset.ts#runIoEnabled` so the call site is a one-liner.
+
+This means: **no orchestrator code changes are needed to enable IO
+capture** — flip the env var and rerun. The capture is opt-in by
+default for privacy.

@@ -68,6 +68,36 @@ export function makeRunIoEvent(args: {
   };
 }
 
+/**
+ * Emit a `run-io` event when CLAW_SQUAD_LOG_PROMPTS is enabled and a
+ * runLog handle is available. The agent layer's hot path calls this
+ * unconditionally after each provider.invoke; the gate lives here so
+ * the call site stays a one-liner.
+ *
+ * Decoupled from `appendEvent` import to avoid a circular dep —
+ * callers pass the appender they already have.
+ */
+export function emitRunIoIfEnabled(
+  appender: (event: Extract<RunLogEvent, { type: "run-io" }>) => void,
+  args: {
+    runLog?: { path: string } | null | undefined;
+    role: RoleBucket;
+    subagentName?: string;
+    prompt: string;
+    responseText: string;
+  },
+): void {
+  if (!args.runLog || !runIoEnabled()) return;
+  appender(
+    makeRunIoEvent({
+      role: args.role,
+      subagentName: args.subagentName,
+      prompt: args.prompt,
+      responseText: args.responseText,
+    }),
+  );
+}
+
 // --- Walking -------------------------------------------------------
 
 export interface WalkFilters {

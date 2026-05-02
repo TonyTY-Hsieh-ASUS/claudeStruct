@@ -12,6 +12,8 @@
 
 import { loadPrompt } from "../prompts.js";
 import type { InvokeResult, Provider } from "../providers/types.js";
+import { appendEvent, type RunLogHandle } from "../runs/log.js";
+import { emitRunIoIfEnabled } from "../runs/dataset.js";
 import type { ReviewVerdict, TodoItem } from "../types.js";
 
 export interface CoderFileEdit {
@@ -47,6 +49,8 @@ interface CoderInput {
   skillsBlock?: string;
   provider: Provider;
   onText?: (chunk: string) => void;
+  // Optional run-log handle for opt-in W10.6 dataset capture.
+  runLog?: RunLogHandle;
 }
 
 function buildUserMessage(input: CoderInput): string {
@@ -135,6 +139,13 @@ export async function runCoder(input: CoderInput): Promise<CoderOutcome> {
     systemPrompt,
     userMessage,
     onText: input.onText,
+  });
+
+  emitRunIoIfEnabled((e) => appendEvent(input.runLog!, e), {
+    runLog: input.runLog,
+    role: "coder",
+    prompt: userMessage,
+    responseText: usage.text,
   });
 
   return {
