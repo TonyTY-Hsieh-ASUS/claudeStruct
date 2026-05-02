@@ -164,7 +164,7 @@ Tests don't hit the API or the embedding endpoint — every external surface
 - [`docs/nightly-review.md`](docs/nightly-review.md) — nightly code-health watchdog
 - [`docs/cs.md`](docs/cs.md) — full CLI reference
 - [`claw-squad/docs/`](claw-squad/docs/) — orchestrator agents, skills, hooks, providers, hybrid routing, sandbox hardening, MCP
-- [`TODO.md`](TODO.md) — wave-by-wave roadmap (W1–W10)
+- [`TODO.md`](https://github.com/tonyandclaw/claudeStruct/blob/main/TODO.md) — wave-by-wave roadmap (W1–W10)
 
 ## Model
 

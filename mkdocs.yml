@@ -50,10 +50,17 @@ nav:
       - Install: install.md
       - claudestruct (cs): cs.md
       - claw-squad: claw-squad.md
+  - Local-first features:
+      - Smart context (RAG): smart-context.md
+      - Voice REPL: voice.md
+      - Dataset export: dataset-export.md
+      - Nightly watchdog: nightly-review.md
   - Daemon mode (preview):
       - cs serve: server.md
+      - Home-server deploy: home-server.md
       - Audit log: audit.md
       - Billing: billing.md
+      - SLO endpoint: slo.md
   - claw-squad internals:
       - Agents: claw-squad/agents.md
       - Skills: claw-squad/skills.md

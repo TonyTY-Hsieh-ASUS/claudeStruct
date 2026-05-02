@@ -99,6 +99,22 @@ export type RunLogEvent =
         cacheSavedUsd: number;
         calls: number;
       };
+    }
+  | {
+      // W10.6 — opt-in IO capture for fine-tuning datasets. Off by
+      // default because raw prompts often contain proprietary code +
+      // credentials. Set CLAW_SQUAD_LOG_PROMPTS=1 to enable; consumed
+      // by `claw-squad dataset export`. Mirrors the Python-side
+      // `run.io` event in claudestruct.logging.
+      type: "run-io";
+      ts: string;
+      role: RoleBucket;
+      subagentName?: string;
+      prompt: string;
+      responseText: string;
+      // True when the model's response exceeded the 100 KB cap and
+      // got truncated before disk write.
+      responseTruncated?: boolean;
     };
 
 /**
