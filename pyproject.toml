@@ -64,6 +64,15 @@ openai = [
 # command and so a future sqlite-vec / hnswlib upgrade can land here
 # without breaking any existing pin.
 smart-context = []
+# `pip install claudestruct[voice]` enables `cs voice transcribe` /
+# `cs voice run` (W10.7). faster-whisper is the STT engine;
+# sounddevice + numpy handle mic capture + the float32 array Whisper
+# expects. None of these are imported until `cs voice` actually runs.
+voice = [
+  "faster-whisper>=1.0",
+  "sounddevice>=0.4",
+  "numpy>=1.24",
+]
 
 [project.scripts]
 cs = "claudestruct.cli:main"

@@ -402,6 +402,98 @@ def dataset_group() -> None:
     pass
 
 
+@main.group("voice", help="Voice capture + local Whisper transcription (W10.7).")
+def voice_group() -> None:
+    pass
+
+
+def _voice_common_options(func):
+    func = click.option("--model", "voice_model", default="base.en", show_default=True,
+                        help="Whisper model name. Larger = slower + more accurate.")(func)
+    func = click.option("--language", "voice_language", default=None,
+                        help="ISO 639-1 / Whisper language code (e.g. 'zh'). "
+                             "Default: auto-detect.")(func)
+    func = click.option("--seconds", "voice_seconds", type=float, default=5.0, show_default=True,
+                        help="How long to record from the default mic.")(func)
+    func = click.option("--device", "voice_device", default=None,
+                        help="Whisper compute device override (cpu / cuda / auto). "
+                             "Default lets faster-whisper pick.")(func)
+    return func
+
+
+def _build_voice_config(*, voice_model, voice_language, voice_seconds, voice_device):
+    from claudestruct.voice import VoiceConfig
+
+    return VoiceConfig(
+        model=voice_model,
+        language=voice_language,
+        seconds=voice_seconds,
+        device=voice_device,
+    )
+
+
+@voice_group.command("transcribe", help="Record from the default mic and print the transcription.")
+@_voice_common_options
+def voice_transcribe_cmd(voice_model, voice_language, voice_seconds, voice_device):
+    from claudestruct.voice import VoiceError, capture_and_transcribe
+
+    cfg = _build_voice_config(
+        voice_model=voice_model, voice_language=voice_language,
+        voice_seconds=voice_seconds, voice_device=voice_device,
+    )
+    err.print(f"[dim]listening for {cfg.seconds:.1f}s…[/dim]")
+    try:
+        text = capture_and_transcribe(cfg)
+    except VoiceError as exc:
+        err.print(f"[red]{exc}[/red]")
+        sys.exit(2)
+    if not text:
+        err.print("[yellow]no speech detected[/yellow]")
+        sys.exit(1)
+    # Plain stdout (no Rich formatting) so callers can pipe:
+    #   cs dev "$(cs voice transcribe)"
+    click.echo(text)
+
+
+@voice_group.command("run", help="Record + transcribe + invoke a cs task with the result.")
+@click.argument("task", type=click.Choice(["dev", "review", "plan", "debug"]))
+@_voice_common_options
+@click.option("--print-only", is_flag=True,
+              help="Print the transcription instead of running the task. Useful "
+                   "for sanity-checking the mic before committing to an LLM call.")
+def voice_run_cmd(task: str, voice_model, voice_language, voice_seconds, voice_device,
+                  print_only: bool):
+    from claudestruct.voice import VoiceError, capture_and_transcribe
+
+    cfg = _build_voice_config(
+        voice_model=voice_model, voice_language=voice_language,
+        voice_seconds=voice_seconds, voice_device=voice_device,
+    )
+    err.print(f"[dim]listening for {cfg.seconds:.1f}s…[/dim]")
+    try:
+        text = capture_and_transcribe(cfg)
+    except VoiceError as exc:
+        err.print(f"[red]{exc}[/red]")
+        sys.exit(2)
+    if not text:
+        err.print("[yellow]no speech detected; not invoking cs " + task + "[/yellow]")
+        sys.exit(1)
+    err.print(f"[bold]heard:[/bold] {text}")
+    if print_only:
+        click.echo(text)
+        return
+    # Dispatch the captured task. We call _run_common directly rather
+    # than invoking another Click command so we share the exact same
+    # argument resolution + budget code path the user would get from
+    # `cs <task> "<text>"` typed by hand.
+    _run_common(
+        task, text, (), _resolve_root(None),
+        DEFAULT_MODEL, DEFAULT_MAX_TOKENS, None,
+        False, False, False, None, None, None, False, None,
+        smart_context=False,
+    )
+
+
 @dataset_group.command("export", help="Walk .claudestruct/runs/*.jsonl and write a training-format JSONL.")
 @click.option("--out", "out_path", type=click.Path(dir_okay=False), required=True,
               help="Output JSONL path. Created (or overwritten) by this command.")

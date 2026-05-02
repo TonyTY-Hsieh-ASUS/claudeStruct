@@ -383,8 +383,7 @@ Goal: make claudeStruct usable end-to-end on a local AI workstation (Asus GX10 /
 - [x] **W9.5 — RAG-style smart context gathering** ✅ (shipped as W10.5; see Wave 10 entry)
 
 - [x] **W9.6 — Dataset export for fine-tuning** ✅ (Python side shipped as W10.6; claw-squad TS-side deferred)
-- [ ] **W9.7 — Voice REPL (`cs voice` / `claw-squad voice`)** (tracked as W10.7)
-  - Same scope as W10.7. Open until either lands.
+- [x] **W9.7 — Voice REPL (`cs voice` / `claw-squad voice`)** ✅ (Python side shipped as W10.7; claw-squad TS-side deferred)
 
 ### Tier 3 — operational polish
 
@@ -472,11 +471,16 @@ Goal: turn the existing multi-tool stack into a first-class local-AI workstation
   - 34 tests in `tests/test_dataset.py`: walker filter matrix, corrupt-line handling, sort-determinism, alpaca/chat format conversion, empty-result, unknown-format error, parent-dir creation, `parse_since` (date / ISO / Z-suffix / garbage), `run_io` schema + truncation cap, `_log_prompts_enabled` env-gate matrix
   - claw-squad-side `dataset export` deferred to a separate TS PR — same shape will land there when the worker run logs grow IO capture
 
-- [ ] **W10.7 — Voice REPL via local Whisper**
-  - **Pain**: typing a multi-paragraph dev/debug description from scratch is slow; the cs flow has no audio surface.
-  - **What**: `cs voice` subcommand wraps `faster-whisper` (CPU or CUDA via the same Linux box). Streams microphone → STT → `cs dev` / `cs review` with the transcribed text pre-filled (user can edit before send). Sub-200ms STT latency on GX10's compute budget.
-  - **Scope**: ~150 LOC + 4 tests (mock audio stream, mock whisper client, cancel mid-stream, append-vs-replace behavior).
-  - **Win**: hands-busy / car / kitchen workflows stay productive.
+- [x] **W10.7 — Voice REPL via local Whisper** ✅
+  - `src/claudestruct/voice.py`: `VoiceConfig` dataclass (defaults target GX10 — `base.en`, 16 kHz mono, 5 s capture, auto device), `record_audio()` via sounddevice, `transcribe_audio()` via faster-whisper, `capture_and_transcribe()` orchestrator with `recorder` / `transcriber` injection points so tests skip the real audio + Whisper paths
+  - Lazy-imports for `sounddevice` / `numpy` / `faster_whisper` — base install pays nothing; missing dep raises `VoiceError` pointing at `pip install 'claudestruct[voice]'` rather than the bare `ImportError` stack
+  - Module-level `_MODEL_CACHE` keyed on `(model, device)` so repeated `cs voice` calls reuse loaded weights (~140 MB) instead of re-loading each time
+  - CLI: `cs voice transcribe` (record + STT + stdout for piping) and `cs voice run <task>` (record + STT + invoke `cs dev/review/plan/debug` with the captured text). Common options `--seconds` / `--language` / `--model` / `--device`; `--print-only` on `run` for sanity-checking the mic without committing to an LLM call
+  - `[voice]` extra in `pyproject.toml`: `faster-whisper>=1.0`, `sounddevice>=0.4`, `numpy>=1.24`
+  - 11 tests in `tests/test_voice.py`: `VoiceConfig` defaults + override matrix, orchestrator injection (recorder + transcriber called with right args, default config when None, `VoiceError` propagation, empty-speech), lazy-import gating (both `_import_audio_deps` + `_import_whisper`), model cache (per-config caching + `reset_model_cache`), `transcribe_audio` segment concatenation + `extras` passthrough
+  - `docs/voice.md`: setup, quick uses, flags table, traditional Chinese note, GX10 vs laptop latency table, failure-modes table, design rationale (why a subcommand not `--voice` on every task)
+  - 507 Python tests pass (was 496); ruff clean
+  - Closes W9.7 (duplicate of this item)
 
 ### Tier 3 — Push existing abstractions to the limit
 
