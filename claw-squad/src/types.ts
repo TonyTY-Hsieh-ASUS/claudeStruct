@@ -193,6 +193,15 @@ export interface RunConfig {
    * their own observability pipeline without scanning the runs dir.
    */
   logJsonPath?: string;
+  /**
+   * Use the local embedding index (built via `claw-squad index build`)
+   * to pick top-K semantically-relevant files for round 1 of each
+   * Coder task, in addition to the existing keyword-rank gatherer.
+   * The biggest payoff is on local 32B models where the 32K context
+   * window can't fit a glob walk; cloud Sonnet's 200K window absorbs
+   * the noise either way. Default false.
+   */
+  smartContext?: boolean;
 }
 
 // Per-agent provider config now lives in ./config.ts as AgentConfig.

@@ -75,16 +75,30 @@ When the index outgrows that — multi-monorepo deployments,
 hundreds of thousands of files — the storage layer is the right
 swap, not the algorithm. `Index.query` is the seam.
 
+## Use the index in a `run`
+
+```bash
+claw-squad run --smart-context "wire the billing webhook into the worker queue"
+```
+
+For each TODO, the orchestrator queries the index with
+`title + "\n" + description`, takes the top-K (k=20) hits, and feeds
+them to the existing `gatherInitialContext` ahead of the keyword-rank
+results. The per-file / per-byte budgets still clamp the final set,
+so a giant top-K can't blow out the Coder's prompt.
+
+If the index is empty or the embedding endpoint is unreachable, the
+orchestrator logs a one-liner and falls back to keyword rank — runs
+never abort because of smart-context alone.
+
 ## What's next
 
-- **Wire into the Coder/Reviewer context-gather** — second PR.
-  Adds a `--smart-context` flag on `claw-squad run` that calls
-  `smartPaths(repoRoot, todoTitle + todoDescription, k=20)` and
-  feeds the result into the existing `gatherInitialContext`'s
-  explicit-paths slot, so the budget logic stays unchanged.
 - **Cross-tool index sharing** — have `cs index build` and
   `claw-squad index build` write to a common directory + format so
   one process pays the embedding cost. The two SHAs differ today
   by storage shape only; the embedding model + per-file cap are
   identical, so the data is convertible.
 - **Watch mode** — auto-rebuild on file save / git checkout.
+- **Reviewer-side integration** — apply the same top-K trick when
+  building the Reviewer's diff context for the rare case where the
+  Reviewer needs sibling files beyond the diff.

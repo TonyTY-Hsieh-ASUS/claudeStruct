@@ -848,6 +848,32 @@ async function runTaskLoop(args: {
       );
       fileContext = readFileSnapshots(repoRoot, contextPaths);
     } else {
+      // Smart-context: ask the local embedding index for top-K
+      // semantically-relevant files; pass them to the gatherer as
+      // extra explicit paths. Best-effort — a missing index or an
+      // unreachable embedding endpoint logs a one-liner and falls
+      // back to the keyword-rank gatherer alone.
+      let smartPathsFromIndex: string[] = [];
+      if (config.smartContext) {
+        try {
+          const { smartPaths } = await import("./index/build.js");
+          const query = `${task.title}\n${task.description}`;
+          smartPathsFromIndex = await smartPaths(repoRoot, query, { k: 20 });
+          if (smartPathsFromIndex.length > 0) {
+            ui.log(
+              pc.dim(
+                `  [smart-context] index returned ${smartPathsFromIndex.length} hit(s)`,
+              ),
+            );
+          }
+        } catch (err) {
+          ui.log(
+            pc.yellow(
+              `  [smart-context] index unavailable (${(err as Error).message}); falling back to keyword rank`,
+            ),
+          );
+        }
+      }
       const gathered = gatherInitialContext({
         git: {
           repoRoot,
@@ -855,6 +881,7 @@ async function runTaskLoop(args: {
         },
         todoTitle: task.title,
         todoDescription: task.description,
+        extraExplicitPaths: smartPathsFromIndex,
       });
       fileContext = gathered.files;
       if (gathered.files.length > 0) {
