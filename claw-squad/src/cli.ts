@@ -901,6 +901,69 @@ runsCmd
   );
 
 
+// claw-squad smart-context — TS mirror of `cs index` (W10.5). Builds
+// a local embedding index of tracked source files so the Coder /
+// Reviewer can pick top-K semantic matches instead of keyword rank.
+// The `--smart-context` flag on `claw-squad run` lands separately;
+// this PR ships the index management surface.
+const indexCmd = program
+  .command("index")
+  .description(
+    "Manage the local embedding index for --smart-context. " +
+      "Defaults to Ollama at http://localhost:11434/v1; override via " +
+      "CLAW_SQUAD_EMBED_BASE_URL / _MODEL / _API_KEY.",
+  );
+
+indexCmd
+  .command("build")
+  .description("Walk tracked source files and (re-)embed each into the local index.")
+  .option("--root <path>", "repo root", process.cwd())
+  .action(async (opts: { root: string }) => {
+    const { buildIndex } = await import("./index/build.js");
+    const { EmbeddingError } = await import("./index/embed.js");
+    try {
+      const stats = await buildIndex(opts.root, {
+        onProgress: (msg) => console.log(pc.dim(msg)),
+      });
+      console.log(
+        `walked ${stats.walked} file(s); ` +
+          `embedded ${stats.embedded}; ` +
+          `skipped ${stats.skippedUnchanged} unchanged, ${stats.skippedUnreadable} unreadable`,
+      );
+    } catch (err) {
+      if (err instanceof EmbeddingError) {
+        console.error(pc.red(`embedding endpoint failed: ${err.message}`));
+        process.exit(2);
+      }
+      throw err;
+    }
+  });
+
+indexCmd
+  .command("stats")
+  .description("Print row count + embedding dimension for the local index.")
+  .option("--root <path>", "repo root", process.cwd())
+  .action(async (opts: { root: string }) => {
+    const { Index } = await import("./index/store.js");
+    const idx = Index.open(opts.root);
+    const s = idx.stats();
+    console.log(`entries: ${s.entries}`);
+    console.log(`dimension: ${s.dimension}`);
+  });
+
+indexCmd
+  .command("clear")
+  .description("Drop every row from the local index.")
+  .option("--root <path>", "repo root", process.cwd())
+  .action(async (opts: { root: string }) => {
+    const { Index } = await import("./index/store.js");
+    const idx = Index.open(opts.root);
+    const n = idx.clear();
+    idx.commit();
+    console.log(`deleted ${n} entr${n === 1 ? "y" : "ies"}`);
+  });
+
+
 // W10.6 — TS-side dataset export. Mirrors `cs dataset export` from
 // claudestruct so a single team can mine both tools' run logs into
 // one fine-tune corpus without writing custom scripts.
