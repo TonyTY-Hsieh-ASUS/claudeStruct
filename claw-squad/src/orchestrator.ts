@@ -512,6 +512,7 @@ export async function runOrchestrator(args: {
       memorySnippet,
       provider: providers.planner,
       onText: (c) => ui.streamAgent("planner", c),
+      runLog,
     });
     track("planner", outcome.usage);
     if (!checkBudget()) return { state, totals, reason: "aborted" };
@@ -559,6 +560,7 @@ export async function runOrchestrator(args: {
       }),
       provider: providers.planner,
       onText: (c) => ui.streamAgent("planner", c),
+      runLog,
     });
     track("planner", outcome.usage);
     if (!checkBudget()) return { state, totals, reason: "aborted" };
@@ -637,6 +639,7 @@ export async function runOrchestrator(args: {
       hooks,
       allSkills,
       logPhase,
+      runLog,
     });
 
     if (reason === "blocked" || reason === "aborted") {
@@ -696,6 +699,7 @@ export async function runOrchestrator(args: {
       completedTaskSummary: summarizeTask(next, state.reviewHistory),
       provider: providers.planner,
       onText: (c) => ui.streamAgent("planner", c),
+      runLog,
     });
     track("planner", plannerReview.usage);
     if (!checkBudget()) return { state, totals, reason: "aborted" };
@@ -734,6 +738,9 @@ async function runTaskLoop(args: {
   allSkills: Skill[];
   /** Append a phase marker to the run log. Best-effort; never throws. */
   logPhase: (label: string, message?: string) => void;
+  // Threaded through so the coder/reviewer agents can emit opt-in
+  // run-io events for `claw-squad dataset export` (W10.6).
+  runLog: RunLogHandle;
 }): Promise<"complete" | "blocked" | "aborted"> {
   const {
     task,
@@ -748,6 +755,7 @@ async function runTaskLoop(args: {
     hooks,
     allSkills,
     logPhase,
+    runLog,
   } = args;
   const { spec: repoSpec, ownerRepo, baseBranch } = repo;
   const repoRoot = repoSpec.root;
@@ -884,6 +892,7 @@ async function runTaskLoop(args: {
       skillsBlock,
       provider: providers.coder,
       onText: (c) => ui.streamAgent("coder", c),
+      runLog,
     });
     track("coder", coderOut.usage);
     if (!checkBudget()) return "aborted";
@@ -1025,6 +1034,7 @@ async function runTaskLoop(args: {
       coderRationale: coderOut.rationale,
       provider: providers.reviewer,
       onText: (c) => ui.streamAgent("reviewer", c),
+      runLog,
     });
     track("reviewer", reviewOut.usage);
     if (!checkBudget()) return "aborted";

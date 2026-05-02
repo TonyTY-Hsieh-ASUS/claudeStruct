@@ -335,3 +335,104 @@ describe("parseSince", () => {
     expect(parseSince("")).toBeNull();
   });
 });
+
+// --- Agent integration: run-io emission ----------------------------
+//
+// Locks in the W10.6 wiring through to a real agent: when the env gate
+// is on AND a runLog is provided, runReviewer emits a `run-io` event;
+// when either is missing, it doesn't. Without these tests, a future
+// refactor could silently drop the emit and the dataset exporter would
+// just produce empty files.
+
+describe("agent emits run-io when CLAW_SQUAD_LOG_PROMPTS=1", () => {
+  let root: string;
+  const originalEnv = process.env.CLAW_SQUAD_LOG_PROMPTS;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "claw-emit-"));
+  });
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+    if (originalEnv === undefined) delete process.env.CLAW_SQUAD_LOG_PROMPTS;
+    else process.env.CLAW_SQUAD_LOG_PROMPTS = originalEnv;
+  });
+
+  // Minimal Provider that returns a canned response without touching
+  // any real backend. The reviewer's `parseReviewerOutput` expects a
+  // ```json block, so we feed one back to keep the agent happy.
+  function fakeProvider() {
+    return {
+      name: "anthropic" as const,
+      invoke: async () => ({
+        text:
+          'Looks good. ```json\n{"decision":"approve","summary":"ok","findings":[]}\n```',
+        inputTokens: 1,
+        outputTokens: 1,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        costUsd: 0,
+      }),
+    };
+  }
+
+  it("emits run-io when env gate is on + runLog is provided", async () => {
+    process.env.CLAW_SQUAD_LOG_PROMPTS = "1";
+    const { startRun, loadOneRun } = await import("../src/runs/log.js");
+    const { runReviewer } = await import("../src/agents/reviewer.js");
+
+    const runLog = startRun(root);
+    await runReviewer({
+      todo: { id: "T1", title: "t", description: "d", status: "pending", iterations: 0 },
+      diff: "diff --git a/x b/x\n",
+      provider: fakeProvider(),
+      runLog,
+    });
+
+    const events = loadOneRun(runLog.path);
+    const ioEvents = events.filter((e) => e.type === "run-io");
+    expect(ioEvents.length).toBe(1);
+    expect((ioEvents[0] as { type: "run-io"; role: string }).role).toBe(
+      "reviewer",
+    );
+  });
+
+  it("does not emit run-io when env gate is off (default)", async () => {
+    delete process.env.CLAW_SQUAD_LOG_PROMPTS;
+    const { startRun, loadOneRun } = await import("../src/runs/log.js");
+    const { runReviewer } = await import("../src/agents/reviewer.js");
+
+    const runLog = startRun(root);
+    await runReviewer({
+      todo: { id: "T1", title: "t", description: "d", status: "pending", iterations: 0 },
+      diff: "",
+      provider: fakeProvider(),
+      runLog,
+    });
+
+    // The runLog file may not even exist (no events written), or may
+    // contain unrelated events; either way, no run-io.
+    let events: ReturnType<typeof loadOneRun> = [];
+    try {
+      events = loadOneRun(runLog.path);
+    } catch {
+      /* file absent => no events */
+    }
+    expect(events.filter((e) => e.type === "run-io").length).toBe(0);
+  });
+
+  it("does not emit run-io when env gate is on but no runLog", async () => {
+    process.env.CLAW_SQUAD_LOG_PROMPTS = "1";
+    const { runReviewer } = await import("../src/agents/reviewer.js");
+
+    // Just confirm the call doesn't throw without a runLog handle —
+    // the agent's runLog field is optional. A missing handle means
+    // "skip the capture", not "crash the run".
+    await expect(
+      runReviewer({
+        todo: { id: "T1", title: "t", description: "d", status: "pending", iterations: 0 },
+        diff: "",
+        provider: fakeProvider(),
+      }),
+    ).resolves.not.toThrow();
+  });
+});
