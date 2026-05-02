@@ -57,6 +57,22 @@ openai = [
   "openai>=1.50.0",
   "tiktoken>=0.7.0",
 ]
+# `pip install claudestruct[smart-context]` enables `cs index build`
+# + the `--smart-context` flag (W10.5). The index module itself uses
+# only stdlib (sqlite3 + urllib + json), so this extra is empty
+# today — declared so the docs can point users at a stable install
+# command and so a future sqlite-vec / hnswlib upgrade can land here
+# without breaking any existing pin.
+smart-context = []
+# `pip install claudestruct[voice]` enables `cs voice transcribe` /
+# `cs voice run` (W10.7). faster-whisper is the STT engine;
+# sounddevice + numpy handle mic capture + the float32 array Whisper
+# expects. None of these are imported until `cs voice` actually runs.
+voice = [
+  "faster-whisper>=1.0",
+  "sounddevice>=0.4",
+  "numpy>=1.24",
+]
 
 [project.scripts]
 cs = "claudestruct.cli:main"

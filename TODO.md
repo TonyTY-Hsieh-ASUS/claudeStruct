@@ -163,10 +163,14 @@ Goal: anyone can `pip install claudestruct` / `npm install claw-squad` / `docker
   - mkdocs-material wraps `claw-squad/docs/*.md` + the root README/CHANGELOG/CONTRIBUTING/SECURITY/TODO via `mkdocs-include-markdown-plugin` (single source of truth, no duplicated content)
   - `.github/workflows/docs.yml` builds on every PR (`mkdocs build --strict`) and deploys to GitHub Pages on push to main via `actions/deploy-pages@v4`
   - GH Pages must be enabled at the repo level (manual step) for the deploy job to land; build job runs unconditionally
-- [~] **W4.6 — README polish + demo**
+- [~] **W4.6 — README polish + demo** (most polish shipped; live demo gated on external API key)
   - CI / Docs / License / Container badges added to the README header
-  - Asciinema recording of `cs dev` and `claw-squad run` in action — pending (needs an env with API key)
-  - Per-platform install (Homebrew, scoop, snap) tracked under W7.7
+  - README rewrite covers the full Wave 9/10 surface: `cs serve` / `cs mcp` / `cs index` + `--smart-context` / `cs voice` / `cs dataset export` / `cs dashboard / metrics` / `claw-squad` / `claw-sandbox`. Provider matrix (cloud Anthropic / cloud OpenAI / Ollama / vLLM / SGLang / llama.cpp) called out
+  - Install section enumerates every extra (`[server]` / `[smart-context]` / `[voice]` / `[openai]` / `[otel]` / `[sentry]`) with cost-of-each rationale
+  - New "Docs" section indexes `docs/*.md` + `claw-squad/docs/*.md` + `TODO.md` so first-time visitors don't hunt for the deeper material
+  - CHANGELOG.md updated to capture the full Wave 10 wave (W10.1–10.10) + W9.4 prompt cache, organised under a Wave 10 sub-header
+  - Asciinema recording of `cs dev` / `claw-squad run` — pending (needs an env with a real API key, which CI doesn't have)
+  - Per-platform install (Homebrew, scoop, snap, AUR) ships under W7.7 and is now linked from the README
 
 ---
 
@@ -380,12 +384,10 @@ Goal: make claudeStruct usable end-to-end on a local AI workstation (Asus GX10 /
   - `is_enabled()` reads `CLAUDESTRUCT_LLM_CACHE`; `stats()` + `clear()` for `cs dashboard` integration.
   - 30 new tests. CLI flag `--llm-cache` + integration into `client.py` deferred to W9.1 PR (it'll wire alongside the OpenAI-compat client).
 
-- [ ] **W9.5 — RAG-style smart context gathering** (tracked as W10.5)
-  - Same scope as W10.5. Open until either lands.
+- [x] **W9.5 — RAG-style smart context gathering** ✅ (shipped as W10.5; see Wave 10 entry)
 
 - [x] **W9.6 — Dataset export for fine-tuning** ✅ (Python side shipped as W10.6; claw-squad TS-side deferred)
-- [ ] **W9.7 — Voice REPL (`cs voice` / `claw-squad voice`)** (tracked as W10.7)
-  - Same scope as W10.7. Open until either lands.
+- [x] **W9.7 — Voice REPL (`cs voice` / `claw-squad voice`)** ✅ (Python side shipped as W10.7; claw-squad TS-side deferred)
 
 ### Tier 3 — operational polish
 
@@ -454,11 +456,15 @@ Goal: turn the existing multi-tool stack into a first-class local-AI workstation
   - Cache write is best-effort: `OSError` is logged to stderr and swallowed — the user's run never aborts because the cache failed to grow
   - Tests: 46 cases — `is_enabled_for` policy matrix (auto/Anthropic, auto/OpenAI, explicit on/off, per-run override wins), `cache_key` extensions (effort/max_tokens differs, default-stable), integration (first call misses → write, second hits → no provider call, stream replay still fires, `--no-llm-cache` bypass, Anthropic auto-OFF, opt-in works on Anthropic, write-failure non-fatal)
 
-- [ ] **W10.5 — RAG-style smart context with local embeddings**
-  - **Pain**: `context.py` walks the repo via globs and clips at `--max-bytes`. Large monorepos either OOM or send mostly-irrelevant files.
-  - **What**: `cs index` builds a local embedding index (e.g. `nomic-embed-text` via Ollama) into `~/.claudestruct/index/<repo-sha>.db` (sqlite-vec or hnswlib). New `cs review --semantic` / `cs dev --semantic` flag swaps the gatherer for a top-K semantic retriever; per-task budget still enforced. The 128 GB headroom on GX10 trivially holds embedding model + Coder LLM concurrently.
-  - **Scope**: ~300 LOC + 12 tests (index build, query top-K, budget intersection, opt-out fallback).
-  - **Win**: review quality on 100k+-file repos jumps from "guessed at random" to "actually about the diff".
+- [x] **W10.5 — RAG-style smart context with local embeddings** ✅
+  - `src/claudestruct/embed.py`: stdlib-only OpenAI-compatible `/embeddings` POSTer (urllib + json). Defaults target `http://localhost:11434/v1` + `nomic-embed-text` (Ollama on a GX10); `CLAUDESTRUCT_EMBED_BASE_URL` / `_MODEL` / `_API_KEY` overrides cover cloud OpenAI / vLLM / SGLang / llama.cpp without code changes
+  - `src/claudestruct/index.py`: SQLite store at `~/.claudestruct/index/<repo-fingerprint>.db` (one db per repo path, sha256-of-absolute-root keeps unrelated checkouts from thrashing), pure-Python cosine. Defends against zero-norm rows, dim-mismatch (`ValueError` rather than silent truncation), `CLAUDESTRUCT_INDEX_DIR` override
+  - `src/claudestruct/indexer.py`: walks via existing `_walk_source_files` (gitignore-aware, source-extension allowlist), 16 KB per-file cap to keep request payload + sha-churn down, sha-skip on second build (`cs index build` becomes a no-op for unchanged files), batches 16 inputs per `/embeddings` call
+  - CLI: `cs index build [--root .]` / `cs index stats` / `cs index clear`. New `--smart-context` flag on `cs dev/review/plan/debug` plumbs the description into a top-K (k=20) lookup, then falls into the existing gatherer with those paths as `explicit_paths` — per-task budget still enforced. Embedding-endpoint failure exits 2 with a clear message rather than silently degrading
+  - `[smart-context]` extra in `pyproject.toml` (empty today; declared so docs can pin a stable install command and a future sqlite-vec drop-in lands without breaking anyone's pin)
+  - 21 tests in `tests/test_index.py`: round-trip, replace-on-upsert, per-repo fingerprint, env-dir override, cosine ranking correctness (3-point unit-circle), top-K respect, zero-vector returns empty, zero-norm row skip, dim-mismatch raises, file_sha256 stability, indexer walk + sha-skip + re-embed-after-edit, smart_paths returns top-K + empty-index empty, embedding client env-passthrough + empty-input short-circuit
+  - `docs/smart-context.md`: setup (Ollama + cloud OpenAI), build/stats/clear, failure-modes table, follow-ups (sqlite-vec, hybrid retrieval, claw-squad integration)
+  - 496 Python tests pass (was 475)
 
 - [x] **W10.6 — Reviewer fine-tuning from run-log history (Python side)** ✅
   - Existing logs are observability-only — no prompt + response capture. Added an opt-in `run.io` event in `logging.py` (gated on `CLAUDESTRUCT_LOG_PROMPTS=1`, default off for privacy) and emit it from `runner.run_task_and_log` after the LLM call. Response cap of 100 KB so a runaway model can't blow out the log file
@@ -469,11 +475,16 @@ Goal: turn the existing multi-tool stack into a first-class local-AI workstation
   - 34 tests in `tests/test_dataset.py`: walker filter matrix, corrupt-line handling, sort-determinism, alpaca/chat format conversion, empty-result, unknown-format error, parent-dir creation, `parse_since` (date / ISO / Z-suffix / garbage), `run_io` schema + truncation cap, `_log_prompts_enabled` env-gate matrix
   - claw-squad-side `dataset export` deferred to a separate TS PR — same shape will land there when the worker run logs grow IO capture
 
-- [ ] **W10.7 — Voice REPL via local Whisper**
-  - **Pain**: typing a multi-paragraph dev/debug description from scratch is slow; the cs flow has no audio surface.
-  - **What**: `cs voice` subcommand wraps `faster-whisper` (CPU or CUDA via the same Linux box). Streams microphone → STT → `cs dev` / `cs review` with the transcribed text pre-filled (user can edit before send). Sub-200ms STT latency on GX10's compute budget.
-  - **Scope**: ~150 LOC + 4 tests (mock audio stream, mock whisper client, cancel mid-stream, append-vs-replace behavior).
-  - **Win**: hands-busy / car / kitchen workflows stay productive.
+- [x] **W10.7 — Voice REPL via local Whisper** ✅
+  - `src/claudestruct/voice.py`: `VoiceConfig` dataclass (defaults target GX10 — `base.en`, 16 kHz mono, 5 s capture, auto device), `record_audio()` via sounddevice, `transcribe_audio()` via faster-whisper, `capture_and_transcribe()` orchestrator with `recorder` / `transcriber` injection points so tests skip the real audio + Whisper paths
+  - Lazy-imports for `sounddevice` / `numpy` / `faster_whisper` — base install pays nothing; missing dep raises `VoiceError` pointing at `pip install 'claudestruct[voice]'` rather than the bare `ImportError` stack
+  - Module-level `_MODEL_CACHE` keyed on `(model, device)` so repeated `cs voice` calls reuse loaded weights (~140 MB) instead of re-loading each time
+  - CLI: `cs voice transcribe` (record + STT + stdout for piping) and `cs voice run <task>` (record + STT + invoke `cs dev/review/plan/debug` with the captured text). Common options `--seconds` / `--language` / `--model` / `--device`; `--print-only` on `run` for sanity-checking the mic without committing to an LLM call
+  - `[voice]` extra in `pyproject.toml`: `faster-whisper>=1.0`, `sounddevice>=0.4`, `numpy>=1.24`
+  - 11 tests in `tests/test_voice.py`: `VoiceConfig` defaults + override matrix, orchestrator injection (recorder + transcriber called with right args, default config when None, `VoiceError` propagation, empty-speech), lazy-import gating (both `_import_audio_deps` + `_import_whisper`), model cache (per-config caching + `reset_model_cache`), `transcribe_audio` segment concatenation + `extras` passthrough
+  - `docs/voice.md`: setup, quick uses, flags table, traditional Chinese note, GX10 vs laptop latency table, failure-modes table, design rationale (why a subcommand not `--voice` on every task)
+  - 507 Python tests pass (was 496); ruff clean
+  - Closes W9.7 (duplicate of this item)
 
 ### Tier 3 — Push existing abstractions to the limit
 
