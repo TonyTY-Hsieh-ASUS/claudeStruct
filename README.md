@@ -15,6 +15,23 @@ four common workflows:
 - `cs plan <desc>` — architecture / implementation planning
 - `cs debug <error>` — hypothesis-ranked debugging (no jumping to fixes)
 
+Plus, on the same install:
+
+- **`cs serve`** — daemon-mode HTTP API with multi-tenant orgs/users/keys, GitHub App webhooks, audit log, billing skeleton
+- **`cs mcp`** — expose every task as an MCP tool to Claude Code (zero shell hop)
+- **`cs index` + `--smart-context`** — local embedding index → top-K file selection for large monorepos
+- **`cs voice`** — local Whisper STT for hands-busy queries
+- **`cs dataset export`** — mine your own run logs for LoRA fine-tuning
+- **`cs dashboard / metrics`** — Rich + Prometheus views over the JSONL run log
+- **`claw-squad`** — Planner → Coder → Reviewer multi-agent orchestrator (TypeScript), 8 model providers
+- **`claw-sandbox`** — Go binary that wraps subprocesses with rlimits + path validation + (Linux+root) real `CLONE_NEWNET` isolation
+
+Provider matrix is open: pick cloud Anthropic, cloud OpenAI, or any
+OpenAI-compatible local server (Ollama / vLLM / SGLang / llama.cpp) on
+a GX10 / NUC / always-on box. The `[hybrid](claw-squad/docs/hybrid-routing.md)`
+preset runs Planner on cloud Sonnet for IQ-heavy reasoning + Coder/Reviewer
+on local Ollama, costing about 25 % of all-cloud on a typical run.
+
 ## Why
 
 Every extra byte you send to the API costs tokens. Every byte that changes
@@ -40,9 +57,22 @@ between calls kills your prompt cache. `claudestruct` attacks both:
 ## Install
 
 ```bash
-pip install -e .
-export ANTHROPIC_API_KEY=sk-ant-...
+pip install -e .                       # base install — covers all four cs tasks
+pip install -e '.[server]'             # adds cs serve (FastAPI + multi-tenant)
+pip install -e '.[smart-context]'      # adds cs index + --smart-context (W10.5)
+pip install -e '.[voice]'              # adds cs voice (faster-whisper, W10.7)
+pip install -e '.[openai]'             # adds the OpenAI-compat provider (W10.1)
+pip install -e '.[otel,sentry]'        # observability extras
+
+export ANTHROPIC_API_KEY=sk-ant-...    # cloud Anthropic — the default path
+# Or run fully local on a GX10:
+# export CLAUDESTRUCT_PROVIDER=openai
+# export CLAUDESTRUCT_BASE_URL=http://localhost:11434/v1
+# export CLAUDESTRUCT_MODEL_DEFAULT=qwen2.5-coder:32b
 ```
+
+Container (`ghcr.io/tonyandclaw/claudestruct`) and per-platform packages
+(Homebrew, Scoop, AUR, Snap) live under [`packaging/`](packaging/).
 
 ## Usage
 
@@ -116,11 +146,25 @@ JSON serialization, or varying tool lists).
 ## Testing
 
 ```bash
-pip install -e .
-pytest tests/
+pip install -e '.[server]'   # the [server] extra unlocks the cs-serve / RBAC tests
+pytest                       # 507 cases, ~17 s, no API calls
+ruff check src/ tests/       # lint gate (CI-blocking)
 ```
 
-Tests don't hit the API — they exercise context gathering only.
+Tests don't hit the API or the embedding endpoint — every external surface
+(Anthropic, OpenAI-compat, mic, Whisper) is mocked or skipped via fixtures.
+
+## Docs
+
+- [`docs/server.md`](docs/server.md) — multi-tenant HTTP API + RBAC
+- [`docs/home-server.md`](docs/home-server.md) — always-on Linux deploy (Tailscale / Caddy)
+- [`docs/smart-context.md`](docs/smart-context.md) — `--smart-context` + `cs index`
+- [`docs/voice.md`](docs/voice.md) — `cs voice` (local Whisper)
+- [`docs/dataset-export.md`](docs/dataset-export.md) — fine-tuning data export
+- [`docs/nightly-review.md`](docs/nightly-review.md) — nightly code-health watchdog
+- [`docs/cs.md`](docs/cs.md) — full CLI reference
+- [`claw-squad/docs/`](claw-squad/docs/) — orchestrator agents, skills, hooks, providers, hybrid routing, sandbox hardening, MCP
+- [`TODO.md`](TODO.md) — wave-by-wave roadmap (W1–W10)
 
 ## Model
 

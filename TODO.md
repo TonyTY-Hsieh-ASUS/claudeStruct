@@ -163,10 +163,14 @@ Goal: anyone can `pip install claudestruct` / `npm install claw-squad` / `docker
   - mkdocs-material wraps `claw-squad/docs/*.md` + the root README/CHANGELOG/CONTRIBUTING/SECURITY/TODO via `mkdocs-include-markdown-plugin` (single source of truth, no duplicated content)
   - `.github/workflows/docs.yml` builds on every PR (`mkdocs build --strict`) and deploys to GitHub Pages on push to main via `actions/deploy-pages@v4`
   - GH Pages must be enabled at the repo level (manual step) for the deploy job to land; build job runs unconditionally
-- [~] **W4.6 — README polish + demo**
+- [~] **W4.6 — README polish + demo** (most polish shipped; live demo gated on external API key)
   - CI / Docs / License / Container badges added to the README header
-  - Asciinema recording of `cs dev` and `claw-squad run` in action — pending (needs an env with API key)
-  - Per-platform install (Homebrew, scoop, snap) tracked under W7.7
+  - README rewrite covers the full Wave 9/10 surface: `cs serve` / `cs mcp` / `cs index` + `--smart-context` / `cs voice` / `cs dataset export` / `cs dashboard / metrics` / `claw-squad` / `claw-sandbox`. Provider matrix (cloud Anthropic / cloud OpenAI / Ollama / vLLM / SGLang / llama.cpp) called out
+  - Install section enumerates every extra (`[server]` / `[smart-context]` / `[voice]` / `[openai]` / `[otel]` / `[sentry]`) with cost-of-each rationale
+  - New "Docs" section indexes `docs/*.md` + `claw-squad/docs/*.md` + `TODO.md` so first-time visitors don't hunt for the deeper material
+  - CHANGELOG.md updated to capture the full Wave 10 wave (W10.1–10.10) + W9.4 prompt cache, organised under a Wave 10 sub-header
+  - Asciinema recording of `cs dev` / `claw-squad run` — pending (needs an env with a real API key, which CI doesn't have)
+  - Per-platform install (Homebrew, scoop, snap, AUR) ships under W7.7 and is now linked from the README
 
 ---
 
