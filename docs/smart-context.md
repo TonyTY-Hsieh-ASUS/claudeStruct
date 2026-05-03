@@ -86,10 +86,16 @@ context source.
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| `embedding endpoint unreachable` | Ollama not running, wrong port | `ollama serve`, or set `CLAUDESTRUCT_EMBED_BASE_URL` |
-| `--smart-context: index returned no hits` | Forgot `cs index build` | Run it once; subsequent runs are incremental |
+| `--smart-context: embed endpoint unreachable …; falling back to keyword/diff walk` | Ollama not running, wrong port | `ollama serve`, or set `CLAUDESTRUCT_EMBED_BASE_URL` (the run still proceeds with the default gatherer) |
+| `--smart-context: index returned no hits; falling back …` | Forgot `cs index build` | Run it once; subsequent runs are incremental |
 | `embedding dim mismatch: 768 vs 1024` | Two embedding models in one index | `cs index clear` then rebuild with one model |
 | Slow first build | First-time embed of a 50k-file monorepo | Expected; subsequent builds skip unchanged |
+
+`--smart-context` is **best-effort**: when the embedding endpoint
+is unreachable or the index is empty, the run prints a yellow warning
+and falls back to the same keyword/diff gatherer it'd use without
+the flag. This matches `claw-squad run --smart-context` behaviour and
+means a flaky Ollama can't hard-abort an otherwise-fine run.
 
 ## What's next
 
