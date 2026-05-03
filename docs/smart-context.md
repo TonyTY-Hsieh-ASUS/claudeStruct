@@ -97,6 +97,33 @@ and falls back to the same keyword/diff gatherer it'd use without
 the flag. This matches `claw-squad run --smart-context` behaviour and
 means a flaky Ollama can't hard-abort an otherwise-fine run.
 
+## Watch mode
+
+`cs index watch` keeps the index warm without a cron entry: it runs
+`build` on a fixed interval (default 5 s). The sha-skip in `build`
+makes a no-op pass cost ~one stat per tracked file (a few ms even on
+a 50k-file monorepo), so the steady-state CPU cost is negligible.
+Built for the GX10 home-server's `claudestruct.service` so a
+`--smart-context` query always sees today's tree without anyone
+remembering to rebuild.
+
+```bash
+cs index watch                            # poll every 5s in the foreground
+cs index watch --interval 30              # slower poll for very large monorepos
+cs index watch --root /repos/work         # watch a different tree
+```
+
+Operational notes:
+
+- A transient embedding-endpoint failure (Ollama restart, network
+  blip) gets logged + the loop continues. Watching never aborts on
+  a single failed pass.
+- Ctrl-C stops cleanly with a `watch stopped` line — no Python
+  traceback in `journalctl -u claudestruct.service`.
+- Wire under systemd by adding a `claudestruct-index-watch.service`
+  next to the W10.2 unit files; the watch process is small and
+  idempotent so a periodic restart costs nothing.
+
 ## What's next
 
 - **sqlite-vec**: pure-Python cosine is plenty for a single repo's
@@ -105,7 +132,7 @@ means a flaky Ollama can't hard-abort an otherwise-fine run.
   from ~300 ms to ~5 ms. Behind `Index.query`, no caller change.
 - **Hybrid retrieval**: combine semantic top-K with keyword BM25 for
   the cases where the description literally names a file.
-- **claw-squad integration**: same index, exposed to the Coder /
-  Reviewer agents as a tool call rather than baked into `cs dev`.
-
-Each is a follow-up; W10.5 ships the foundation.
+- **Cross-tool index sharing**: `cs index` and `claw-squad index`
+  use the same embedding model + per-file cap; merging the storage
+  shape (today: SQLite vs JSONL) would let one watch loop feed
+  both tools.

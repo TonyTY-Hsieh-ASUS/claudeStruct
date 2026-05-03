@@ -4,12 +4,13 @@ both call it without re-implementing the loop.
 """
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from claudestruct.context import _load_gitignore, _walk_source_files
-from claudestruct.embed import EmbeddingClient, default_client
+from claudestruct.embed import EmbeddingClient, EmbeddingError, default_client
 from claudestruct.index import Index, file_sha256
 
 # Per-batch size for /embeddings POSTs. Most servers (Ollama, vLLM,
@@ -116,6 +117,71 @@ def build_index(
         skipped_unchanged=skipped_unchanged,
         skipped_unreadable=skipped_unreadable,
     )
+
+
+# --- Watch mode (poll loop) ---------------------------------------
+#
+# The cheapest way to keep the index warm: re-run ``build_index`` on
+# a fixed interval. ``build_index`` already sha-skips unchanged files,
+# so a no-op pass costs ~one stat per tracked file (a few ms even on
+# a 50k-file monorepo). No new file-watcher dep — `inotify` would be
+# tighter on Linux but doesn't help on macOS, and the latency of a
+# 5-second poll is fine for "save → reflected in next `cs <task>
+# --smart-context` query" semantics.
+
+
+def watch_index(
+    root: Path,
+    *,
+    interval_s: float = 5.0,
+    client: EmbeddingClient | None = None,
+    progress: Callable[[str], None] | None = None,
+    index_root: Path | None = None,
+    max_iterations: int | None = None,
+    sleep: Callable[[float], None] | None = None,
+) -> int:
+    """Poll-loop wrapper around ``build_index``. Returns the number
+    of completed iterations.
+
+    Each iteration calls ``build_index`` and reports the diff via
+    ``progress`` (defaults: print to stderr in the CLI). The loop
+    runs forever until interrupted, EXCEPT in tests:
+
+    - ``max_iterations`` caps the loop count so a unit test can
+      assert "ran exactly N passes".
+    - ``sleep`` is the injection point that lets tests skip the
+      wall clock.
+
+    ``EmbeddingError`` from a single iteration is caught + reported
+    via ``progress`` so a transient endpoint outage (Ollama
+    restart, network blip) doesn't tear down a long-running watch.
+    The loop continues; the next iteration retries.
+    """
+    real_sleep = sleep if sleep is not None else time.sleep
+    iterations = 0
+    while True:
+        if max_iterations is not None and iterations >= max_iterations:
+            return iterations
+        try:
+            stats = build_index(
+                root,
+                client=client,
+                index_root=index_root,
+            )
+        except EmbeddingError as exc:
+            if progress is not None:
+                progress(f"[watch] embedding endpoint failed: {exc}; retrying")
+        else:
+            if progress is not None:
+                progress(
+                    f"[watch] pass {iterations + 1}: walked {stats.walked}, "
+                    f"embedded {stats.embedded}, "
+                    f"skipped {stats.skipped_unchanged} unchanged"
+                )
+        iterations += 1
+        if max_iterations is not None and iterations >= max_iterations:
+            return iterations
+        real_sleep(interval_s)
 
 
 def smart_paths(
