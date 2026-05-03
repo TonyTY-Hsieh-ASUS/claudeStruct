@@ -409,6 +409,39 @@ def index_clear_cmd(root: str | None) -> None:
     console.print(f"deleted {n} entr{'y' if n == 1 else 'ies'}")
 
 
+@index_group.command(
+    "watch",
+    help="Keep the index warm: re-run `index build` on a fixed interval. "
+         "Designed for the GX10 home-server (`claudestruct.service`) so "
+         "`--smart-context` queries always see today's tree.",
+)
+@click.option("--root", type=click.Path(exists=True, file_okay=False), default=None)
+@click.option("--interval", "interval_s", type=float, default=5.0,
+              show_default=True,
+              help="Seconds between passes. The sha-skip in `build` makes a "
+                   "no-op pass cheap (~1ms per file), so 5s is fine; bump for "
+                   "very large monorepos to keep CPU lower.")
+def index_watch_cmd(root: str | None, interval_s: float) -> None:
+    from claudestruct.indexer import watch_index
+
+    resolved = _resolve_root(root)
+
+    def _progress(msg: str) -> None:
+        err.print(f"[dim]{msg}[/dim]")
+
+    err.print(
+        f"[bold]watching {resolved} (interval {interval_s:.1f}s)[/bold] — "
+        f"Ctrl-C to stop"
+    )
+    try:
+        watch_index(resolved, interval_s=interval_s, progress=_progress)
+    except KeyboardInterrupt:
+        # SIGINT is the documented way to stop. Render a clean
+        # message instead of a Python traceback so a `journalctl -u
+        # claudestruct.service` reader sees an obvious "stopped".
+        err.print("[bold]watch stopped[/bold]")
+
+
 @main.group("dataset", help="Mine the run-log directory for fine-tuning datasets (W10.6).")
 def dataset_group() -> None:
     pass
