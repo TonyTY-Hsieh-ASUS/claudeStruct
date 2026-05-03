@@ -167,6 +167,80 @@ export async function buildIndex(
   };
 }
 
+// --- Watch mode (poll loop) ---------------------------------------
+//
+// Mirror of `claudestruct.indexer.watch_index`. The cheapest way to
+// keep the index warm: re-run `buildIndex` on a fixed interval. The
+// sha-skip in `buildIndex` makes a no-op pass cost ~one stat per
+// tracked file (a few ms even on a 50k-file monorepo). No new file-
+// watcher dep — `fs.watch` portability is uneven and the latency of
+// a 5-second poll is fine for "save → reflected in next
+// `claw-squad run --smart-context`".
+
+export interface WatchIndexOptions extends BuildIndexOptions {
+  /** Seconds between passes. Default 5. */
+  intervalS?: number;
+  /**
+   * Loop bound for tests. Production callers omit this; the loop
+   * runs forever until the process is signalled.
+   */
+  maxIterations?: number;
+  /** Sleep injection for tests. Defaults to `setTimeout`. */
+  sleep?: (seconds: number) => Promise<void>;
+}
+
+function defaultSleep(seconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, seconds * 1000));
+}
+
+/**
+ * Poll-loop wrapper around `buildIndex`. Returns the number of
+ * completed iterations. EmbeddingError on a single iteration is
+ * caught + reported via `onProgress`; the loop continues so a
+ * transient endpoint outage (Ollama restart, network blip) doesn't
+ * tear down a long-running watch.
+ */
+export async function watchIndex(
+  repoRoot: string,
+  opts: WatchIndexOptions = {},
+): Promise<number> {
+  const intervalS = opts.intervalS ?? 5.0;
+  const sleep = opts.sleep ?? defaultSleep;
+  const maxIterations = opts.maxIterations;
+  let iterations = 0;
+  while (true) {
+    if (maxIterations !== undefined && iterations >= maxIterations) {
+      return iterations;
+    }
+    try {
+      const stats = await buildIndex(repoRoot, opts);
+      opts.onProgress?.(
+        `[watch] pass ${iterations + 1}: walked ${stats.walked}, ` +
+          `embedded ${stats.embedded}, ` +
+          `skipped ${stats.skippedUnchanged} unchanged`,
+      );
+    } catch (err) {
+      // Local import avoids a cycle when this file's caller is the
+      // only thing pulling embed.ts in via `buildIndex`.
+      const { EmbeddingError } = await import("./embed.js");
+      if (err instanceof EmbeddingError) {
+        opts.onProgress?.(
+          `[watch] embedding endpoint failed: ${err.message}; retrying`,
+        );
+      } else {
+        // Non-Embedding errors are real bugs — let them surface so
+        // the operator notices instead of silently looping forever.
+        throw err;
+      }
+    }
+    iterations += 1;
+    if (maxIterations !== undefined && iterations >= maxIterations) {
+      return iterations;
+    }
+    await sleep(intervalS);
+  }
+}
+
 /**
  * Embed `query`, return the top-K matching repo-relative paths. The
  * orchestrator integration (a future PR) will feed these as

@@ -477,6 +477,12 @@ Goal: turn the existing multi-tool stack into a first-class local-AI workstation
   - 7 tests in `tests/test_smart_context_fallback.py` (autouse fixture stubs `count_tokens` so `--dry-run` doesn't reach Anthropic): EmbeddingError without flag (no warning), EmbeddingError with flag (warning mentions "falling back"), empty-index path (warning mentions `cs index build`), parametrized across all 4 task commands. 526 tests pass (was 519 → +7); ruff clean
   - `docs/smart-context.md` failure-modes table reworded to reflect best-effort posture; new explicit "best-effort" note matching the TS behaviour callout
 
+- [x] **W10.5d (TS) — `claw-squad index watch`** ✅
+  - Mirror of the Python-side W10.5d. `src/index/build.ts#watchIndex(repoRoot, {intervalS, maxIterations, sleep, onProgress})`: poll loop driven by `buildIndex`'s sha-skip — no new file-watcher dep. `EmbeddingError` from a single iteration is caught + reported via `onProgress`; the loop continues. Non-Embedding errors surface (don't silently get swallowed by the retry — a TypeError from a refactor must reach the operator).
+  - `claw-squad index watch [--root .] [--interval 5]` CLI subcommand. SIGINT handler prints `watch stopped` and exits 0. Mirrors `cs index watch` behaviour byte-for-byte where possible.
+  - 7 vitest cases in `tests/index.test.ts`: `maxIterations` bound, sleep injection (3 passes = 2 sleeps), sha-skip on second pass (`embed_calls` collapses to `[2]`), re-embed-after-edit (`[2, 1]`), `EmbeddingError` survival, non-Embedding TypeError surfaces, `maxIterations=0` short-circuit. 420 tests pass (was 413 → +7); `tsc --noEmit` + `pnpm build` clean.
+  - `claw-squad/docs/smart-context.md`: new "Watch mode" section.
+
 - [x] **W10.5d — `cs index watch` (Python side)** ✅
   - `indexer.watch_index(root, interval_s, max_iterations, sleep, progress)`: poll loop driven by `build_index`'s sha-skip — no new file-watcher dep. A no-op pass costs ~1 ms per tracked file (just stat + read) so the steady-state CPU cost on a 50k-file monorepo is negligible. `EmbeddingError` from a single iteration is logged + retried (Ollama restart / network blip never tears down a long-running watch).
   - `cs index watch [--root .] [--interval 5]` CLI subcommand. Renders progress + stats per pass via `err.print`. SIGINT gives a clean `watch stopped` line — no Python traceback in `journalctl`. `max_iterations` and `sleep` injection points keep the unit tests bounded.
