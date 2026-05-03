@@ -91,6 +91,24 @@ If the index is empty or the embedding endpoint is unreachable, the
 orchestrator logs a one-liner and falls back to keyword rank — runs
 never abort because of smart-context alone.
 
+## Reviewer-side integration
+
+`--smart-context` also feeds the Reviewer (W10.5b follow-up). For
+each round of review, the orchestrator queries the index for top-K
+files matching the todo description, drops any path that's already
+covered by the diff (the Reviewer reads those bytes directly), and
+passes the remaining files to the Reviewer under a "Sibling files
+(context only — NOT part of the diff)" heading.
+
+Helps the Reviewer catch "did this break the caller of the changed
+function" without bloating the prompt — Reviewer caps are tighter
+than the Coder's (4 files, 32 KB total, 12 KB per file) because the
+diff itself is the main feed; siblings are supplementary.
+
+If the index is empty or the embedding endpoint is unreachable, the
+Reviewer falls back to seeing the diff alone — same best-effort
+posture as the Coder side.
+
 ## What's next
 
 - **Cross-tool index sharing** — have `cs index build` and
@@ -99,6 +117,3 @@ never abort because of smart-context alone.
   by storage shape only; the embedding model + per-file cap are
   identical, so the data is convertible.
 - **Watch mode** — auto-rebuild on file save / git checkout.
-- **Reviewer-side integration** — apply the same top-K trick when
-  building the Reviewer's diff context for the rare case where the
-  Reviewer needs sibling files beyond the diff.
