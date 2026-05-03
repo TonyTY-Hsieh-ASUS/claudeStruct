@@ -124,6 +124,34 @@ Operational notes:
   next to the W10.2 unit files; the watch process is small and
   idempotent so a periodic restart costs nothing.
 
+## Cross-tool sharing (`cs` ↔ `claw-squad`)
+
+Both tools embed the same files with the same model + per-file cap,
+but they store the result in different formats (Python = SQLite,
+TS = JSONL). Without a bridge, each tool re-pays the embedding
+cost on a fresh checkout.
+
+`cs index export` / `claw-squad index export` dump to a common
+JSONL schema (`{relPath, sha256, embedding}` per line, sorted by
+path); the matching `import` subcommand on the other side loads
+the file in.
+
+```bash
+# Python → TS:
+cs index build                                 # pay the embed cost once
+cs index export --out shared.jsonl             # SQLite → JSONL
+claw-squad index import shared.jsonl           # JSONL → claw-squad's index
+
+# TS → Python (claw-squad's storage is already JSONL natively):
+claw-squad index export --out shared.jsonl
+cs index import shared.jsonl
+```
+
+Malformed JSONL lines (truncated transfer, hand-edits) are skipped +
+counted; one bad line never aborts the import. Embedding values are
+preserved exactly through the JSON round-trip — no float lossy
+conversion that would corrupt cosine ranking.
+
 ## What's next
 
 - **sqlite-vec**: pure-Python cosine is plenty for a single repo's
@@ -132,7 +160,6 @@ Operational notes:
   from ~300 ms to ~5 ms. Behind `Index.query`, no caller change.
 - **Hybrid retrieval**: combine semantic top-K with keyword BM25 for
   the cases where the description literally names a file.
-- **Cross-tool index sharing**: `cs index` and `claw-squad index`
-  use the same embedding model + per-file cap; merging the storage
-  shape (today: SQLite vs JSONL) would let one watch loop feed
-  both tools.
+- **Auto-shared storage**: have both tools watch a common JSONL
+  sidecar so a single `cs index watch` keeps `claw-squad` warm too,
+  no manual export step.

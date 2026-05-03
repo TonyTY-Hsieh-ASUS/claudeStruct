@@ -134,10 +134,30 @@ Operational notes:
   of looping forever.
 - Ctrl-C stops cleanly with a `watch stopped` line.
 
+## Cross-tool sharing (`claw-squad` ↔ `cs`)
+
+`claw-squad index export --out PATH` dumps the JSONL store to a
+shared format that `cs index import` reads. Symmetric in reverse:
+`cs index export → claw-squad index import`. Both sides agree on
+`{relPath, sha256, embedding}` per line, sorted by path, embedding
+values preserved exactly.
+
+```bash
+# claw-squad → cs:
+claw-squad index build
+claw-squad index export --out shared.jsonl
+cs index import shared.jsonl
+
+# cs → claw-squad:
+cs index export --out shared.jsonl
+claw-squad index import shared.jsonl
+```
+
+Malformed JSONL lines (truncated transfer, hand-edits) are skipped
++ counted; one bad line never aborts the import.
+
 ## What's next
 
-- **Cross-tool index sharing** — have `cs index build` and
-  `claw-squad index build` write to a common directory + format so
-  one process pays the embedding cost. The two SHAs differ today
-  by storage shape only; the embedding model + per-file cap are
-  identical, so the data is convertible.
+- **Auto-shared storage** — both tools watch a common JSONL
+  sidecar so a single `claw-squad index watch` keeps `cs` warm too,
+  no manual export step.
