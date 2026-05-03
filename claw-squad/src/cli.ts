@@ -970,6 +970,46 @@ indexCmd
     console.log(`deleted ${n} entr${n === 1 ? "y" : "ies"}`);
   });
 
+indexCmd
+  .command("watch")
+  .description(
+    "Keep the index warm: re-run `index build` on a fixed interval. " +
+      "Mirror of `cs index watch`. Designed for the GX10 home-server " +
+      "so `--smart-context` always sees today's tree.",
+  )
+  .option("--root <path>", "repo root", process.cwd())
+  .option(
+    "--interval <seconds>",
+    "Seconds between passes. Default 5; bump for very large monorepos.",
+    "5",
+  )
+  .action(async (opts: { root: string; interval: string }) => {
+    const intervalS = Number(opts.interval);
+    if (!Number.isFinite(intervalS) || intervalS <= 0) {
+      console.error(pc.red("--interval must be a positive number"));
+      process.exit(2);
+    }
+    const { watchIndex } = await import("./index/build.js");
+    console.error(
+      pc.bold(
+        `watching ${opts.root} (interval ${intervalS.toFixed(1)}s) — Ctrl-C to stop`,
+      ),
+    );
+    // SIGINT shows up as a process exit on Node; the watch loop is
+    // an async generator that never resolves under normal use, so
+    // we just let the signal end the process. Node prints no
+    // traceback by default; mirror the Python side's clean stop
+    // message via a SIGINT handler.
+    process.on("SIGINT", () => {
+      console.error(pc.bold("\nwatch stopped"));
+      process.exit(0);
+    });
+    await watchIndex(opts.root, {
+      intervalS,
+      onProgress: (msg: string) => console.error(pc.dim(msg)),
+    });
+  });
+
 
 // W10.6 — TS-side dataset export. Mirrors `cs dataset export` from
 // claudestruct so a single team can mine both tools' run logs into

@@ -28,6 +28,7 @@ import {
 import {
   buildIndex,
   smartPaths,
+  watchIndex,
 } from "../src/index/build.js";
 import {
   createEmbeddingClient,
@@ -456,5 +457,161 @@ describe("smartPaths", () => {
       indexRoot: join(parent, "idx"),
     });
     expect(paths).toEqual([]);
+  });
+});
+
+// --- watchIndex (W10.5d TS-side) ----------------------------------
+//
+// Mirror of `tests/test_index_watch.py`. The watch loop is a poll
+// around `buildIndex`; we use the same `maxIterations` + `sleep`
+// injection points the Python side has.
+
+describe("watchIndex", () => {
+  let parent: string;
+  beforeEach(() => {
+    parent = mkdtempSync(join(tmpdir(), "claw-watch-"));
+  });
+  afterEach(() => {
+    rmSync(parent, { recursive: true, force: true });
+  });
+
+  it("runs maxIterations passes then returns", async () => {
+    const repo = makeRepo(parent);
+    const n = await watchIndex(repo, {
+      client: new FakeEmbed(),
+      indexRoot: join(parent, "idx"),
+      maxIterations: 3,
+      sleep: async () => {},
+    });
+    expect(n).toBe(3);
+  });
+
+  it("calls sleep between iterations (3 passes = 2 sleeps)", async () => {
+    // The post-loop sleep is short-circuited by the maxIterations
+    // check, mirroring the Python side's contract.
+    const repo = makeRepo(parent);
+    const sleeps: number[] = [];
+    await watchIndex(repo, {
+      client: new FakeEmbed(),
+      indexRoot: join(parent, "idx"),
+      intervalS: 0.42,
+      maxIterations: 3,
+      sleep: async (s) => {
+        sleeps.push(s);
+      },
+    });
+    expect(sleeps).toEqual([0.42, 0.42]);
+  });
+
+  it("second pass embeds 0 (sha-skip on disk-resident index)", async () => {
+    const repo = makeRepo(parent);
+    const calls: number[] = [];
+    class CountingEmbed extends FakeEmbed {
+      override async embedBatch(texts: string[]): Promise<number[][]> {
+        calls.push(texts.length);
+        return super.embedBatch(texts);
+      }
+    }
+    await watchIndex(repo, {
+      client: new CountingEmbed(),
+      indexRoot: join(parent, "idx"),
+      maxIterations: 3,
+      sleep: async () => {},
+    });
+    // First pass embeds 2 files; subsequent passes find unchanged
+    // shas and embed 0. The exact sequence proves the loop is
+    // sharing state via the disk-resident index.
+    expect(calls).toEqual([2]);
+  });
+
+  it("re-embeds after a mid-loop edit", async () => {
+    const repo = makeRepo(parent);
+    const calls: number[] = [];
+    class CountingEmbed extends FakeEmbed {
+      override async embedBatch(texts: string[]): Promise<number[][]> {
+        calls.push(texts.length);
+        return super.embedBatch(texts);
+      }
+    }
+    let cycle = 0;
+    await watchIndex(repo, {
+      client: new CountingEmbed(),
+      indexRoot: join(parent, "idx"),
+      maxIterations: 3,
+      sleep: async () => {
+        cycle += 1;
+        if (cycle === 1) {
+          writeFileSync(
+            join(repo, "alpha.ts"),
+            "export function alpha() { return 99; }\n",
+          );
+        }
+      },
+    });
+    // Pass 1 embeds 2; pass 2 (after edit) embeds 1; pass 3 finds
+    // the new sha already stored and embeds 0.
+    expect(calls).toEqual([2, 1]);
+  });
+
+  it("survives an EmbeddingError on a single pass", async () => {
+    const repo = makeRepo(parent);
+    let pass = 0;
+    class FlakyEmbed extends FakeEmbed {
+      override async embedBatch(texts: string[]): Promise<number[][]> {
+        pass += 1;
+        if (pass === 1) {
+          throw new EmbeddingError("ollama not running");
+        }
+        return super.embedBatch(texts);
+      }
+    }
+    const msgs: string[] = [];
+    const n = await watchIndex(repo, {
+      client: new FlakyEmbed(),
+      indexRoot: join(parent, "idx"),
+      maxIterations: 2,
+      sleep: async () => {},
+      onProgress: (m) => msgs.push(m),
+    });
+    expect(n).toBe(2);
+    expect(msgs.some((m) => m.includes("embedding endpoint failed"))).toBe(
+      true,
+    );
+    expect(msgs.some((m) => m.includes("embedded 2"))).toBe(true);
+  });
+
+  it("non-Embedding errors surface (not silently swallowed)", async () => {
+    // A bug in the storage layer (or a TypeError from a refactor)
+    // shouldn't get hidden behind the embed-error retry. Lock the
+    // contract that only EmbeddingError is caught.
+    const repo = makeRepo(parent);
+    class BoomEmbed extends FakeEmbed {
+      override async embedBatch(_texts: string[]): Promise<number[][]> {
+        throw new TypeError("internal bug");
+      }
+    }
+    await expect(
+      watchIndex(repo, {
+        client: new BoomEmbed(),
+        indexRoot: join(parent, "idx"),
+        maxIterations: 2,
+        sleep: async () => {},
+      }),
+    ).rejects.toBeInstanceOf(TypeError);
+  });
+
+  it("maxIterations=0 returns immediately without calling sleep", async () => {
+    const repo = makeRepo(parent);
+    let sleepCalled = false;
+    const n = await watchIndex(repo, {
+      client: new FakeEmbed(),
+      indexRoot: join(parent, "idx"),
+      maxIterations: 0,
+      sleep: async () => {
+        sleepCalled = true;
+      },
+    });
+    expect(n).toBe(0);
+    expect(sleepCalled).toBe(false);
   });
 });

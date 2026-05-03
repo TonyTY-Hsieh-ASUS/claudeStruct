@@ -109,6 +109,31 @@ If the index is empty or the embedding endpoint is unreachable, the
 Reviewer falls back to seeing the diff alone — same best-effort
 posture as the Coder side.
 
+## Watch mode
+
+`claw-squad index watch` keeps the index warm without a cron entry:
+it runs `build` on a fixed interval (default 5 s). The sha-skip in
+`build` makes a no-op pass cost ~one stat per tracked file (a few ms
+even on a 50k-file monorepo), so steady-state CPU is negligible.
+Mirror of `cs index watch` — same interval semantics, same retry
+behaviour on a transient embedding-endpoint failure (Ollama restart,
+network blip).
+
+```bash
+claw-squad index watch                           # poll every 5s in foreground
+claw-squad index watch --interval 30             # slower for large monorepos
+claw-squad index watch --root /repos/work        # watch a different tree
+```
+
+Operational notes:
+
+- A transient `EmbeddingError` on one pass gets logged + the loop
+  continues. Watching never aborts on a single failed pass.
+- Non-Embedding errors (storage layer / refactor bugs) surface
+  rather than being silently swallowed — operators notice instead
+  of looping forever.
+- Ctrl-C stops cleanly with a `watch stopped` line.
+
 ## What's next
 
 - **Cross-tool index sharing** — have `cs index build` and
@@ -116,4 +141,3 @@ posture as the Coder side.
   one process pays the embedding cost. The two SHAs differ today
   by storage shape only; the embedding model + per-file cap are
   identical, so the data is convertible.
-- **Watch mode** — auto-rebuild on file save / git checkout.
