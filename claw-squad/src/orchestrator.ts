@@ -27,6 +27,10 @@ import pc from "picocolors";
 import { runPlanner, recordClarification } from "./agents/planner.js";
 import { runCoder } from "./agents/coder.js";
 import { runReviewer } from "./agents/reviewer.js";
+import {
+  extractDiffPaths,
+  readReviewerSiblings,
+} from "./agents/reviewer-context.js";
 import { initTracing, withSpan, shutdownTracing } from "./tracing.js";
 import {
   appendLesson,
@@ -1052,7 +1056,37 @@ async function runTaskLoop(args: {
       }
     }
 
-    // Reviewer reads the diff.
+    // Reviewer reads the diff. With --smart-context on, also feed
+    // top-K sibling files for the todo description that AREN'T
+    // already touched by the diff — helps catch "did this break the
+    // caller of the changed function" when the Reviewer's prompt
+    // would otherwise only see the diff bytes.
+    let siblingContext: Array<{ path: string; content: string }> = [];
+    if (config.smartContext) {
+      try {
+        const { smartPaths } = await import("./index/build.js");
+        const query = `${task.title}\n${task.description}`;
+        const hits = await smartPaths(repoRoot, query, { k: 20 });
+        // Drop paths the diff already covers — Reviewer reads those
+        // via the diff and a duplicate paste would just waste tokens.
+        const inDiff = extractDiffPaths(applied.diff);
+        const candidates = hits.filter((p) => !inDiff.has(p));
+        siblingContext = readReviewerSiblings(repoRoot, candidates);
+        if (siblingContext.length > 0) {
+          ui.log(
+            pc.dim(
+              `  [smart-context] Reviewer sibling files: ${siblingContext.map((f) => f.path).join(", ")}`,
+            ),
+          );
+        }
+      } catch (err) {
+        ui.log(
+          pc.yellow(
+            `  [smart-context] sibling fetch failed (${(err as Error).message}); Reviewer sees diff only`,
+          ),
+        );
+      }
+    }
     logPhase(`reviewer.examine`, `${task.id} diff=${applied.diff.length}B`);
     ui.log(pc.cyan(`\n[Reviewer] examining diff (${applied.diff.length} bytes)…`));
     const reviewOut = await runReviewer({
@@ -1061,6 +1095,7 @@ async function runTaskLoop(args: {
       coderRationale: coderOut.rationale,
       provider: providers.reviewer,
       onText: (c) => ui.streamAgent("reviewer", c),
+      siblingContext,
       runLog,
     });
     track("reviewer", reviewOut.usage);

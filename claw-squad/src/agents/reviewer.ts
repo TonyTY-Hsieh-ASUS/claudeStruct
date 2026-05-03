@@ -32,6 +32,13 @@ interface ReviewerInput {
   // has training data to mine. Off by default; the orchestrator
   // threads the handle through.
   runLog?: RunLogHandle;
+  // Optional sibling-file context. Fed by the orchestrator when
+  // `--smart-context` is on: top-K embedding-index hits for the
+  // todo description, MINUS any file already covered by the diff
+  // (those land in the diff anyway). Helps the Reviewer catch
+  // "did the Coder break the caller of this function" without
+  // bloating prompts when there's nothing relevant.
+  siblingContext?: Array<{ path: string; content: string }>;
 }
 
 function buildUserMessage(input: ReviewerInput): string {
@@ -44,6 +51,22 @@ function buildUserMessage(input: ReviewerInput): string {
     parts.push("## Coder rationale");
     parts.push(input.coderRationale.trim());
     parts.push("");
+  }
+  // Sibling context renders BEFORE the diff so the Reviewer reads
+  // "this is the surrounding code" → "this is what changed", not the
+  // other way round. The header is explicit so the Reviewer doesn't
+  // hallucinate that these files are part of the change.
+  if (input.siblingContext && input.siblingContext.length > 0) {
+    parts.push(
+      "## Sibling files (context only — NOT part of the diff)",
+    );
+    for (const f of input.siblingContext) {
+      parts.push(`### \`${f.path}\``);
+      parts.push("```");
+      parts.push(f.content);
+      parts.push("```");
+      parts.push("");
+    }
   }
   parts.push("## Diff");
   parts.push("```diff");
