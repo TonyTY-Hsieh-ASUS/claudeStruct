@@ -971,6 +971,45 @@ indexCmd
   });
 
 indexCmd
+  .command("export")
+  .description("Dump the index to JSONL for cross-tool sharing with `cs index`.")
+  .option("--root <path>", "repo root", process.cwd())
+  .requiredOption(
+    "--out <path>",
+    "Output JSONL path. Created (or overwritten) by this command.",
+  )
+  .action(async (opts: { root: string; out: string }) => {
+    const { exportToJsonl } = await import("./index/io.js");
+    const stats = exportToJsonl(opts.root, opts.out);
+    console.log(
+      `exported ${stats.rows} entr${stats.rows === 1 ? "y" : "ies"} to ${stats.outputPath}`,
+    );
+  });
+
+indexCmd
+  .command("import <path>")
+  .description(
+    "Load JSONL (this tool's export, or cs index export) into the local index.",
+  )
+  .option("--root <path>", "repo root", process.cwd())
+  .action(async (path: string, opts: { root: string }) => {
+    const { importFromJsonl } = await import("./index/io.js");
+    let stats;
+    try {
+      stats = importFromJsonl(opts.root, path);
+    } catch (err) {
+      console.error(pc.red((err as Error).message));
+      process.exit(2);
+    }
+    const note = stats.skippedMalformed
+      ? ` (${stats.skippedMalformed} malformed line(s) skipped)`
+      : "";
+    console.log(
+      `imported ${stats.rows} entr${stats.rows === 1 ? "y" : "ies"} from ${stats.inputPath}${note}`,
+    );
+  });
+
+indexCmd
   .command("watch")
   .description(
     "Keep the index warm: re-run `index build` on a fixed interval. " +

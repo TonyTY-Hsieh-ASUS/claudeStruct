@@ -177,6 +177,18 @@ export class Index {
     return scored.slice(0, k).map((s) => ({ relPath: s.relPath, score: s.score }));
   }
 
+  /**
+   * Yield every entry in sorted-by-path order. Used by the JSONL
+   * exporter and any cross-tool tooling that needs a deterministic
+   * iteration order.
+   */
+  *iterEntries(): Generator<IndexEntry> {
+    const sorted = [...this.byPath.values()].sort((a, b) =>
+      a.relPath.localeCompare(b.relPath),
+    );
+    for (const e of sorted) yield e;
+  }
+
   // --- Mutation ----------------------------------------------------
 
   upsert(entry: IndexEntry): void {

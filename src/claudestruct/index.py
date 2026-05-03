@@ -25,7 +25,7 @@ import json
 import math
 import os
 import sqlite3
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -161,6 +161,17 @@ class Index:
             "SELECT sha256 FROM entries WHERE rel_path = ?", (rel_path,)
         ).fetchone()
         return row[0] if row else None
+
+    def iter_entries(self) -> Iterator[tuple[str, str, list[float]]]:
+        """Yield every ``(rel_path, sha256, embedding)`` row in
+        sorted-by-path order. Used by the JSONL exporter so two
+        builds against the same source state produce byte-identical
+        files (matching the TS-side commit semantics)."""
+        rows = self._conn.execute(
+            "SELECT rel_path, sha256, embedding FROM entries ORDER BY rel_path"
+        )
+        for rel_path, sha256, embedding_json in rows:
+            yield rel_path, sha256, json.loads(embedding_json)
 
     def stats(self) -> IndexStats:
         n = self._conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]

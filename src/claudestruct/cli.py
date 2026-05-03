@@ -410,6 +410,43 @@ def index_clear_cmd(root: str | None) -> None:
 
 
 @index_group.command(
+    "export",
+    help="Dump the index to JSONL (TS-side format) for cross-tool sharing.",
+)
+@click.option("--root", type=click.Path(exists=True, file_okay=False), default=None)
+@click.option("--out", "out_path", type=click.Path(dir_okay=False), required=True,
+              help="Output JSONL path. Created (or overwritten) by this command.")
+def index_export_cmd(root: str | None, out_path: str) -> None:
+    from claudestruct.index_io import export_to_jsonl
+
+    resolved = _resolve_root(root)
+    stats = export_to_jsonl(resolved, Path(out_path))
+    console.print(f"exported {stats.rows} entr{'y' if stats.rows == 1 else 'ies'} to {stats.output_path}")
+
+
+@index_group.command(
+    "import",
+    help="Load JSONL (TS-side or this tool's export) into the local index.",
+)
+@click.option("--root", type=click.Path(exists=True, file_okay=False), default=None)
+@click.argument("in_path", type=click.Path(exists=True, dir_okay=False))
+def index_import_cmd(root: str | None, in_path: str) -> None:
+    from claudestruct.index_io import import_from_jsonl
+
+    resolved = _resolve_root(root)
+    stats = import_from_jsonl(resolved, Path(in_path))
+    note = (
+        f" ({stats.skipped_malformed} malformed line(s) skipped)"
+        if stats.skipped_malformed
+        else ""
+    )
+    console.print(
+        f"imported {stats.rows} entr{'y' if stats.rows == 1 else 'ies'} from "
+        f"{stats.input_path}{note}"
+    )
+
+
+@index_group.command(
     "watch",
     help="Keep the index warm: re-run `index build` on a fixed interval. "
          "Designed for the GX10 home-server (`claudestruct.service`) so "
