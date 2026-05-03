@@ -143,21 +143,33 @@ def _run_common(
         from claudestruct.embed import EmbeddingError
         from claudestruct.indexer import smart_paths
 
+        # Best-effort: a missing index or unreachable embed endpoint
+        # warns + falls back to the gatherer's default (changed files /
+        # diff walk). Mirrors the TS-side behaviour in claw-squad's
+        # orchestrator integration — `--smart-context` should never
+        # abort a run by itself, since the user can always re-issue
+        # without the flag and get the same result.
         try:
             explicit = smart_paths(root, description, k=20)
         except EmbeddingError as exc:
             err.print(
-                f"[red]--smart-context failed to reach the embedding "
-                f"endpoint:[/red] {exc}\n"
+                f"[yellow]--smart-context: embed endpoint unreachable "
+                f"({exc}); falling back to keyword/diff walk[/yellow]\n"
                 f"[dim]Set CLAUDESTRUCT_EMBED_BASE_URL / CLAUDESTRUCT_EMBED_MODEL "
-                f"or omit the flag.[/dim]"
+                f"or omit the flag to silence this warning.[/dim]"
             )
-            sys.exit(2)
-        if not explicit:
+            explicit = None  # gatherer falls back to its default candidate set
+        if explicit is not None and not explicit:
             err.print(
-                "[yellow]--smart-context: index returned no hits. "
-                "Run `cs index build` first, or omit the flag.[/yellow]"
+                "[yellow]--smart-context: index returned no hits; "
+                "falling back to keyword/diff walk. Run `cs index build` "
+                "first to populate it.[/yellow]"
             )
+            # Treat empty top-K as "no smart-context guidance" rather
+            # than "the user explicitly named no files" — passing []
+            # to the gatherer would also fall through to the default
+            # candidate set, but None is the more honest signal.
+            explicit = None
     gatherer = GATHERERS[task]
     budget = max_bytes if max_bytes is not None else BUDGETS_PER_TASK.get(task, 600_000)
     ctx = gatherer(root=root, explicit_paths=explicit, max_total_bytes=budget)
