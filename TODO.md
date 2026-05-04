@@ -289,7 +289,14 @@ Goal: distribution. Make the product discoverable, easy to install, and easy to 
   - Spawn / arg-build logic split into `runner.ts` so vitest can drive it without the `vscode` API. 13 cases cover every config-knob path (default review prompt, required-description guard, `--max-bytes` / `--effort` / `extraArgs` ordering, multi-path forwarding, full composition order, runCs streaming/spawn-error/non-zero exit)
   - Sideload via `vsce package` + `code --install-extension` (documented in `vscode-extension/README.md`)
   - Pending: SCM gutter integration (lights diff lines under `cs review`), daemon REST API client (falls back to local CLI), VS Marketplace + Open VSX publish (needs publisher account + signing)
-- [ ] **W7.2 — JetBrains plugin**
+- [~] **W7.2 — JetBrains plugin** (sideload-only scaffold shipped; marketplace publish + IntelliJ Platform `TestFramework` integration deferred)
+  - `jetbrains-plugin/` — Kotlin plugin scaffold mirroring the W7.1 VS Code extension's surface. Same five actions (review / dev / plan / debug / dashboard), same project-scoped settings (`cliPath` / `effort` / `maxBytes` / `extraArgs`), same arg-vector contract — operators switching IDEs reuse the same mental model.
+  - `build.gradle.kts` uses IntelliJ Platform Gradle Plugin 2.1, targets 2024.2 platform line (covers IDEA / PyCharm / WebStorm / GoLand / RubyMine / Android Studio); `untilBuild = null` so the plugin keeps loading on newer platform versions until something genuinely breaks (hard upper bound is hostile to operators that pin claudeStruct).
+  - Five action classes (`Review`/`Dev`/`Plan`/`Debug`/`Dashboard`Action) plus shared `CsActionBase` that handles spawn + console-tab streaming + path resolution. ANSI colour preserved via `FORCE_COLOR=1` so `cs`'s Rich output reads naturally in the JetBrains console.
+  - `CsRunner` (pure Kotlin object) + `CsSettingsState` (project-scoped persistent component) + `CsSettingsConfigurable` (Settings > Tools > claudeStruct panel).
+  - 7 unit tests in `CsRunnerTest` covering arg-vector building (review with no description, dev with paths, effort/max-bytes plumbing, extraArgs forward order, dashboard, sentinel handling for `maxBytes=0` / blank effort).
+  - `jetbrains-plugin/README.md` covers build (`gradle buildPlugin`), sideload install (Settings > Plugins > Install from Disk), settings panel walkthrough, why a separate IDE plugin makes sense.
+  - Build verification deferred — Gradle build pulls the IntelliJ Platform SDK from `download.jetbrains.com`, which the dev sandbox can't reach (403 from the proxy). Operator with internet access runs `gradle buildPlugin` to produce the install ZIP.
   - Same surface for IntelliJ / PyCharm / WebStorm; tool window for run history
   - Published to JetBrains Marketplace
 - [~] **W7.3 — Skills marketplace** (claw-squad; registry hosting deferred)
