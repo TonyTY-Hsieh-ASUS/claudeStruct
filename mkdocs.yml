@@ -46,6 +46,7 @@ markdown_extensions:
 
 nav:
   - Home: index.md
+  - Playground: playground.md
   - Getting started:
       - Install: install.md
       - claudestruct (cs): cs.md

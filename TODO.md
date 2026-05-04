@@ -311,10 +311,16 @@ Goal: distribution. Make the product discoverable, easy to install, and easy to 
   - Plugins contribute new subagents and skills only — Planner/Coder/Reviewer roles stay core (a plugin flipping the orchestrator state machine breaks every other plugin).
   - Tests: `claw-squad/tests/plugins.test.ts` (20 cases) — `isPlugin` validation matrix, prefix discovery + non-dir filtering, CJS + ESM loaders, missing entry / bad shape / wrong apiVersion warnings, merge dedup of plugins/subagents/skills, end-to-end `loadPluginsFromRepo`
   - Pending: PyPI-side equivalent (claudestruct plugins), published `claudestruct-plugin-sdk` package on npm
-- [ ] **W7.5 — Public playground**
+- [~] **W7.5 — Public playground** (static demo page shipped; live runner deferred behind hosting / rate-limiter / billing decisions)
+  - `docs/playground.md` — pre-recorded real `cs review` / `dev` / `plan` / `debug` outputs so visitors can read the verdict shape, diff format, hypothesis ranking, and usage / cache-hit-rate banner before installing. No JS, no hosting cost, deploys via the existing GitHub Pages workflow.
+  - "Why no live runner" footer is honest about the cost calculus: every visitor needs an API key or a shared bucket with a rate-limiter / abuse-mitigation queue / billing line. Replaced when W7.5b (hosted bucket) lands.
+  - Mkdocs nav adds Playground as a top-level entry right after Home so it's the first thing a docs-site visitor sees after the landing page.
   - `playground.claudestruct.dev` with read-only sample runs, no key required
   - Limited to a 10k-token-per-day shared bucket; rate-limited per IP
-- [ ] **W7.6 — Marketing + docs site upgrade**
+- [~] **W7.6 — Marketing + docs site upgrade** (landing-page + nav rewrite shipped; Algolia DocSearch + demo videos + case studies deferred)
+  - `docs/index.md` rewritten as a proper landing page: badges row, "Pick your path" tabbed quickstart (3 personas — solo dev / team / GX10 home-server), "What ships in the box" feature table, "Provider matrix" comparing `cs` vs `claw-squad` support across 7 providers + the hybrid-routing cost-math callout, "Why prompt caching matters" explainer with the 10× number, links to playground / install / cs guide, project-status badges, "Where to start" persona table.
+  - Mkdocs nav reorganized: Playground promoted to top-level (after Home) so first-time visitors see the demo before drilling into reference docs.
+  - Live demo videos / case studies / Algolia DocSearch are content + service work that lands when the project has a marketing budget; explicitly deferred.
   - Landing page, pricing page, demo videos, case studies
   - Algolia DocSearch; analytics via Plausible (privacy-friendly)
 - [~] **W7.7 — Distribution channels** (templates only; publishing waits on W4.3)
