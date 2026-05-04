@@ -286,6 +286,217 @@ def post_pr_comment(
     return html_url
 
 
+# --- Branch + PR creation (W6.6 — bot-as-actor PR opens) -----------
+#
+# These four primitives unblock the worker writing changes back to
+# GitHub as the App rather than as the human author. Used together:
+#
+#   1. ``get_default_branch`` — figure out which branch the new
+#      branch should fork from.
+#   2. ``get_ref_sha`` — resolve that branch to a SHA.
+#   3. ``create_branch`` — Git Refs API; creates a new branch ref
+#      pointed at the parent SHA.
+#   4. ``create_pull_request`` — Pulls API; opens a PR from the new
+#      branch to the parent.
+#
+# The actual file-write step (between 3 and 4) is intentionally NOT
+# in this module — it depends on whether the worker pushes via
+# git-over-https or uses the Contents API per file. Both shapes
+# work; the choice is a follow-up alongside the worker-side
+# integration.
+
+
+def get_default_branch(
+    *,
+    repo_full_name: str,
+    install_token: str,
+    http_client: Any,
+) -> str:
+    """Return the default-branch name (typically ``main`` / ``master``).
+
+    GitHub's repo metadata endpoint reports it as ``default_branch``.
+    Hoisted out so the caller doesn't need to know which key in the
+    payload to read.
+    """
+    if "/" not in repo_full_name:
+        raise GitHubAppError(
+            f"repo_full_name must be 'owner/name', got {repo_full_name!r}"
+        )
+    url = f"https://api.github.com/repos/{repo_full_name}"
+    resp = http_client.get(
+        url,
+        headers={
+            "Authorization": f"Bearer {install_token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        timeout=15.0,
+    )
+    if resp.status_code != 200:
+        raise GitHubAppError(
+            f"get_default_branch failed: status={resp.status_code}"
+        )
+    payload = resp.json()
+    branch = payload.get("default_branch")
+    if not isinstance(branch, str) or not branch:
+        raise GitHubAppError("repo response missing default_branch")
+    return branch
+
+
+def get_ref_sha(
+    *,
+    repo_full_name: str,
+    ref: str,
+    install_token: str,
+    http_client: Any,
+) -> str:
+    """Resolve a branch (or any git ref) to its tip commit SHA.
+
+    Used to pin the parent of a new branch. Accepts ``main`` or
+    ``refs/heads/main`` — we normalise to the heads form because
+    that's what the Git Refs API expects in the URL.
+    """
+    if "/" not in repo_full_name:
+        raise GitHubAppError(
+            f"repo_full_name must be 'owner/name', got {repo_full_name!r}"
+        )
+    # Allow callers to pass either `main` or `refs/heads/main`.
+    normalised = ref.removeprefix("refs/heads/")
+    url = (
+        f"https://api.github.com/repos/{repo_full_name}/git/ref/"
+        f"heads/{normalised}"
+    )
+    resp = http_client.get(
+        url,
+        headers={
+            "Authorization": f"Bearer {install_token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        timeout=15.0,
+    )
+    if resp.status_code != 200:
+        raise GitHubAppError(
+            f"get_ref_sha({ref!r}) failed: status={resp.status_code}"
+        )
+    payload = resp.json()
+    obj = payload.get("object") if isinstance(payload, dict) else None
+    sha = obj.get("sha") if isinstance(obj, dict) else None
+    if not isinstance(sha, str) or len(sha) != 40:
+        raise GitHubAppError(f"ref response missing 40-char sha: {payload!r}")
+    return sha
+
+
+def create_branch(
+    *,
+    repo_full_name: str,
+    branch: str,
+    base_sha: str,
+    install_token: str,
+    http_client: Any,
+) -> str:
+    """Create a new branch pointed at ``base_sha`` via the Git Refs
+    API. Returns the new ref's SHA on success.
+
+    The branch name must NOT already exist — GitHub returns 422 if
+    it does. Callers should pre-uniquify (e.g. with a run-id suffix)
+    so retries don't collide with the first attempt's branch.
+    """
+    if "/" not in repo_full_name:
+        raise GitHubAppError(
+            f"repo_full_name must be 'owner/name', got {repo_full_name!r}"
+        )
+    if branch.startswith("refs/heads/"):
+        # The Refs API wants the full ref form in the body but a
+        # bare name in the URL helper above. Normalise to the full
+        # form here so the body is unambiguous.
+        ref_full = branch
+    else:
+        ref_full = f"refs/heads/{branch}"
+    url = f"https://api.github.com/repos/{repo_full_name}/git/refs"
+    resp = http_client.post(
+        url,
+        headers={
+            "Authorization": f"Bearer {install_token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        json={"ref": ref_full, "sha": base_sha},
+        timeout=15.0,
+    )
+    if resp.status_code != 201:
+        # 422 = "Reference already exists". Surface the body if any
+        # so the operator can see the precise cause without grepping
+        # GitHub-side audit logs.
+        raise GitHubAppError(
+            f"create_branch({branch!r}) failed: status={resp.status_code}"
+        )
+    payload = resp.json()
+    obj = payload.get("object") if isinstance(payload, dict) else None
+    sha = obj.get("sha") if isinstance(obj, dict) else None
+    if not isinstance(sha, str) or len(sha) != 40:
+        raise GitHubAppError(
+            f"create_branch response missing 40-char sha: {payload!r}"
+        )
+    return sha
+
+
+def create_pull_request(
+    *,
+    repo_full_name: str,
+    head: str,
+    base: str,
+    title: str,
+    body: str,
+    install_token: str,
+    http_client: Any,
+    draft: bool = True,
+) -> dict[str, Any]:
+    """Open a PR. Defaults to **draft=True** so the App's PRs don't
+    immediately page reviewers — the operator (or a follow-up
+    workflow) marks them ready when CI is green.
+
+    Returns the PR payload (so callers can extract ``number``,
+    ``html_url``, and ``head.sha`` for downstream Checks API calls
+    without re-querying).
+    """
+    if "/" not in repo_full_name:
+        raise GitHubAppError(
+            f"repo_full_name must be 'owner/name', got {repo_full_name!r}"
+        )
+    if not head or not base:
+        raise GitHubAppError("create_pull_request: head and base are required")
+    url = f"https://api.github.com/repos/{repo_full_name}/pulls"
+    resp = http_client.post(
+        url,
+        headers={
+            "Authorization": f"Bearer {install_token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        json={
+            "title": title,
+            "body": body,
+            "head": head,
+            "base": base,
+            "draft": draft,
+        },
+        timeout=15.0,
+    )
+    if resp.status_code != 201:
+        raise GitHubAppError(
+            f"create_pull_request failed: status={resp.status_code}"
+        )
+    payload = resp.json()
+    if not isinstance(payload, dict):
+        raise GitHubAppError("create_pull_request response was not a JSON object")
+    if "number" not in payload or "html_url" not in payload:
+        raise GitHubAppError(
+            f"create_pull_request response missing number/html_url: {payload!r}"
+        )
+    return payload
+
+
 # --- Checks API ----------------------------------------------------
 
 
