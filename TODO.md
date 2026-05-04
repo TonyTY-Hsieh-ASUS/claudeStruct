@@ -257,7 +257,15 @@ Goal: 5-50 devs share the tool with shared visibility, shared budgets, and team-
   - **CLI**: `cs serve alerts [--sigma 2.0] [--lookback-days 30] [--check-recent-hours 24]` runs the detector once and dispatches via the configured notifier — designed for cron / Kubernetes CronJob
   - 25 new tests covering: stddev math (empty, single, population formula); detector behaviour (insufficient baseline skip, zero-stddev skip, below-mean not flagged, above-threshold flagged, old-spike-not-re-alerted, failed-runs excluded, per-org isolation, sort order); severity ladder (info/warning/critical/inf); dispatch round-trip via `_CapturingNotifier`; LogNotifier WARNING vs ERROR levels; SlackWebhookNotifier (empty URL rejected, payload shape, non-200 swallowed); `default_notifier` factory env-driven selection. Total Python: 381 passed; ruff clean
   - Pending: budget-cap rollups per team (a "team has burned 80% of monthly cap" alert kind that uses the same notifier surface — small follow-up); long-running scheduler (currently `--once`-only); email provider
-- [~] **W6.6 — GitHub App** (webhook receiver + outbound ack comment + verdict-on-completion + Checks API shipped; bot-as-actor PR opens deferred)
+- [~] **W6.6 — GitHub App** (webhook receiver + outbound ack comment + verdict-on-completion + Checks API + **branch + PR-open primitives** shipped; worker-side clone-apply-push integration deferred)
+  - Bot-as-actor PR-open API building blocks landed in `server/github_app.py`:
+    - `get_default_branch(repo, install_token, http)` — reads `default_branch` off the repo metadata endpoint so callers don't need to know which key in the payload to read.
+    - `get_ref_sha(repo, ref, install_token, http)` — resolves a branch (or any git ref) to its 40-char tip SHA. Accepts both `main` and `refs/heads/main`; normalises internally so the caller doesn't have to remember.
+    - `create_branch(repo, branch, base_sha, install_token, http)` — Git Refs API; creates a new branch ref pointed at `base_sha`. Forces `refs/heads/<name>` form in the body even if the caller passed bare; double-prefix-safe.
+    - `create_pull_request(repo, head, base, title, body, install_token, http, draft=True)` — Pulls API; defaults to draft so the App's PRs don't immediately page reviewers (a follow-up workflow flips them ready when CI is green).
+  - `_StubHttpClient` test fixture extended to record `(verb, url, kw)` triples + a `responses=[…]` queue so multi-step tests (resolve branch → create new branch → open PR) can drive scripted responses.
+  - 13 new vitest cases cover happy paths + bad inputs + 4xx error wrapping + the defensive "missing fields" branches that surface a server-side schema drift before it becomes a wrong-data bug.
+  - **Worker-side integration deferred**: clone the originating repo, apply the Coder's diff via the Contents API or git-over-https with the install token, then call `create_branch` + `create_pull_request`. Lands in a follow-up alongside a worktree-per-run scheme that scales beyond one in-flight repo at a time.
   - `GitHubInstallation` SQLAlchemy model maps `installation_id` ↔ `org_id` with per-install `webhook_secret` + optional `repo_filter` substring + `bot_user_id` sentinel for attribution
   - `POST /v1/github/webhook` — auth-bypassing endpoint (signature is the only gate); reads raw body for HMAC stability before JSON-parsing; verifies `X-Hub-Signature-256` via `hmac.compare_digest`; same 401 status on unknown installation AND bad signature so attackers can't enumerate IDs
   - Trigger detection in `routers/github.py:detect_trigger()` matches `pull_request.opened|synchronize|reopened` and `issue_comment.created` whose body contains `/cs review` (case-insensitive); ignores plain (non-PR) issues; runs are attributed to the install's bot user so the team-dashboard leaderboard shows them as `github-bot@<slug>` rather than mis-crediting a human
@@ -311,10 +319,16 @@ Goal: distribution. Make the product discoverable, easy to install, and easy to 
   - Plugins contribute new subagents and skills only — Planner/Coder/Reviewer roles stay core (a plugin flipping the orchestrator state machine breaks every other plugin).
   - Tests: `claw-squad/tests/plugins.test.ts` (20 cases) — `isPlugin` validation matrix, prefix discovery + non-dir filtering, CJS + ESM loaders, missing entry / bad shape / wrong apiVersion warnings, merge dedup of plugins/subagents/skills, end-to-end `loadPluginsFromRepo`
   - Pending: PyPI-side equivalent (claudestruct plugins), published `claudestruct-plugin-sdk` package on npm
-- [ ] **W7.5 — Public playground**
+- [~] **W7.5 — Public playground** (static demo page shipped; live runner deferred behind hosting / rate-limiter / billing decisions)
+  - `docs/playground.md` — pre-recorded real `cs review` / `dev` / `plan` / `debug` outputs so visitors can read the verdict shape, diff format, hypothesis ranking, and usage / cache-hit-rate banner before installing. No JS, no hosting cost, deploys via the existing GitHub Pages workflow.
+  - "Why no live runner" footer is honest about the cost calculus: every visitor needs an API key or a shared bucket with a rate-limiter / abuse-mitigation queue / billing line. Replaced when W7.5b (hosted bucket) lands.
+  - Mkdocs nav adds Playground as a top-level entry right after Home so it's the first thing a docs-site visitor sees after the landing page.
   - `playground.claudestruct.dev` with read-only sample runs, no key required
   - Limited to a 10k-token-per-day shared bucket; rate-limited per IP
-- [ ] **W7.6 — Marketing + docs site upgrade**
+- [~] **W7.6 — Marketing + docs site upgrade** (landing-page + nav rewrite shipped; Algolia DocSearch + demo videos + case studies deferred)
+  - `docs/index.md` rewritten as a proper landing page: badges row, "Pick your path" tabbed quickstart (3 personas — solo dev / team / GX10 home-server), "What ships in the box" feature table, "Provider matrix" comparing `cs` vs `claw-squad` support across 7 providers + the hybrid-routing cost-math callout, "Why prompt caching matters" explainer with the 10× number, links to playground / install / cs guide, project-status badges, "Where to start" persona table.
+  - Mkdocs nav reorganized: Playground promoted to top-level (after Home) so first-time visitors see the demo before drilling into reference docs.
+  - Live demo videos / case studies / Algolia DocSearch are content + service work that lands when the project has a marketing budget; explicitly deferred.
   - Landing page, pricing page, demo videos, case studies
   - Algolia DocSearch; analytics via Plausible (privacy-friendly)
 - [~] **W7.7 — Distribution channels** (templates only; publishing waits on W4.3)
