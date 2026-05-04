@@ -1,0 +1,81 @@
+<idea-plugin>
+    <id>dev.claudestruct.jetbrains</id>
+    <name>claudeStruct</name>
+    <vendor email="contact@claudestruct.dev" url="https://github.com/tonyandclaw/claudeStruct">
+        claudeStruct
+    </vendor>
+
+    <description><![CDATA[
+        Token-efficient Claude Code companion for JetBrains IDEs (IntelliJ
+        IDEA, PyCharm, WebStorm, GoLand, RubyMine, Android Studio …).
+        <br/><br/>
+        Right-click a file (or use the keymap) to run one of:
+        <ul>
+            <li><b>claudeStruct: Review</b> — structured PR review of the
+                current branch diff or selected file(s).</li>
+            <li><b>claudeStruct: Dev</b> — propose a minimal patch.</li>
+            <li><b>claudeStruct: Plan</b> — architecture / planning.</li>
+            <li><b>claudeStruct: Debug</b> — hypothesis-ranked debugging.</li>
+            <li><b>claudeStruct: Dashboard</b> — recent run summary.</li>
+        </ul>
+        <br/>
+        Output streams to a <code>claudeStruct</code> console tab.
+        Configure the <code>cs</code> binary path + per-task knobs in
+        Settings &gt; Tools &gt; claudeStruct.
+        <br/><br/>
+        Requires the <code>cs</code> CLI on PATH —
+        <code>pip install claudestruct</code>.
+    ]]></description>
+
+    <change-notes><![CDATA[
+        <b>0.1.0</b> — Initial sideload-only release. Five actions
+        (review/dev/plan/debug/dashboard) wrapping the cs CLI. Settings
+        panel for cliPath / effort / extraArgs.
+    ]]></change-notes>
+
+    <depends>com.intellij.modules.platform</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <projectConfigurable
+            parentId="tools"
+            instance="dev.claudestruct.jetbrains.settings.CsSettingsConfigurable"
+            id="dev.claudestruct.jetbrains.settings"
+            displayName="claudeStruct"/>
+        <projectService
+            serviceImplementation="dev.claudestruct.jetbrains.settings.CsSettingsState"/>
+    </extensions>
+
+    <actions>
+        <group id="claudestruct.MainGroup" text="claudeStruct" popup="true">
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+            <add-to-group group-id="ProjectViewPopupMenu" anchor="last"/>
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+
+            <action
+                id="claudestruct.Review"
+                class="dev.claudestruct.jetbrains.actions.ReviewAction"
+                text="Review"
+                description="Run cs review on the current branch diff or selected file(s)."/>
+            <action
+                id="claudestruct.Dev"
+                class="dev.claudestruct.jetbrains.actions.DevAction"
+                text="Dev"
+                description="Run cs dev — prompts for a description."/>
+            <action
+                id="claudestruct.Plan"
+                class="dev.claudestruct.jetbrains.actions.PlanAction"
+                text="Plan"
+                description="Run cs plan — prompts for a description."/>
+            <action
+                id="claudestruct.Debug"
+                class="dev.claudestruct.jetbrains.actions.DebugAction"
+                text="Debug"
+                description="Run cs debug — prompts for a failure description."/>
+            <action
+                id="claudestruct.Dashboard"
+                class="dev.claudestruct.jetbrains.actions.DashboardAction"
+                text="Dashboard"
+                description="Print recent run summary via cs dashboard."/>
+        </group>
+    </actions>
+</idea-plugin>
