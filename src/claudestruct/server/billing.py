@@ -438,3 +438,39 @@ def make_period_for_test(
     test-only branch."""
     n = (now or _now_utc()).astimezone(timezone.utc)
     return n - timedelta(days=days), n
+
+
+# --- Invoice PDF passthrough (W8.2) --------------------------------
+
+_STUB_INVOICE_PDF_URL = "https://invoice.example.invalid/no-stripe"
+
+
+def invoice_pdf_url(session: Session, org_id: int) -> str:
+    """Return the Stripe PDF URL for the org's most recent paid invoice.
+
+    Returns a stub URL when Stripe isn't configured or no invoice exists
+    so callers always get a predictable response without branching.
+    """
+    if not stripe_sdk_available():
+        return _STUB_INVOICE_PDF_URL
+
+    sub = get_or_default(session, org_id)
+    if not sub.stripe_customer_id:
+        return _STUB_INVOICE_PDF_URL
+
+    import stripe  # type: ignore
+
+    try:
+        invoices = stripe.Invoice.list(
+            customer=sub.stripe_customer_id,
+            limit=1,
+            status="paid",
+        )
+        if invoices.data:
+            latest = invoices.data[0]
+            if latest.invoice_pdf:
+                return latest.invoice_pdf
+    except Exception:  # noqa: BLE001
+        pass
+
+    return _STUB_INVOICE_PDF_URL

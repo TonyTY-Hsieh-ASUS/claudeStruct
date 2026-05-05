@@ -35,6 +35,7 @@ from claudestruct.server.models import Role
 from claudestruct.server.schema import (
     CheckoutRequest,
     CheckoutResponse,
+    InvoiceResponse,
     SubscriptionResponse,
     UsageResponse,
 )
@@ -140,6 +141,16 @@ def get_usage(
         cache_creation_tokens=cache_c,
         cost_usd=round(cost, 6),
     )
+
+
+@router.get("/invoice", response_model=InvoiceResponse)
+def get_invoice_pdf(
+    principal: auth_mod.Principal = Depends(auth_mod.require_role(Role.viewer)),
+    session: Session = Depends(auth_mod.get_session),
+) -> InvoiceResponse:
+    pdf_url = billing_mod.invoice_pdf_url(session, principal.org_id)
+    session.commit()
+    return InvoiceResponse(pdf_url=pdf_url)
 
 
 @router.post("/webhook", status_code=status.HTTP_204_NO_CONTENT)

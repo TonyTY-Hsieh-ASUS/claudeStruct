@@ -274,6 +274,15 @@ class UsageResponse(BaseModel):
     cost_usd: float
 
 
+class InvoiceResponse(BaseModel):
+    """URL to the latest invoice PDF for the org's current billing period.
+
+    Returns a Stripe PDF URL when a paid invoice exists; otherwise a
+    placeholder URL so callers don't have to special-case the missing-Stripe path.
+    """
+    pdf_url: str
+
+
 # --- SLO snapshot (W8.7) -------------------------------------------
 
 class SloWindow(BaseModel):
