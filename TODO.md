@@ -346,7 +346,7 @@ Goal: a managed service teams pay for. Open-core split: Waves 4-7 OSS, Wave 8 ho
   - `deploy/terraform/main.tf` — VPC across two AZs, RDS Postgres 16 (Multi-AZ when `environment="prod"`), Secrets Manager-managed master password, security group locked to in-VPC traffic. Outputs the DB endpoint + secret ARN for the Helm chart.
   - `deploy/README.md` documents install + roadmap mapping (what each follow-up PR should layer in).
   - Pending: EKS cluster module, ALB+ACM ingress, per-region instantiation for W8.5, HPA, Redis for the W6.1 job queue.
-- [~] **W8.2 — Billing & subscription** (skeleton + token-cap enforcement shipped; live Stripe + webhook handlers shipped; invoice PDF passthrough pending)
+- [~] **W8.2 — Billing & subscription** (skeleton + token-cap enforcement shipped; live Stripe checkout + webhook handlers shipped; invoice PDF passthrough pending)
   - `src/claudestruct/server/billing.py` — `Subscription` model (one row per org, `free`/`team`/`business` tier), `get_or_default()` lazy-materializes a free placeholder, `current_period_bounds()` falls back to the UTC calendar month when Stripe state is absent, `AUDIT_RETENTION_DAYS` map drives W8.4 pruning.
   - Routes: `GET /v1/billing/subscription` (viewer+), `POST /v1/billing/checkout` (admin), `GET /v1/billing/usage` (viewer+), `POST /v1/billing/webhook` (unauthenticated, signature-verified).
   - Stripe SDK lazy-imported via `stripe_sdk_available()`; checkout returns a deterministic stub URL on the OSS path; webhook returns 503 with a clear "install stripe" message. `billing.checkout.create` writes an audit row under the caller's org chain (W8.4 integration).
@@ -645,7 +645,7 @@ Ship in roughly this order to maximize compounding value:
   - `current_period_token_usage(session, org_id)` sums input+output tokens over the org's current billing window via existing `current_period_bounds()`
   - `POST /v1/runs` now returns **HTTP 402 Payment Required** with a structured `TokenCapExceededResponse` body (`used_tokens`, `cap_tokens`, `period_end`, `tier`) when an org has met or exceeded its cap. Failed runs still count toward the cap (the Anthropic API call happened); orgs with no Subscription row treat as free; unknown tier strings fall back to free
   - 12 new tests (4 in test_billing.py + 8 in test_server.py). Total Python: 329 passed; ruff clean
-  - Pending under W8.2: live Stripe checkout, webhook handlers, invoice PDF passthrough
+  - Pending under W8.2: invoice PDF passthrough
 - 2026-04-28 — W6.6 close-out (mostly): verdict-on-completion comment shipped:
   - `Run` gains nullable `github_installation_id` / `github_repo_full_name` / `github_pr_number` columns; webhook persists them when enqueuing
   - `format_verdict_body` emits ✅ for done (cost + duration) / ❌ for failed (1500-char truncated error block) / neutral for unknown statuses

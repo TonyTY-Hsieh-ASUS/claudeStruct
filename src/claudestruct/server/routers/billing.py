@@ -241,7 +241,6 @@ def _handle_checkout_completed(session: Session, event) -> None:
     sub.tier = tier_str
     sub.status = "active"
     if subscription_id:
-        # Look up the subscription to get current_period_start/end
         _update_subscription_period(session, sub, subscription_id)
 
     audit_mod.record(
