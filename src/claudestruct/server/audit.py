@@ -67,6 +67,22 @@ def _canonical_json(payload: Any) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+def _to_utc_iso(created_at: datetime) -> str:
+    """Return ISO-8601 microsecond timestamp in UTC.
+
+    SQLite stores datetimes as naive strings with no timezone info.
+    When SQLAlchemy reads them back, we get a naive datetime in the
+    local timezone.  To avoid a local→UTC conversion that would make
+    the stored hash disagree with recomputation, we treat naive values
+    as already UTC (they were written by _now_utc() which produces
+    aware datetimes, so naive values come from SQLite round-trip).
+    """
+    if created_at.tzinfo is None:
+        # Naive — assumed already UTC (SQLite round-trip of aware value).
+        return created_at.replace(tzinfo=timezone.utc).isoformat(timespec="microseconds")
+    return created_at.astimezone(timezone.utc).isoformat(timespec="microseconds")
+
+
 def compute_entry_hash(
     *,
     prev_hash: str,
@@ -92,7 +108,7 @@ def compute_entry_hash(
         resource_type,
         resource_id,
         _canonical_json(payload),
-        created_at.astimezone(timezone.utc).isoformat(timespec="microseconds"),
+        _to_utc_iso(created_at),
     ])
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
