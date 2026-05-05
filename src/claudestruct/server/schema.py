@@ -304,3 +304,12 @@ class SloSnapshotResponse(BaseModel):
     generated_at: datetime
     targets: SloTargetsResponse
     windows: list[SloWindow]
+
+
+class TenantSloResponse(BaseModel):
+    """Per-tenant SLO snapshot for an authenticated org."""
+    generated_at: datetime
+    targets: SloTargetsResponse
+    windows: list[SloWindow]
+    org_slug: str
+    tier: str  # "free" | "team" | "business"

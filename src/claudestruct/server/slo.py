@@ -138,13 +138,14 @@ def _window_snapshot(
     name: str,
     now: datetime,
     window_seconds: int,
+    org_id: int | None = None,
 ) -> WindowSnapshot:
     cutoff = now - timedelta(seconds=window_seconds)
     terminal = (RunStatus.done.value, RunStatus.failed.value)
-    rows: list[Run] = list(session.execute(
-        select(Run)
-        .where(Run.status.in_(terminal), Run.created_at >= cutoff)
-    ).scalars())
+    stmt = select(Run).where(Run.status.in_(terminal), Run.created_at >= cutoff)
+    if org_id is not None:
+        stmt = stmt.where(Run.org_id == org_id)
+    rows: list[Run] = list(session.execute(stmt).scalars())
 
     total = len(rows)
     succeeded = sum(1 for r in rows if r.status == RunStatus.done.value)
@@ -201,7 +202,30 @@ def compute_snapshot(
     """Fold the ``runs`` table into a fleet-wide SLO snapshot."""
     n = (now or _now_utc()).astimezone(timezone.utc)
     windows = [
-        _window_snapshot(session, name=name, now=n, window_seconds=secs)
+        _window_snapshot(session, name=name, now=n, window_seconds=secs, org_id=None)
+        for name, secs in WINDOWS_SECONDS.items()
+    ]
+    return SloSnapshot(
+        generated_at=n,
+        targets=SloTargets(
+            success_rate=SUCCESS_RATE_TARGET,
+            p95_run_start_ms=P95_RUN_START_MS_TARGET,
+            p95_duration_ms=P95_DURATION_MS_TARGET,
+        ),
+        windows=windows,
+    )
+
+
+def compute_tenant_snapshot(
+    session: Session,
+    org_id: int,
+    *,
+    now: datetime | None = None,
+) -> SloSnapshot:
+    """Fold the ``runs`` table into a per-tenant SLO snapshot for *org_id*."""
+    n = (now or _now_utc()).astimezone(timezone.utc)
+    windows = [
+        _window_snapshot(session, name=name, now=n, window_seconds=secs, org_id=org_id)
         for name, secs in WINDOWS_SECONDS.items()
     ]
     return SloSnapshot(

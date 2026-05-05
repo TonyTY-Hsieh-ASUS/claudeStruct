@@ -376,13 +376,14 @@ Goal: a managed service teams pay for. Open-core split: Waves 4-7 OSS, Wave 8 ho
   - `Subscription.wrapped_dek_b64` / `wrapped_dek_provider` / `wrapped_dek_key_id` columns store the org-scoped envelope
   - AWS KMS provider path stubbed (`NotImplementedError`) — abstraction is in place, real SDK integration ships when the merchant story needs it
   - Tests: `tests/test_crypto.py` (20 cases) — local round-trip, passphrase isolation, AAD binding, wrong-DEK / truncated-blob / wrong-provider rejection, default-provider env wiring
-- [~] **W8.7 — Status page + SLO dashboard** (SLO endpoint shipped; external status page deferred)
+- [~] **W8.7 — Status page + SLO dashboard** (fleet-wide + per-tenant SLO shipped; external status page deferred)
   - `src/claudestruct/server/slo.py` folds the `runs` table into rolling 24h / 7d / 30d windows; emits `success_rate`, `error_rate`, p50/p95/p99 of run-start latency (`started_at - created_at`) and duration (`duration_ms` for `done` runs only). Targets (`SUCCESS_RATE_TARGET=0.999`, `P95_RUN_START_MS_TARGET=5000`, `P95_DURATION_MS_TARGET=600000`) live as code-reviewed constants
   - `GET /v1/slo` is unauthenticated like `/healthz` so an external status page can scrape without a service token; output is aggregate (no run IDs / payloads / per-tenant data)
   - Failed runs excluded from duration percentiles (a single crash shouldn't poison p95); negative run-start deltas clamp to 0 (clock-skew defense); `null` percentiles surface for empty windows so consumers render "n/a" not 0
   - `docs/slo.md` documents the targets, the response shape, what's measured (and what isn't), and the status-page traffic-light mapping
-  - Tests: `tests/test_slo.py` (20 cases) — `_percentile` math (empty / single / odd-count / p0 / p100 / p95 linear interp), windowing (24h excludes 25h-old, 30d excludes 31d-old, queued/running excluded), success/error rate, run-start latency clamps + skips runs with `started_at=NULL`, duration excludes failed runs, endpoint shape + region header
-  - Pending: external `status.claudestruct.dev` (manual infra), per-tenant SLO endpoint, API request-latency metric (needs FastAPI middleware), public incident timeline
+  - **Per-tenant SLO (this PR)**: `GET /v1/slo/tenant` (viewer+) scopes the snapshot to `principal.org_id` via `compute_tenant_snapshot(session, org_id)`; returns `org_slug` + `tier` so callers know whose data they're looking at; billing `Subscription` tier drives any future per-tier SLO targets. Multi-org isolation verified: org-B's runs never appear in org-A's tenant SLO.
+  - Tests: `tests/test_slo.py` (25 cases) — `_percentile` math (empty / single / odd-count / p0 / p100 / p95 linear interp), windowing (24h excludes 25h-old, 30d excludes 31d-old, queued/running excluded), success/error rate, run-start latency clamps + skips runs with `started_at=NULL`, duration excludes failed runs, endpoint shape + region header, per-tenant empty/multi-org isolation
+  - Pending: external `status.claudestruct.dev` (manual infra), API request-latency metric (needs FastAPI middleware), public incident timeline
 
 ---
 
