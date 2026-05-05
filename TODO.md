@@ -223,30 +223,33 @@ Goal: trust this in CI pipelines and long-running daemons. Wave 4 makes it insta
 
 Goal: 5-50 devs share the tool with shared visibility, shared budgets, and team-level admin. Today the orchestrator and dashboard are single-user-on-this-machine.
 
-- [x] **W6.1 — Daemon mode** (claudestruct only; claw-squad worker deferred)
+- [x] **W6.1 — Daemon mode** (claudestruct + claw-squad both shipped)
   - `Run` SQLAlchemy model added to `src/claudestruct/server/models.py` with `RunStatus` enum (queued → running → done|failed). Per-row payload (task, description, model, effort, paths_json) plus outcomes (cost_usd, tokens, duration_ms, error)
   - `src/claudestruct/server/worker.py` — `process_pending_run(session, run_root, runner=...)` synchronous drain helper, `WorkerThread` long-running daemon thread with poll-interval + graceful stop, `drain_queue(...)` for cron / batch operation, `wait_until_empty(...)` test helper
   - `POST /v1/runs` now writes a queued `Run` row tagged with `org_id`/`user_id` instead of returning a placeholder id; `GET /v1/runs/{id}` reads from the DB first (with tenant isolation: cross-org lookup → 404, not 403, to avoid leaking existence) and falls back to the legacy JSONL log so pre-W6.1 history stays accessible
   - New `cs serve worker [--once] [--poll-interval N]` CLI subcommand (foreground daemon thread + Ctrl-C graceful drain, or single drain pass)
-  - claw-squad-side daemon mode tracked separately — orchestrator's threading model + multi-repo state make it a bigger reshape
-- [~] **W6.2 — HTTP REST API** (draft shipped)
+  - **claw-squad worker daemon (this PR)**: `claw-squad/src/queue.ts` — Redis-backed job queue with `enqueueJob` / `dequeueJob` (atomic rPopLPush) / `completeJob` / `abandonJob` (retry-or-dead-letter) / `requeueDeadJobs` / `queueDepth` / worker heartbeat (`registerWorker` / `heartbeatWorker` / `unregisterWorker` / `listActiveWorkers`). `claw-squad/src/daemon.ts` — `runWorkerDaemon` (long-running, graceful SIGTERM/SIGINT shutdown, 15s heartbeat) + `drainQueueOnce` (cron/batch mode) + `submitJob` (enqueue helper). `claw-squad/src/cli.ts` — `claw-squad worker start` / `once` / `submit` / `status` / `requeue-dead` subcommands. 14 tests in `tests/queue.test.ts`; 445 total pass; tsc clean.
+- [x] **W6.2 — HTTP REST API** (session cookie hardening shipped)
   - FastAPI app under `src/claudestruct/server/` behind the `[server]` extra: `/healthz`, `/readyz`, `/v1/dashboard`, `/v1/budget`, `/v1/runs` (POST + GET), `/v1/keys` (list/create/revoke). OpenAPI 3.1 at `/openapi.json`, interactive viewer at `/docs`.
   - Auth: bearer API keys (`ck_<key_id>_<secret>`, SHA-256-hashed secret, last_used stamp on auth success).
-  - `POST /v1/runs` returns 202 with a placeholder run_id — actual worker model lands in **W6.1**. Other endpoints work end-to-end against the existing JSONL store + budget module.
-  - Tests: `tests/test_server.py` (18 cases) — auth gate (4), RBAC (3), key lifecycle (1), tenant isolation (2), dashboard / budget / runs shape (5), OpenAPI (1), health (2)
-  - Pending: session cookies + browser SDK (deferred to W6.4 OAuth), per-language SDK stubs (deferred until the API surface is closer to final)
-- [~] **W6.3 — User / team / org model + RBAC** (schema + key lifecycle shipped)
-  - SQLAlchemy 2.x models: `orgs`, `users`, `memberships`, `api_keys`. Idempotent `init_db()` via `Base.metadata.create_all` for the draft; Alembic deferred until the first schema bump
+  - `POST /v1/runs` returns 202 with a placeholder run_id — actual worker model landed in **W6.1**.
+  - **Session cookie hardening (this PR)**: explicit `HttpOnly` + `Secure` + `SameSite=Lax` attributes verified in tests; expired session rejection; unknown cookie → 401.
+  - Tests: `tests/test_server.py` (18 cases) + `tests/test_session_cookies.py` (7 new cases). Total: 25 passed; ruff clean.
+  - Pending: per-language SDK stubs (deferred until the API surface is closer to final)
+- [x] **W6.3 — User / team / org model + RBAC** (Alembic scaffolding shipped)
+  - SQLAlchemy 2.x models: `orgs`, `users`, `memberships`, `api_keys`. Idempotent `init_db()` via `Base.metadata.create_all` for the draft.
   - Roles: `admin` / `member` / `viewer` enforced by `require_role(min_role)` FastAPI dependency
   - `cs serve init-db / add-org / add-user / add-key` covers the bootstrap path
-  - Pending: teams (currently flat membership of users → orgs), seeded migration fixtures, Alembic when the schema needs to change shape
-- [~] **W6.4 — OAuth login** (GitHub shipped; Google deferred)
+  - **Alembic setup (this PR)**: `alembic.ini` + `alembic/env.py` (reads `DATABASE_URL`, imports all models) + `cs serve migrate [--revision head|base]` command. Ready for future schema migrations; first real migration lands when the schema changes.
+  - 6 new tests in `tests/test_alembic.py`; ruff clean.
+  - Pending: teams (currently flat membership of users → orgs), seeded migration fixtures
+- [x] **W6.4 — OAuth login** (GitHub + Google both shipped)
   - `UserSession` SQLAlchemy model: per-row `session_token` (URL-safe random), `provider`, `expires_at` (14d hard cap), `revoked_at` for logout
-  - `src/claudestruct/server/oauth.py` — pure helpers: `load_github_config()` reads env (`CLAUDESTRUCT_GITHUB_OAUTH_CLIENT_ID` / `_SECRET` / `_OAUTH_REDIRECT_BASE`); `build_authorize_url`, `exchange_code_for_token`, `fetch_github_user` (with `/user/emails` fallback when the user's email is private). Injectable `http_client` so tests don't hit GitHub
-  - `routers/oauth.py`: `GET /v1/auth/github/login` (CSRF state cookie + redirect), `GET /v1/auth/github/callback` (state verify, token exchange, user fetch, session mint, HTTPOnly+Lax+Secure cookie); `GET /v1/auth/me` (cookie-driven principal); `POST /v1/auth/logout` (revoke + clear). 503 when env vars unset; 403 (not auto-provision) on unknown email — admin must `cs serve add-user` first to avoid the "any GitHub account in the world creates a tenant" footgun
-  - `auth.py:current_principal` chain: bearer wins, then session-cookie fallback. New `authenticate_session_cookie(session, cookie)` mirrors `authenticate(session, key)`
-  - 14 new tests: login redirect + 503 unconfigured, callback state-mismatch / unregistered-email-403 / token-exchange-failure / happy-path / `/user/emails` fallback, session cookie authenticates downstream `/v1/dashboard`, `/v1/auth/me` shape + 401 path, logout revokes + idempotent without cookie, bearer-wins ordering, revoked cookie falls through to 401
-  - Pending: Google OAuth (structurally identical, separate provider config). Tracked under W8.7 (self-serve signup) so it lands alongside the domain-allowlist feature it depends on
+  - `src/claudestruct/server/oauth.py` — GitHub helpers (`load_github_config`, `build_github_authorize_url`, `exchange_code_for_github_token`, `fetch_github_user`) + Google helpers (`GoogleOAuthConfig`, `load_google_config`, `build_google_authorize_url`, `exchange_code_for_google_token`, `fetch_google_user`). Injectable `http_client` so tests don't hit the providers.
+  - `routers/oauth.py`: GitHub (`/v1/auth/github/login`, `/v1/auth/github/callback`) + Google (`/v1/auth/google/login`, `/v1/auth/google/callback`) — CSRF state cookie + redirect, state verify, token exchange, user fetch, session mint, HTTPOnly+Lax+Secure cookie; `/v1/auth/me` (cookie-driven principal); `POST /v1/auth/logout` (revoke + clear). 503 when env vars unset; 403 (not auto-provision) on unknown email.
+  - `auth.py:current_principal` chain: bearer wins, then session-cookie fallback. Works for any `provider` value ("github", "google", ...).
+  - **Google OAuth (this PR)**: same pattern as GitHub; env vars `CLAUDESTRUCT_GOOGLE_OAUTH_CLIENT_ID` / `_SECRET` / `_REDIRECT_BASE`. 13 new tests in `tests/test_google_oauth.py`; 26 total OAuth tests pass; ruff clean.
+  - `docs/server.md` updated with OAuth (GitHub + Google) documentation.
 - [x] **W6.5 — Shared dashboard** ✅ (multi-user view + cost-regression alerts + budget-cap team rollups all shipped)
   - Multi-user view: `/v1/dashboard/team` — org-scoped rollup by author + task + recent runs (W6.5 part 1)
   - Cost-regression alerts: `cache_state.json` warn-when-low-hit-rate landed earlier

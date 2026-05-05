@@ -1165,6 +1165,157 @@ program
     await runMcpServer();
   });
 
+// --- worker daemon (W6.1) -------------------------------------------
+
+const workerCmd = program
+  .command("worker")
+  .description(
+    "Run the claw-squad worker daemon. Polls Redis for queued jobs and " +
+    "executes runOrchestrator for each one. Use REDIS_URL env or --redis-url " +
+    "to point at your Redis instance.",
+  );
+
+workerCmd
+  .command("start")
+  .description("Start the worker daemon (long-running).")
+  .option(
+    "--worker-id <id>",
+    "Unique worker id (auto-generated if unset).",
+  )
+  .option(
+    "--redis-url <url>",
+    "Redis URL (default: REDIS_URL env or redis://localhost:6379).",
+  )
+  .option(
+    "--poll-interval <seconds>",
+    "How long to sleep between empty-queue polls (default: 1).",
+    "1",
+  )
+  .action(async (opts: Record<string, unknown>) => {
+    const { runWorkerDaemon } = await import("./daemon.js");
+    console.log(pc.cyan("claw-squad worker daemon starting…"));
+    console.log(pc.dim("  Ctrl-C or SIGTERM to stop gracefully."));
+    try {
+      await runWorkerDaemon({
+        workerId: opts.workerId as string | undefined,
+        redisUrl: opts.redisUrl as string | undefined,
+        pollIntervalS: Number(opts.pollInterval ?? 1),
+      });
+    } catch (err) {
+      console.error(pc.red(`worker failed: ${(err as Error).message}`));
+      process.exit(1);
+    }
+  });
+
+workerCmd
+  .command("once")
+  .description("Drain all currently-queued jobs and exit.")
+  .option(
+    "--redis-url <url>",
+    "Redis URL (default: REDIS_URL env or redis://localhost:6379).",
+  )
+  .option("--max-jobs <n>", "Max jobs to drain (default: 1000).", "1000")
+  .action(async (opts: Record<string, unknown>) => {
+    const { drainQueueOnce } = await import("./daemon.js");
+    const n = await drainQueueOnce({
+      redisUrl: opts.redisUrl as string | undefined,
+      maxJobs: Number(opts.maxJobs ?? 1000),
+    });
+    console.log(pc.green(`drained ${n} job(s)`));
+  });
+
+workerCmd
+  .command("submit")
+  .description("Enqueue a new job (does not run it; use 'worker start' to process it).")
+  .argument("<requirement>", "the feature / task / question to work on")
+  .requiredOption("--root <path>", "repo root")
+  .option("--github", "enable GitHub integration")
+  .option("--github-repo <owner/repo>", "GitHub repo")
+  .option("--max-loops <n>", "max tasks per run", "10")
+  .option("--max-review-rounds <n>", "max review rounds per task", "3")
+  .option("--hooks <path>", "path to hooks module")
+  .action(async (requirement: string, opts: Record<string, unknown>) => {
+    const { submitJob } = await import("./daemon.js");
+    const { loadAgentConfig, loadReposFromFile } = await import("./config.js");
+    const agentConfig = loadAgentConfig({ repoRoot: String(opts.root) });
+    const repos = loadReposFromFile({ repoRoot: String(opts.root) });
+    const runOptions: Record<string, unknown> = {
+      githubEnabled: opts.github === true,
+      githubRepo: opts.githubRepo as string | undefined,
+      maxLoops: Number(opts.maxLoops ?? 10),
+      maxReviewRounds: Number(opts.maxReviewRounds ?? 3),
+      repos: repos as RunConfig["repos"] | undefined,
+    };
+    if (opts.hooks) runOptions.hooksPath = opts.hooks;
+    const job = await submitJob({
+      requirement,
+      repoRoot: String(opts.root),
+      agentConfig,
+      options: runOptions as Partial<RunConfig>,
+    });
+    console.log(pc.green(`enqueued job ${job.id}`));
+    console.log(pc.dim(`  repoRoot: ${job.repoRoot}`));
+  });
+
+workerCmd
+  .command("status")
+  .description("Show worker and queue status (Redis).")
+  .option(
+    "--redis-url <url>",
+    "Redis URL (default: REDIS_URL env or redis://localhost:6379).",
+  )
+  .action(async (opts: Record<string, unknown>) => {
+    const { queueDepth, listActiveWorkers } = await import("./queue.js");
+    const { setRedisFactory } = await import("./queue.js");
+    if (opts.redisUrl) {
+      setRedisFactory(async () => {
+        const { createClient } = await import("redis");
+        const client = createClient({ url: opts.redisUrl as string });
+        await client.connect();
+        return client as unknown as import("./queue.js").RedisClient;
+      });
+    }
+    const depth = await queueDepth();
+    const workers = await listActiveWorkers();
+    console.log(pc.bold("claw-squad queue"));
+    console.log(`  pending:     ${pc.cyan(String(depth.pending))}`);
+    console.log(`  processing:  ${pc.cyan(String(depth.processing))}`);
+    console.log(`  dead-letter:  ${pc.yellow(String(depth.dead))}`);
+    console.log(pc.bold("workers"));
+    if (workers.length === 0) {
+      console.log(pc.dim("  (no active workers)"));
+    } else {
+      for (const w of workers) {
+        console.log(
+          `  ${pc.green(w.id)}  started=${w.startedAt}  last-heartbeat=${w.lastHeartbeat}${w.currentJobId ? `  current-job=${w.currentJobId}` : ""}`,
+        );
+      }
+    }
+  });
+
+workerCmd
+  .command("requeue-dead")
+  .description("Move dead-letter jobs back to the pending queue (resets retry count).")
+  .option(
+    "--redis-url <url>",
+    "Redis URL (default: REDIS_URL env or redis://localhost:6379).",
+  )
+  .option("--max <n>", "Max jobs to requeue (default: 100).", "100")
+  .action(async (opts: Record<string, unknown>) => {
+    const { requeueDeadJobs } = await import("./queue.js");
+    const { setRedisFactory } = await import("./queue.js");
+    if (opts.redisUrl) {
+      setRedisFactory(async () => {
+        const { createClient } = await import("redis");
+        const client = createClient({ url: opts.redisUrl as string });
+        await client.connect();
+        return client as unknown as import("./queue.js").RedisClient;
+      });
+    }
+    const n = await requeueDeadJobs(Number(opts.max ?? 100));
+    console.log(pc.green(`requeued ${n} dead-letter job(s)`));
+  });
+
 program.parseAsync().catch((err) => {
   console.error(pc.red((err as Error).message));
   process.exit(1);
