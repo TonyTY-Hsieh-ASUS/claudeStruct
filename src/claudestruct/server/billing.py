@@ -237,6 +237,70 @@ def stub_checkout_url(*, org_slug: str, tier: Tier) -> tuple[str, str]:
     return session_id, url
 
 
+def create_stripe_checkout_session(
+    *,
+    org_slug: str,
+    tier: Tier,
+    success_url: str,
+    cancel_url: str,
+) -> tuple[str, str]:
+    """Create a real Stripe Checkout session for upgrading to *tier*.
+
+    Called only when ``stripe_sdk_available()`` is True. Returns
+    ``(session_id, url)`` from the created ``checkout.session``.
+    The session ID is stored as the ``stripe_subscription_id`` on the
+    ``Subscription`` row so the webhook can update the tier on payment.
+    """
+    import stripe  # type: ignore
+
+    tier_mode_map = {
+        Tier.team: "team",
+        Tier.business: "business",
+    }
+    mode = tier_mode_map.get(tier, "team")
+
+    session = stripe.checkout.Session.create(
+        payment_method_types=["card"],
+        mode="subscription",
+        line_items=[
+            {
+                "price_data": {
+                    "currency": "usd",
+                    "recurring": {"interval": "month"},
+                    "unit_amount": _tier_price_cents(tier),
+                    "product_data": {
+                        "name": f"claudeStruct {tier.value.capitalize()} plan",
+                        "description": _tier_description(tier),
+                    },
+                },
+                "quantity": 1,
+            },
+        ],
+        success_url=success_url,
+        cancel_url=cancel_url,
+        metadata={
+            "org_slug": org_slug,
+            "tier": tier.value,
+            "mode": mode,
+        },
+        allow_promotion_codes=True,
+        billing_address_collection="required",
+    )
+    return session.id, session.url
+
+
+def _tier_price_cents(tier: Tier) -> int:
+    """Monthly price in US cents. Revisit when billing data is real."""
+    return {Tier.team: 2900, Tier.business: 9900}[tier]
+
+
+def _tier_description(tier: Tier) -> str:
+    return {
+        Tier.team: "Team plan — 4 concurrent runs, 15 min runtime, unlimited tokens",
+        Tier.business: "Business plan — 16 concurrent runs, 60 min runtime, unlimited tokens",
+    }[tier]
+
+
 # --- Token caps + current-period usage (W8.2) ----------------------
 #
 # Per-tier monthly token caps. ``None`` means "no cap at this tier" —
