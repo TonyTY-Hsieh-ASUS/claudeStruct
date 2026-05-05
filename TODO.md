@@ -214,7 +214,8 @@ Goal: trust this in CI pipelines and long-running daemons. Wave 4 makes it insta
   - Ruff lint config in `pyproject.toml` (select F/E/W/I/B/UP/SIM, opinionated rules silenced); CI runs `ruff check src/ tests/` before pytest
   - Coverage gate via `coverage` (`fail_under = 70`; current run hits 80% with CLI/MCP entry points excluded as integration-tested)
   - CI workflow installs `pytest coverage ruff` and runs lint → coverage-gated pytest
-  - Pending: end-to-end tests with mocked Anthropic SDK; mutation testing (mutmut / stryker) — both deferred until the unit-test floor is solid
+  - End-to-end tests with mocked Anthropic SDK shipped: `tests/test_e2e_cli.py` (10 cases) covers the four task commands' happy paths + cost summary + cached-badge surface + provider-side `ClaudestructError` exit-code behaviour + `--log-json` event contract (`run.start` / `agent.usage` / `run.end`) + `--effort xhigh` flag plumbing through to the provider. An autouse fixture stubs `count_tokens` + sets a dummy API key so no test reaches Anthropic.
+  - Pending: mutation testing (mutmut / stryker) — heavy CI cost, deferred until a scheduled / nightly job slot is set up
 
 ---
 
