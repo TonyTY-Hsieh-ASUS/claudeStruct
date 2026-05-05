@@ -1,0 +1,65 @@
+# Bitbucket Pipelines template that runs `cs review` on every pull request
+# and posts the verdict as a PR comment.
+#
+# Install: copy this file to bitbucket-pipelines.yml at your repo root, then
+# set the repository variable ANTHROPIC_API_KEY (Repository settings ->
+# Repository variables, mark "Secured").
+#
+# Trigger: pull-request pipelines (Bitbucket auto-creates these for every
+# open PR). Adjust the `pull-requests` filter to scope to specific target
+# branches if needed.
+#
+# Cost guard: passes --max-bytes 200000 (the review-task default) so a
+# runaway diff doesn't burn through your spend cap. Combine with
+# CLAUDESTRUCT_MONTHLY_CAP_USD (another repo variable) for a cumulative cap.
+#
+# Bitbucket API: posts the comment via the 2.0 API using the auto-injected
+# BITBUCKET_REPO_FULL_NAME and BITBUCKET_PR_ID. Requires an app password
+# scoped to "Pull requests: write" exposed as the repo variable
+# BITBUCKET_APP_PASSWORD with username BITBUCKET_USER (or use a workspace
+# access token; see https://support.atlassian.com/bitbucket-cloud/docs/access-tokens/).
+
+image: python:3.12-slim
+
+definitions:
+  steps:
+    - step: &cs-review
+        name: cs review
+        max-time: 8
+        clone:
+          # Pull full history so `cs review` can diff against the PR target.
+          depth: full
+        script:
+          - apt-get update -qq && apt-get install -y --no-install-recommends git curl jq
+          - pip install --quiet --upgrade pip
+          - pip install --quiet claudestruct
+          # If you vendor claudestruct in-repo instead of installing from PyPI,
+          # replace the line above with: pip install --quiet -e .
+          - |
+            set +e
+            cs review --max-bytes 200000 > review.md 2>&1
+            status=$?
+            echo "cs review exited with status=$status"
+
+            if [ -z "${BITBUCKET_PR_ID:-}" ]; then
+              echo "Not a PR pipeline; skipping comment post."
+              exit 0
+            fi
+
+            body=$(jq -n \
+              --arg c "### cs review\n\n<details><summary>verdict</summary>\n\n\`\`\`\n$(cat review.md)\n\`\`\`\n\n</details>" \
+              '{content: {raw: $c}}')
+
+            curl --fail-with-body --silent --show-error \
+              --user "${BITBUCKET_USER}:${BITBUCKET_APP_PASSWORD}" \
+              --header "Content-Type: application/json" \
+              --request POST \
+              --data "$body" \
+              "https://api.bitbucket.org/2.0/repositories/${BITBUCKET_REPO_FULL_NAME}/pullrequests/${BITBUCKET_PR_ID}/comments"
+        artifacts:
+          - review.md
+
+pipelines:
+  pull-requests:
+    "**":
+      - step: *cs-review

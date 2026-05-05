@@ -19,6 +19,7 @@ import prompts from "prompts";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { runOrchestrator, type UserInterface } from "./orchestrator.js";
+import { installAbortSignal } from "./abort-signal.js";
 import {
   loadAgentConfig,
   loadReposFromFile,
@@ -38,6 +39,7 @@ import {
 import { loadHooksFromFile, NO_HOOKS, type Hooks } from "./hooks.js";
 import { detectTestCommand } from "./test-runner.js";
 import { ROLE_BUCKETS, type AgentRole, type RunConfig } from "./types.js";
+import { loadPromptVersion } from "./prompts.js";
 import {
   isSilentCacheInvalidator,
   type RunTotals,
@@ -62,6 +64,11 @@ const runCmd = program
   .argument("<requirement>", "the feature / task / question in plain language")
   .option("--root <path>", "repo root (defaults to cwd)", process.cwd())
   .option("--config <path>", "path to .claw-squad/config.json (otherwise auto-detected)")
+  .option(
+    "--preset <name>",
+    "starting-point preset shipped with the binary. Available: gx10, local-laptop, hybrid. " +
+    "User config + CLI flags still win on top.",
+  )
   .option("--max-clarifications <n>", "max Planner Q&A rounds", "3")
   .option("--max-review-rounds <n>", "max Coder↔Reviewer rounds per task", "3")
   .option("--max-loops <n>", "max tasks to complete in one run", "10")
@@ -120,12 +127,34 @@ const runCmd = program
     "serve a localhost web UI on the given port (default 3737)",
   )
   .option(
+    "--web-ui-bind <host>",
+    "host/interface for the web UI to bind. Default 127.0.0.1. Anything else (0.0.0.0, a LAN IP) requires --web-ui-token.",
+  )
+  .option(
+    "--web-ui-token <token>",
+    "shared secret required to connect to the web UI socket. May also be supplied via CLAW_WEB_TOKEN env.",
+  )
+  .option(
     "--no-rollback-on-max-rounds",
     "keep the task branch + PR when the Coder↔Reviewer loop hits max rounds (default: revert + close)",
   )
   .option(
     "--no-rollback-on-hard-fail",
     "keep the task branch on a preCommit hook abort (default: revert to starting ref)",
+  )
+  .option(
+    "--dry-run",
+    "stop after Planner finishes its TODO list and print a cost estimate; no Coder/Reviewer calls",
+  )
+  .option(
+    "--log-json <path>",
+    "mirror every run-log event (run-start, usage, phase, todo-complete, run-end) to this JSONL file in addition to .claw-squad/runs/",
+  )
+  .option(
+    "--smart-context",
+    "use the local embedding index (built via `claw-squad index build`) " +
+      "to pick top-K relevant files for round 1 of each Coder task. " +
+      "Biggest payoff on local 32B Coders with 32K context windows.",
   );
 
 // Per-role provider flags. Commander can't easily do templated option
@@ -172,6 +201,10 @@ runCmd.action(async (requirement: string, opts: Record<string, unknown>) => {
       // is passed. Default is undefined → treated as "on" by the orchestrator.
       rollbackOnMaxRounds: opts.rollbackOnMaxRounds !== false,
       rollbackOnHardFail: opts.rollbackOnHardFail !== false,
+      dryRun: Boolean(opts.dryRun),
+      logJsonPath:
+        typeof opts.logJson === "string" ? opts.logJson : undefined,
+      smartContext: Boolean(opts.smartContext),
     };
 
     // Pull multi-repo spec out of the config file if present. When
@@ -212,6 +245,7 @@ runCmd.action(async (requirement: string, opts: Record<string, unknown>) => {
       agentConfig = loadAgentConfig({
         repoRoot: config.repoRoot,
         configPath: opts.config as string | undefined,
+        presetName: opts.preset as string | undefined,
         cliOverrides: extractCliOverrides(opts),
       });
     } catch (err) {
@@ -281,12 +315,25 @@ runCmd.action(async (requirement: string, opts: Record<string, unknown>) => {
       // Commander hands us "8080" as a string.
       const portArg =
         typeof opts.webUi === "string" ? Number(opts.webUi) : undefined;
+      const hostArg =
+        typeof opts.webUiBind === "string" ? opts.webUiBind : undefined;
+      // CLI flag wins over env, both optional. The Web UI's
+      // start() will hard-fail if hostArg is non-loopback without a
+      // token, so we don't need to duplicate that check here.
+      const tokenArg =
+        (typeof opts.webUiToken === "string" ? opts.webUiToken : undefined) ??
+        process.env.CLAW_WEB_TOKEN;
       const { WebUi } = await import("./ui/web.js");
-      const web = new WebUi({ port: portArg });
+      const web = new WebUi({
+        port: portArg,
+        host: hostArg,
+        authToken: tokenArg,
+      });
       try {
         const addr = await web.start();
+        const hashHint = tokenArg ? `#token=${encodeURIComponent(tokenArg)}` : "";
         console.log(
-          pc.cyan(`web UI listening on http://${addr.host}:${addr.port}`),
+          pc.cyan(`web UI listening on http://${addr.host}:${addr.port}/${hashHint}`),
         );
       } catch (err) {
         console.error(
@@ -329,12 +376,13 @@ runCmd.action(async (requirement: string, opts: Record<string, unknown>) => {
       );
     }
 
+    const abort = installAbortSignal({ ui });
     try {
       const result = await runOrchestrator({
         config,
         agentConfig,
         requirement,
-        ui,
+        ui: abort.ui,
         hooks,
         resumeFrom,
         resumeTotals,
@@ -342,7 +390,8 @@ runCmd.action(async (requirement: string, opts: Record<string, unknown>) => {
       tuiInstance?.unmount();
       await remoteUi?.shutdown();
       printSummary(result);
-      if (result.reason === "complete") process.exit(0);
+      if (result.reason === "complete" || result.reason === "dry_run")
+        process.exit(0);
       if (result.reason === "blocked" || result.reason === "aborted")
         process.exit(2);
       process.exit(3);
@@ -351,6 +400,8 @@ runCmd.action(async (requirement: string, opts: Record<string, unknown>) => {
       await remoteUi?.shutdown();
       console.error(pc.red(`\nFatal: ${(err as Error).message}`));
       process.exit(1);
+    } finally {
+      abort.dispose();
     }
   });
 
@@ -570,6 +621,18 @@ function printSummary(result: {
     );
   }
 
+  // Prompt versions — content hash of each role's system prompt,
+  // shown so a cache regression or behavior shift can be tied to a
+  // specific prompt revision.
+  const planner = loadPromptVersion("planner");
+  const coder = loadPromptVersion("coder");
+  const reviewer = loadPromptVersion("reviewer");
+  console.log(
+    pc.dim(
+      `  prompts:              planner=${planner} coder=${coder} reviewer=${reviewer}`,
+    ),
+  );
+
   console.log(`  outcome:              ${result.reason}`);
 }
 
@@ -679,6 +742,428 @@ function filterByRequirement<T extends { requirement?: string }>(
   const n = needle.toLowerCase();
   return rows.filter((r) => r.requirement && r.requirement.toLowerCase().includes(n));
 }
+
+
+// --- skills marketplace (W7.3) --------------------------------------
+
+const skillsCmd = program
+  .command("skills")
+  .description("Marketplace for sharable skill packs (manifest + sha256 verified).");
+
+skillsCmd
+  .command("list")
+  .description("List installed skills with their manifest provenance.")
+  .option("--root <path>", "repo root", process.cwd())
+  .action(async (opts: { root: string }) => {
+    const { listInstalled } = await import("./skills-registry.js");
+    const installed = listInstalled(opts.root);
+    if (installed.length === 0) {
+      console.log(pc.dim("No skills installed under .claw-squad/skills/."));
+      return;
+    }
+    for (const s of installed) {
+      const v = s.manifest ? `v${s.manifest.version}` : pc.dim("(no manifest)");
+      console.log(`${pc.cyan(s.id)}  ${v}`);
+      if (s.manifest?.description) {
+        console.log(`  ${pc.dim(s.manifest.description)}`);
+      }
+    }
+  });
+
+skillsCmd
+  .command("install <idOrUrl>")
+  .description(
+    "Install a skill by id (resolved against the registry) or by direct manifest URL.",
+  )
+  .option("--root <path>", "repo root", process.cwd())
+  .option(
+    "--registry <url>",
+    "Override the registry index URL (default: skills.claudestruct.dev).",
+  )
+  .action(async (idOrUrl: string, opts: { root: string; registry?: string }) => {
+    const {
+      DEFAULT_REGISTRY_URL,
+      installSkill,
+      loadRegistryIndex,
+      parseManifest,
+    } = await import("./skills-registry.js");
+    let manifest: ReturnType<typeof parseManifest> | null = null;
+
+    // Direct URL? Treat as a manifest URL (we fetch the manifest, then
+    // the manifest tells us where the .md body lives). Otherwise look
+    // up by id in the registry.
+    if (idOrUrl.startsWith("http://") || idOrUrl.startsWith("https://") || idOrUrl.startsWith("file://")) {
+      const isLocal = idOrUrl.startsWith("file://");
+      const body = isLocal
+        ? (await import("node:fs")).readFileSync(idOrUrl.slice("file://".length), "utf-8")
+        : await (await fetch(idOrUrl)).text();
+      manifest = parseManifest(JSON.parse(body));
+    } else {
+      const url = opts.registry ?? process.env.CLAW_SKILLS_REGISTRY ?? DEFAULT_REGISTRY_URL;
+      const { manifests, warnings } = await loadRegistryIndex(url);
+      for (const w of warnings) console.warn(pc.yellow(`[warn] ${w}`));
+      const found = manifests.find((m) => m.id === idOrUrl);
+      if (!found) {
+        console.error(pc.red(`skill "${idOrUrl}" not found in ${url}`));
+        process.exit(1);
+      }
+      manifest = found;
+    }
+    if (typeof manifest === "string") {
+      console.error(pc.red(`invalid manifest: ${manifest}`));
+      process.exit(1);
+    }
+    const res = await installSkill(opts.root, manifest);
+    console.log(pc.green(`installed ${res.manifest.id}@${res.manifest.version}`));
+    console.log(pc.dim(`  ${res.installedPath}`));
+  });
+
+skillsCmd
+  .command("uninstall <id>")
+  .description("Remove an installed skill (and its sidecar manifest).")
+  .option("--root <path>", "repo root", process.cwd())
+  .action(async (id: string, opts: { root: string }) => {
+    const { uninstallSkill } = await import("./skills-registry.js");
+    const removed = uninstallSkill(opts.root, id);
+    if (removed) {
+      console.log(pc.green(`uninstalled ${id}`));
+    } else {
+      console.log(pc.dim(`${id}: nothing to remove`));
+    }
+  });
+
+
+// --- run logs (W5.3 follow-up) -------------------------------------
+
+const runsCmd = program
+  .command("runs")
+  .description("Inspect / prune the per-run JSONL logs under .claw-squad/runs/.");
+
+runsCmd
+  .command("list")
+  .description("List run-log files (path, age, size).")
+  .option("--root <path>", "repo root", process.cwd())
+  .action(async (opts: { root: string }) => {
+    const { loadAllRuns } = await import("./runs/log.js");
+    const { statSync } = await import("node:fs");
+    const runs = loadAllRuns(opts.root);
+    if (runs.length === 0) {
+      console.log(pc.dim(`No runs under ${opts.root}/.claw-squad/runs/.`));
+      return;
+    }
+    const now = Date.now();
+    for (const r of runs) {
+      let ageDays = 0;
+      let sizeKb = 0;
+      try {
+        const st = statSync(r.path);
+        ageDays = (now - st.mtimeMs) / (24 * 60 * 60 * 1000);
+        sizeKb = st.size / 1024;
+      } catch {
+        /* skip stat errors */
+      }
+      console.log(
+        `${pc.cyan(r.path)}  ${pc.dim(
+          `${ageDays.toFixed(1)}d  ${sizeKb.toFixed(1)}KB`,
+        )}`,
+      );
+    }
+  });
+
+runsCmd
+  .command("purge")
+  .description("Delete run-log files older than --older-than-days.")
+  .option("--root <path>", "repo root", process.cwd())
+  .requiredOption(
+    "--older-than-days <n>",
+    "Delete files whose mtime is older than this many days.",
+  )
+  .option("--dry-run", "List candidates without deleting them.", false)
+  .action(
+    async (opts: {
+      root: string;
+      olderThanDays: string;
+      dryRun: boolean;
+    }) => {
+      const days = Number(opts.olderThanDays);
+      if (!Number.isFinite(days) || days < 0) {
+        console.error(pc.red(`--older-than-days must be a non-negative number`));
+        process.exit(1);
+      }
+      const { purgeRuns, daysToMs } = await import("./runs/purge.js");
+      const victims = purgeRuns(opts.root, {
+        olderThanMs: daysToMs(days),
+        dryRun: opts.dryRun,
+      });
+      if (victims.length === 0) {
+        console.log(pc.dim("No run logs older than the cutoff."));
+        return;
+      }
+      const verb = opts.dryRun ? "Would delete" : "Deleted";
+      console.log(pc.bold(`${verb} ${victims.length} file(s):`));
+      for (const p of victims) {
+        console.log(`  ${p}`);
+      }
+    },
+  );
+
+
+// claw-squad smart-context — TS mirror of `cs index` (W10.5). Builds
+// a local embedding index of tracked source files so the Coder /
+// Reviewer can pick top-K semantic matches instead of keyword rank.
+// The `--smart-context` flag on `claw-squad run` lands separately;
+// this PR ships the index management surface.
+const indexCmd = program
+  .command("index")
+  .description(
+    "Manage the local embedding index for --smart-context. " +
+      "Defaults to Ollama at http://localhost:11434/v1; override via " +
+      "CLAW_SQUAD_EMBED_BASE_URL / _MODEL / _API_KEY.",
+  );
+
+indexCmd
+  .command("build")
+  .description("Walk tracked source files and (re-)embed each into the local index.")
+  .option("--root <path>", "repo root", process.cwd())
+  .action(async (opts: { root: string }) => {
+    const { buildIndex } = await import("./index/build.js");
+    const { EmbeddingError } = await import("./index/embed.js");
+    try {
+      const stats = await buildIndex(opts.root, {
+        onProgress: (msg) => console.log(pc.dim(msg)),
+      });
+      console.log(
+        `walked ${stats.walked} file(s); ` +
+          `embedded ${stats.embedded}; ` +
+          `skipped ${stats.skippedUnchanged} unchanged, ${stats.skippedUnreadable} unreadable`,
+      );
+    } catch (err) {
+      if (err instanceof EmbeddingError) {
+        console.error(pc.red(`embedding endpoint failed: ${err.message}`));
+        process.exit(2);
+      }
+      throw err;
+    }
+  });
+
+indexCmd
+  .command("stats")
+  .description("Print row count + embedding dimension for the local index.")
+  .option("--root <path>", "repo root", process.cwd())
+  .action(async (opts: { root: string }) => {
+    const { Index } = await import("./index/store.js");
+    const idx = Index.open(opts.root);
+    const s = idx.stats();
+    console.log(`entries: ${s.entries}`);
+    console.log(`dimension: ${s.dimension}`);
+  });
+
+indexCmd
+  .command("clear")
+  .description("Drop every row from the local index.")
+  .option("--root <path>", "repo root", process.cwd())
+  .action(async (opts: { root: string }) => {
+    const { Index } = await import("./index/store.js");
+    const idx = Index.open(opts.root);
+    const n = idx.clear();
+    idx.commit();
+    console.log(`deleted ${n} entr${n === 1 ? "y" : "ies"}`);
+  });
+
+indexCmd
+  .command("export")
+  .description("Dump the index to JSONL for cross-tool sharing with `cs index`.")
+  .option("--root <path>", "repo root", process.cwd())
+  .requiredOption(
+    "--out <path>",
+    "Output JSONL path. Created (or overwritten) by this command.",
+  )
+  .action(async (opts: { root: string; out: string }) => {
+    const { exportToJsonl } = await import("./index/io.js");
+    const stats = exportToJsonl(opts.root, opts.out);
+    console.log(
+      `exported ${stats.rows} entr${stats.rows === 1 ? "y" : "ies"} to ${stats.outputPath}`,
+    );
+  });
+
+indexCmd
+  .command("import <path>")
+  .description(
+    "Load JSONL (this tool's export, or cs index export) into the local index.",
+  )
+  .option("--root <path>", "repo root", process.cwd())
+  .action(async (path: string, opts: { root: string }) => {
+    const { importFromJsonl } = await import("./index/io.js");
+    let stats;
+    try {
+      stats = importFromJsonl(opts.root, path);
+    } catch (err) {
+      console.error(pc.red((err as Error).message));
+      process.exit(2);
+    }
+    const note = stats.skippedMalformed
+      ? ` (${stats.skippedMalformed} malformed line(s) skipped)`
+      : "";
+    console.log(
+      `imported ${stats.rows} entr${stats.rows === 1 ? "y" : "ies"} from ${stats.inputPath}${note}`,
+    );
+  });
+
+indexCmd
+  .command("watch")
+  .description(
+    "Keep the index warm: re-run `index build` on a fixed interval. " +
+      "Mirror of `cs index watch`. Designed for the GX10 home-server " +
+      "so `--smart-context` always sees today's tree.",
+  )
+  .option("--root <path>", "repo root", process.cwd())
+  .option(
+    "--interval <seconds>",
+    "Seconds between passes. Default 5; bump for very large monorepos.",
+    "5",
+  )
+  .action(async (opts: { root: string; interval: string }) => {
+    const intervalS = Number(opts.interval);
+    if (!Number.isFinite(intervalS) || intervalS <= 0) {
+      console.error(pc.red("--interval must be a positive number"));
+      process.exit(2);
+    }
+    const { watchIndex } = await import("./index/build.js");
+    console.error(
+      pc.bold(
+        `watching ${opts.root} (interval ${intervalS.toFixed(1)}s) — Ctrl-C to stop`,
+      ),
+    );
+    // SIGINT shows up as a process exit on Node; the watch loop is
+    // an async generator that never resolves under normal use, so
+    // we just let the signal end the process. Node prints no
+    // traceback by default; mirror the Python side's clean stop
+    // message via a SIGINT handler.
+    process.on("SIGINT", () => {
+      console.error(pc.bold("\nwatch stopped"));
+      process.exit(0);
+    });
+    await watchIndex(opts.root, {
+      intervalS,
+      onProgress: (msg: string) => console.error(pc.dim(msg)),
+    });
+  });
+
+
+// W10.6 — TS-side dataset export. Mirrors `cs dataset export` from
+// claudestruct so a single team can mine both tools' run logs into
+// one fine-tune corpus without writing custom scripts.
+const datasetCmd = program
+  .command("dataset")
+  .description(
+    "Mine the .claw-squad/runs/ JSONL logs for fine-tuning datasets (W10.6). " +
+      "Requires runs that were captured with CLAW_SQUAD_LOG_PROMPTS=1.",
+  );
+
+datasetCmd
+  .command("export")
+  .description(
+    "Walk .claw-squad/runs/*.jsonl and write a training-format JSONL.",
+  )
+  .requiredOption(
+    "--out <path>",
+    "Output JSONL path. Created (or overwritten) by this command.",
+  )
+  .option("--root <path>", "repo root", process.cwd())
+  .option(
+    "--role <bucket>",
+    "Filter to one of: planner / coder / reviewer / subagent. Default: include all.",
+  )
+  .option(
+    "--since <date>",
+    "Filter to events on or after this date (YYYY-MM-DD or ISO 8601).",
+  )
+  .option<"alpaca" | "chat">(
+    "--format <fmt>",
+    "Output schema: 'alpaca' (default) = {instruction,input,output}; 'chat' = {messages: [...]}",
+    (val): "alpaca" | "chat" => {
+      if (val !== "alpaca" && val !== "chat") {
+        throw new Error(
+          `--format must be 'alpaca' or 'chat'; got ${JSON.stringify(val)}`,
+        );
+      }
+      return val;
+    },
+    "alpaca",
+  )
+  .action(
+    async (opts: {
+      out: string;
+      root: string;
+      role?: string;
+      since?: string;
+      format: "alpaca" | "chat";
+    }) => {
+      const { exportDataset, parseSince } = await import("./runs/dataset.js");
+      const { ROLE_BUCKETS } = await import("./types.js");
+
+      let role: import("./types.js").RoleBucket | undefined;
+      if (opts.role) {
+        if (!(ROLE_BUCKETS as readonly string[]).includes(opts.role)) {
+          console.error(
+            pc.red(
+              `--role must be one of ${ROLE_BUCKETS.join(" / ")}; got ${
+                opts.role
+              }`,
+            ),
+          );
+          process.exit(2);
+        }
+        role = opts.role as import("./types.js").RoleBucket;
+      }
+
+      let since: Date | undefined;
+      if (opts.since) {
+        const parsed = parseSince(opts.since);
+        if (parsed === null) {
+          console.error(
+            pc.red(
+              `--since ${JSON.stringify(opts.since)}: expected YYYY-MM-DD or ISO 8601`,
+            ),
+          );
+          process.exit(2);
+        }
+        since = parsed;
+      }
+
+      const stats = exportDataset(opts.root, opts.out, {
+        role,
+        since,
+        format: opts.format,
+      });
+
+      if (stats.rows === 0) {
+        console.error(
+          pc.yellow(
+            "wrote 0 rows. CLAW_SQUAD_LOG_PROMPTS=1 must be set *before* a run for that run's IO to be exported.",
+          ),
+        );
+      }
+      const note = stats.skippedNoIo
+        ? ` (${stats.skippedNoIo} event(s) skipped: missing prompt/response)`
+        : "";
+      console.log(`wrote ${stats.rows} row(s) to ${stats.outputPath}${note}`);
+    },
+  );
+
+
+program
+  .command("mcp")
+  .description(
+    "Run claw-squad as an MCP server over stdio. Lets Claude Code (or any MCP client) call claw-squad's read-only tools (dashboard / runs list+purge) directly.",
+  )
+  .action(async () => {
+    // Lazy-import: keeps the SDK + its transitive deps off the
+    // cold-start cost of every other subcommand. Mirrors the
+    // OTel pattern in src/tracing.ts.
+    const { runMcpServer } = await import("./mcp/server.js");
+    await runMcpServer();
+  });
 
 program.parseAsync().catch((err) => {
   console.error(pc.red((err as Error).message));

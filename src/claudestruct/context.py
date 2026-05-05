@@ -16,7 +16,29 @@ from pathlib import Path
 import pathspec
 
 DEFAULT_MAX_FILE_BYTES = 80_000
-DEFAULT_MAX_TOTAL_BYTES = 600_000
+# Default total context size per task. The numbers reflect the shape of
+# what each task type actually needs:
+#   - review: works off the staged/unstaged diff — bigger budget is
+#     wasted because Reviewer rarely benefits from extra siblings.
+#   - dev:    needs the focused files + maybe a couple of callers.
+#   - plan:   architecture work; reading further afield earns its keep.
+#   - debug:  the failing path is usually narrower than dev's — too
+#     much surrounding code makes hypothesis-ranking noisier.
+# Override per-call via the CLI's `--max-bytes` flag.
+BUDGETS_PER_TASK: dict[str, int] = {
+    "review": 200_000,
+    "dev": 600_000,
+    "plan": 800_000,
+    "debug": 400_000,
+}
+DEFAULT_MAX_TOTAL_BYTES = BUDGETS_PER_TASK["dev"]
+
+
+def task_budget(task: str) -> int:
+    """Look up the per-task default. Falls back to DEFAULT_MAX_TOTAL_BYTES
+    so an unknown task name (e.g. a future addition) still gets a sane
+    cap instead of a KeyError."""
+    return BUDGETS_PER_TASK.get(task, DEFAULT_MAX_TOTAL_BYTES)
 
 BINARY_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".bmp",
@@ -112,7 +134,7 @@ def _load_gitignore(root: Path) -> pathspec.PathSpec:
     gitignore = root / ".gitignore"
     if gitignore.exists():
         patterns.extend(gitignore.read_text(encoding="utf-8", errors="replace").splitlines())
-    return pathspec.PathSpec.from_lines("gitwildmatch", patterns)
+    return pathspec.GitIgnoreSpec.from_lines(patterns)
 
 
 def _is_text_file(path: Path) -> bool:
@@ -212,7 +234,7 @@ def gather_dev_context(
     root: Path,
     explicit_paths: list[Path] | None = None,
     max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
-    max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES,
+    max_total_bytes: int = BUDGETS_PER_TASK["dev"],
 ) -> Context:
     """Context for a dev task: explicit files + recently changed files."""
     ctx = Context(root=root, git_info=_git_info(root))
@@ -246,7 +268,7 @@ def gather_review_context(
     root: Path,
     explicit_paths: list[Path] | None = None,
     max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
-    max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES,
+    max_total_bytes: int = BUDGETS_PER_TASK["review"],
 ) -> Context:
     """Context for code review: explicit files, or the diff against main/master."""
     ctx = Context(root=root, git_info=_git_info(root))
@@ -291,7 +313,7 @@ def gather_plan_context(
     root: Path,
     explicit_paths: list[Path] | None = None,
     max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
-    max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES,
+    max_total_bytes: int = BUDGETS_PER_TASK["plan"],
 ) -> Context:
     """Context for planning: architecture signals — top-level files, README, configs."""
     ctx = Context(root=root, git_info=_git_info(root))
@@ -342,7 +364,7 @@ def gather_debug_context(
     root: Path,
     explicit_paths: list[Path] | None = None,
     max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
-    max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES,
+    max_total_bytes: int = BUDGETS_PER_TASK["debug"],
 ) -> Context:
     """Context for debugging: dirty files first, then recently-modified files."""
     ctx = Context(root=root, git_info=_git_info(root))

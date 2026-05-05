@@ -122,14 +122,51 @@ export const WEB_PAGE_HTML = String.raw`<!doctype html>
   var pendingPrompt = null;
   var ws;
 
+  // Pull an optional auth token out of the URL hash. Hash fragments
+  // are NOT sent to the server, so the secret never appears in
+  // proxy / CDN access logs or Referer headers. We then fold it
+  // into the WS query string ourselves so the server can validate.
+  function tokenFromHash() {
+    var h = location.hash || '';
+    var m = h.match(/(?:^#|&)token=([^&]+)/);
+    return m ? decodeURIComponent(m[1]) : '';
+  }
+
+  // Reconnect with exponential backoff capped at 30s, jittered to
+  // prevent thundering herd if the server restarted multiple clients
+  // simultaneously. Counter resets on a clean open.
+  var reconnectAttempts = 0;
+  var RECONNECT_BASE_MS = 1000;
+  var RECONNECT_MAX_MS = 30000;
+
+  function nextReconnectDelay(){
+    var exp = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * Math.pow(2, reconnectAttempts));
+    return Math.floor(exp * (0.5 + Math.random() * 0.5));
+  }
+
   function connect() {
     var proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    ws = new WebSocket(proto + '://' + location.host + '/ws');
-    ws.onopen = function(){ conn.textContent = 'connected'; conn.classList.remove('disconnected'); };
-    ws.onclose = function(){
-      conn.textContent = 'disconnected — retrying';
+    var token = tokenFromHash();
+    var qs = token ? '?token=' + encodeURIComponent(token) : '';
+    ws = new WebSocket(proto + '://' + location.host + '/ws' + qs);
+    ws.onopen = function(){
+      reconnectAttempts = 0;
+      conn.textContent = 'connected';
+      conn.classList.remove('disconnected');
+    };
+    ws.onclose = function(ev){
+      // Don't auto-retry on a deliberate auth rejection: that just
+      // hammers the server with the same bad token.
+      if (ev && ev.code === 1008) {
+        conn.textContent = 'auth required — append #token=… to the URL';
+        conn.classList.add('disconnected');
+        return;
+      }
+      reconnectAttempts += 1;
+      var delay = nextReconnectDelay();
+      conn.textContent = 'disconnected — retry ' + reconnectAttempts + ' in ' + Math.round(delay/1000) + 's';
       conn.classList.add('disconnected');
-      setTimeout(connect, 2000);
+      setTimeout(connect, delay);
     };
     ws.onerror = function(){};
     ws.onmessage = function(ev){

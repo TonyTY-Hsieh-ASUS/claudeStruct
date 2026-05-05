@@ -1,0 +1,76 @@
+site_name: claudeStruct
+site_description: Token-efficient Claude Code companion (cs + claw-squad + claw-sandbox)
+site_url: https://docs.claudestruct.dev/
+repo_url: https://github.com/tonyandclaw/claudeStruct
+repo_name: tonyandclaw/claudeStruct
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - content.action.edit
+    - search.suggest
+    - search.highlight
+  palette:
+    - scheme: default
+      primary: deep purple
+      accent: deep purple
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: deep purple
+      accent: deep purple
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+plugins:
+  - search
+  - include-markdown
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Playground: playground.md
+  - Getting started:
+      - Install: install.md
+      - claudestruct (cs): cs.md
+      - claw-squad: claw-squad.md
+  - Local-first features:
+      - Smart context (RAG): smart-context.md
+      - Voice REPL: voice.md
+      - Dataset export: dataset-export.md
+      - Nightly watchdog: nightly-review.md
+  - Daemon mode (preview):
+      - cs serve: server.md
+      - Home-server deploy: home-server.md
+      - Audit log: audit.md
+      - Billing: billing.md
+      - SLO endpoint: slo.md
+  - claw-squad internals:
+      - Agents: claw-squad/agents.md
+      - Skills: claw-squad/skills.md
+      - Hooks: claw-squad/hooks.md
+      - Providers: claw-squad/providers.md
+      - Plugin SDK: claw-squad/plugins.md
+      - Skills marketplace: claw-squad/skills-marketplace.md
+  - Integrations: integrations.md
+  - Contributing: contributing.md
+  - Security: security.md
+  - Changelog: changelog.md
+  - Roadmap: roadmap.md

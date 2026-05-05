@@ -27,7 +27,8 @@
     "prompts": "^2.4.2",
     "react": "^19.2.5",
     "simple-git": "^3.27.0",
-    "ws": "^8.20.0"
+    "ws": "^8.20.0",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
@@ -38,6 +39,14 @@
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"
+  },
+  "_otel": "Set OTEL_EXPORTER_OTLP_ENDPOINT to enable tracing. The OTel deps in optionalDependencies are dynamic-imported by src/tracing.ts; when absent, tracing falls back to no-op spans so the default install stays lean.",
+  "_mcp": "`@modelcontextprotocol/sdk` is dynamic-imported by src/mcp/server.ts so only `claw-squad mcp` users pay for it. Default installs stay lean.",
+  "optionalDependencies": {
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/sdk-node": "^0.55.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.55.0",
+    "@modelcontextprotocol/sdk": "^1.0.0"
   },
   "engines": {
     "node": ">=20"

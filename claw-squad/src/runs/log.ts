@@ -26,14 +26,21 @@ import {
   readdirSync,
   readFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { RoleBucket } from "../types.js";
 
 export interface RunLogHandle {
-  /** Absolute path to the .jsonl file. */
+  /** Absolute path to the .jsonl file (under .claw-squad/runs/). */
   path: string;
   /** When this run started (used as filename base). */
   startedAt: string;
+  /**
+   * Optional secondary path. When set, every event also lands here as
+   * an additional JSONL line. Used by `--log-json <path>` so users can
+   * pipe to their own observability stack without scanning
+   * .claw-squad/runs/ for the latest file.
+   */
+  mirrorPath?: string;
 }
 
 export type RunLogEvent =
@@ -86,12 +93,28 @@ export type RunLogEvent =
   | {
       type: "run-end";
       ts: string;
-      reason: "complete" | "max_loops" | "blocked" | "aborted";
+      reason: "complete" | "max_loops" | "blocked" | "aborted" | "dry_run";
       overall: {
         costUsd: number;
         cacheSavedUsd: number;
         calls: number;
       };
+    }
+  | {
+      // W10.6 — opt-in IO capture for fine-tuning datasets. Off by
+      // default because raw prompts often contain proprietary code +
+      // credentials. Set CLAW_SQUAD_LOG_PROMPTS=1 to enable; consumed
+      // by `claw-squad dataset export`. Mirrors the Python-side
+      // `run.io` event in claudestruct.logging.
+      type: "run-io";
+      ts: string;
+      role: RoleBucket;
+      subagentName?: string;
+      prompt: string;
+      responseText: string;
+      // True when the model's response exceeded the 100 KB cap and
+      // got truncated before disk write.
+      responseTruncated?: boolean;
     };
 
 /**
@@ -99,18 +122,41 @@ export type RunLogEvent =
  * handle with the file path. First write to the file happens on the
  * first appendEvent call — we don't touch disk until there's content.
  */
-export function startRun(repoRoot: string): RunLogHandle {
+export function startRun(
+  repoRoot: string,
+  options: { mirrorPath?: string } = {},
+): RunLogHandle {
   const dir = join(repoRoot, ".claw-squad", "runs");
   mkdirSync(dir, { recursive: true });
   const startedAt = new Date().toISOString();
   // Filesystems hate `:` in filenames — flatten to something safe.
   const slug = startedAt.replace(/[:.]/g, "-");
   const path = join(dir, `${slug}.jsonl`);
-  return { path, startedAt };
+  // Pre-create the mirror's parent directory so the first append
+  // doesn't fail with ENOENT. Skip silently if the path is invalid —
+  // the per-event write also handles failures.
+  if (options.mirrorPath) {
+    try {
+      mkdirSync(dirname(options.mirrorPath), { recursive: true });
+    } catch {
+      /* best-effort */
+    }
+  }
+  return { path, startedAt, mirrorPath: options.mirrorPath };
 }
 
 export function appendEvent(handle: RunLogHandle, event: RunLogEvent): void {
-  appendFileSync(handle.path, JSON.stringify(event) + "\n", "utf-8");
+  const line = JSON.stringify(event) + "\n";
+  appendFileSync(handle.path, line, "utf-8");
+  // Mirror is best-effort: a misconfigured --log-json path must never
+  // abort a real run. Swallow + continue.
+  if (handle.mirrorPath) {
+    try {
+      appendFileSync(handle.mirrorPath, line, "utf-8");
+    } catch {
+      /* ignore */
+    }
+  }
 }
 
 /**

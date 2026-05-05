@@ -1,0 +1,98 @@
+# claudestruct Helm values (W8.1 skeleton).
+#
+# Override per-environment via `helm install -f my-values.yaml` or
+# the `--set key=value` shorthand.
+
+image:
+  repository: ghcr.io/tonyandclaw/claudestruct
+  # Default to the published latest tag; pin in production.
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# Number of replicas. claudestruct is stateless beyond the DB, so
+# horizontal scaling is just a deployment knob -- no orchestration
+# changes needed. HPA support lands in a follow-up.
+replicaCount: 2
+
+# Resource requests + limits. The `cs serve` process is mostly
+# I/O-bound (Anthropic API calls + DB). 200m/512Mi is conservative;
+# adjust based on observed traffic.
+resources:
+  requests:
+    cpu: 200m
+    memory: 512Mi
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+
+# Pod-level securityContext. Non-root, read-only root FS, drops all
+# capabilities -- the strictest baseline that still works.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# Application config. These map to env vars consumed by the daemon.
+config:
+  # SQLAlchemy URL. Default points at a Postgres service in-cluster;
+  # override with the managed-Postgres connection string in prod.
+  databaseUrl: "postgresql+psycopg://claudestruct@claudestruct-db:5432/claudestruct"
+  # Where the daemon reads JSONL run logs (the existing local-dev
+  # storage path). Once W6.1 lands, runs live in the DB and this
+  # becomes a fallback only.
+  runRoot: /var/lib/claudestruct
+  # Region tag surfaced in `/healthz` for W8.5 data-residency claims.
+  region: "us-east-1"
+
+# Secrets are populated from a Kubernetes Secret rendered separately.
+# Set `existingSecret` to use a pre-provisioned one (e.g. a
+# SealedSecret or ExternalSecrets-managed object). Otherwise the
+# values below render an inline Secret -- NOT recommended for prod.
+secrets:
+  existingSecret: ""
+  # Inline values used only when existingSecret is empty.
+  inline:
+    anthropicApiKey: ""
+    stripeSecretKey: ""
+    stripeWebhookSecret: ""
+
+service:
+  type: ClusterIP
+  port: 8787
+  # Ingress points at this; the public listener is the ingress, not
+  # the service.
+  internalPort: 8787
+
+ingress:
+  enabled: false
+  className: nginx
+  annotations: {}
+  hosts:
+    - host: api.claudestruct.example
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# Liveness / readiness probes hit /healthz and /readyz -- the daemon
+# already exposes both unauthenticated.
+probes:
+  liveness:
+    path: /healthz
+    initialDelaySeconds: 5
+    periodSeconds: 10
+  readiness:
+    path: /readyz
+    initialDelaySeconds: 5
+    periodSeconds: 10
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

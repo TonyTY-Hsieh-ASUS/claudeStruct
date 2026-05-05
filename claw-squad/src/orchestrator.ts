@@ -28,7 +28,13 @@ import { runPlanner, recordClarification } from "./agents/planner.js";
 import { runCoder } from "./agents/coder.js";
 import { runReviewer } from "./agents/reviewer.js";
 import {
+  extractDiffPaths,
+  readReviewerSiblings,
+} from "./agents/reviewer-context.js";
+import { initTracing, withSpan, shutdownTracing } from "./tracing.js";
+import {
   appendLesson,
+  readRelevantMemorySnippet,
   lessonFromCompletedTask,
   readMemorySnippet,
 } from "./memory/memory.js";
@@ -45,6 +51,11 @@ import {
   type Hooks,
 } from "./hooks.js";
 import { saveSnapshot } from "./snapshot.js";
+import {
+  estimateRemainingCost,
+  formatDryRunReport,
+  plannerSoFarUsd,
+} from "./dry-run.js";
 import {
   appendEvent,
   startRun,
@@ -133,7 +144,9 @@ export interface UserInterface {
 export interface OrchestratorResult {
   state: SquadState;
   totals: RunTotals;
-  reason: "complete" | "max_loops" | "blocked" | "aborted";
+  reason: "complete" | "max_loops" | "blocked" | "aborted" | "dry_run";
+  /** Populated when reason="dry_run". Pre-formatted report for the CLI. */
+  dryRunReport?: string;
 }
 
 interface Providers {
@@ -307,7 +320,9 @@ export async function runOrchestrator(args: {
 
   // Per-run event log. JSONL on disk; dashboard folds it back into a
   // summary. Survives crashes (append-only, no trailing bracket).
-  const runLog: RunLogHandle = startRun(config.repoRoot);
+  const runLog: RunLogHandle = startRun(config.repoRoot, {
+    mirrorPath: config.logJsonPath,
+  });
   appendEvent(runLog, {
     type: "run-start",
     ts: new Date().toISOString(),
@@ -410,9 +425,31 @@ export async function runOrchestrator(args: {
     return false;
   };
 
+  // OpenTelemetry: initTracing() is idempotent + zero-cost when
+  // OTEL_EXPORTER_OTLP_ENDPOINT is unset, so it's safe to await
+  // unconditionally. The root span wraps the whole orchestrator
+  // execution; per-call usage is attached to the run log + totals
+  // already, which OTel users can correlate via the run-id label.
+  await initTracing();
+
   let endReason: OrchestratorResult["reason"] = "aborted";
   try {
-    const result = await runPhases();
+    const result = await withSpan(
+      "clawSquad.run",
+      {
+        "clawSquad.requirement": requirement.slice(0, 200),
+        "clawSquad.maxLoops": config.maxLoops,
+        "clawSquad.maxReviewRounds": config.maxReviewRounds,
+        "clawSquad.repoRoot": config.repoRoot,
+      },
+      async (span) => {
+        const r = await runPhases();
+        span.setAttribute("clawSquad.reason", r.reason);
+        span.setAttribute("clawSquad.costUsd", totals.overall.costUsd);
+        span.setAttribute("clawSquad.calls", totals.overall.calls);
+        return r;
+      },
+    );
     endReason = result.reason;
     return result;
   } finally {
@@ -438,6 +475,13 @@ export async function runOrchestrator(args: {
     } catch {
       /* ignore */
     }
+    // Flush the span exporter. Best-effort; survives a missing SDK or
+    // a network error against the OTLP endpoint.
+    try {
+      await shutdownTracing();
+    } catch {
+      /* ignore */
+    }
   }
 
   async function runPhases(): Promise<OrchestratorResult> {
@@ -456,7 +500,9 @@ export async function runOrchestrator(args: {
 
     ui.log(pc.cyan("\n[Planner] thinking…"));
     const memorySnippet = composePlannerSnippet({
-      memory: config.selfLearning ? readMemorySnippet(config.repoRoot) : undefined,
+      memory: config.selfLearning
+        ? readRelevantMemorySnippet(config.repoRoot, requirement)
+        : undefined,
       skillCatalog,
       subagentCatalog,
       repoCatalog,
@@ -470,6 +516,7 @@ export async function runOrchestrator(args: {
       memorySnippet,
       provider: providers.planner,
       onText: (c) => ui.streamAgent("planner", c),
+      runLog,
     });
     track("planner", outcome.usage);
     if (!checkBudget()) return { state, totals, reason: "aborted" };
@@ -508,13 +555,16 @@ export async function runOrchestrator(args: {
       state,
       mode: "initial",
       memorySnippet: composePlannerSnippet({
-        memory: config.selfLearning ? readMemorySnippet(config.repoRoot) : undefined,
+        memory: config.selfLearning
+        ? readRelevantMemorySnippet(config.repoRoot, requirement)
+        : undefined,
         skillCatalog,
         subagentCatalog,
         subagentAnswers: pendingSubagentAnswers,
       }),
       provider: providers.planner,
       onText: (c) => ui.streamAgent("planner", c),
+      runLog,
     });
     track("planner", outcome.usage);
     if (!checkBudget()) return { state, totals, reason: "aborted" };
@@ -524,6 +574,25 @@ export async function runOrchestrator(args: {
     } else {
       return { state, totals, reason: "blocked" };
     }
+  }
+
+  // --- Dry-run short-circuit: report estimate and exit before any
+  // Coder / Reviewer call. Placed AFTER Phase 2 so the report includes
+  // the actual TODO list the Planner produced. ---
+  if (config.dryRun) {
+    const estimate = estimateRemainingCost({
+      todoCount: state.todos.length,
+      maxReviewRounds: config.maxReviewRounds,
+      coderProvider: agentConfig.coder.name,
+      reviewerProvider: agentConfig.reviewer.name,
+      plannerSoFarUsd: plannerSoFarUsd(totals),
+    });
+    const report = formatDryRunReport(
+      estimate,
+      state.todos.map((t) => `${t.id}: ${t.title}`),
+    );
+    ui.log(report);
+    return { state, totals, reason: "dry_run", dryRunReport: report };
   }
 
   // --- Phase 3: Per-task loop ---
@@ -574,6 +643,7 @@ export async function runOrchestrator(args: {
       hooks,
       allSkills,
       logPhase,
+      runLog,
     });
 
     if (reason === "blocked" || reason === "aborted") {
@@ -623,7 +693,9 @@ export async function runOrchestrator(args: {
       state,
       mode: "loop",
       memorySnippet: composePlannerSnippet({
-        memory: config.selfLearning ? readMemorySnippet(config.repoRoot) : undefined,
+        memory: config.selfLearning
+        ? readRelevantMemorySnippet(config.repoRoot, requirement)
+        : undefined,
         skillCatalog,
         subagentCatalog,
         subagentAnswers: pendingSubagentAnswers,
@@ -631,6 +703,7 @@ export async function runOrchestrator(args: {
       completedTaskSummary: summarizeTask(next, state.reviewHistory),
       provider: providers.planner,
       onText: (c) => ui.streamAgent("planner", c),
+      runLog,
     });
     track("planner", plannerReview.usage);
     if (!checkBudget()) return { state, totals, reason: "aborted" };
@@ -669,6 +742,9 @@ async function runTaskLoop(args: {
   allSkills: Skill[];
   /** Append a phase marker to the run log. Best-effort; never throws. */
   logPhase: (label: string, message?: string) => void;
+  // Threaded through so the coder/reviewer agents can emit opt-in
+  // run-io events for `claw-squad dataset export` (W10.6).
+  runLog: RunLogHandle;
 }): Promise<"complete" | "blocked" | "aborted"> {
   const {
     task,
@@ -683,6 +759,7 @@ async function runTaskLoop(args: {
     hooks,
     allSkills,
     logPhase,
+    runLog,
   } = args;
   const { spec: repoSpec, ownerRepo, baseBranch } = repo;
   const repoRoot = repoSpec.root;
@@ -775,6 +852,32 @@ async function runTaskLoop(args: {
       );
       fileContext = readFileSnapshots(repoRoot, contextPaths);
     } else {
+      // Smart-context: ask the local embedding index for top-K
+      // semantically-relevant files; pass them to the gatherer as
+      // extra explicit paths. Best-effort — a missing index or an
+      // unreachable embedding endpoint logs a one-liner and falls
+      // back to the keyword-rank gatherer alone.
+      let smartPathsFromIndex: string[] = [];
+      if (config.smartContext) {
+        try {
+          const { smartPaths } = await import("./index/build.js");
+          const query = `${task.title}\n${task.description}`;
+          smartPathsFromIndex = await smartPaths(repoRoot, query, { k: 20 });
+          if (smartPathsFromIndex.length > 0) {
+            ui.log(
+              pc.dim(
+                `  [smart-context] index returned ${smartPathsFromIndex.length} hit(s)`,
+              ),
+            );
+          }
+        } catch (err) {
+          ui.log(
+            pc.yellow(
+              `  [smart-context] index unavailable (${(err as Error).message}); falling back to keyword rank`,
+            ),
+          );
+        }
+      }
       const gathered = gatherInitialContext({
         git: {
           repoRoot,
@@ -782,6 +885,7 @@ async function runTaskLoop(args: {
         },
         todoTitle: task.title,
         todoDescription: task.description,
+        extraExplicitPaths: smartPathsFromIndex,
       });
       fileContext = gathered.files;
       if (gathered.files.length > 0) {
@@ -819,6 +923,7 @@ async function runTaskLoop(args: {
       skillsBlock,
       provider: providers.coder,
       onText: (c) => ui.streamAgent("coder", c),
+      runLog,
     });
     track("coder", coderOut.usage);
     if (!checkBudget()) return "aborted";
@@ -951,7 +1056,37 @@ async function runTaskLoop(args: {
       }
     }
 
-    // Reviewer reads the diff.
+    // Reviewer reads the diff. With --smart-context on, also feed
+    // top-K sibling files for the todo description that AREN'T
+    // already touched by the diff — helps catch "did this break the
+    // caller of the changed function" when the Reviewer's prompt
+    // would otherwise only see the diff bytes.
+    let siblingContext: Array<{ path: string; content: string }> = [];
+    if (config.smartContext) {
+      try {
+        const { smartPaths } = await import("./index/build.js");
+        const query = `${task.title}\n${task.description}`;
+        const hits = await smartPaths(repoRoot, query, { k: 20 });
+        // Drop paths the diff already covers — Reviewer reads those
+        // via the diff and a duplicate paste would just waste tokens.
+        const inDiff = extractDiffPaths(applied.diff);
+        const candidates = hits.filter((p) => !inDiff.has(p));
+        siblingContext = readReviewerSiblings(repoRoot, candidates);
+        if (siblingContext.length > 0) {
+          ui.log(
+            pc.dim(
+              `  [smart-context] Reviewer sibling files: ${siblingContext.map((f) => f.path).join(", ")}`,
+            ),
+          );
+        }
+      } catch (err) {
+        ui.log(
+          pc.yellow(
+            `  [smart-context] sibling fetch failed (${(err as Error).message}); Reviewer sees diff only`,
+          ),
+        );
+      }
+    }
     logPhase(`reviewer.examine`, `${task.id} diff=${applied.diff.length}B`);
     ui.log(pc.cyan(`\n[Reviewer] examining diff (${applied.diff.length} bytes)…`));
     const reviewOut = await runReviewer({
@@ -960,6 +1095,8 @@ async function runTaskLoop(args: {
       coderRationale: coderOut.rationale,
       provider: providers.reviewer,
       onText: (c) => ui.streamAgent("reviewer", c),
+      siblingContext,
+      runLog,
     });
     track("reviewer", reviewOut.usage);
     if (!checkBudget()) return "aborted";

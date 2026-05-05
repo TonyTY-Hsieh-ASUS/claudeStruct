@@ -1,0 +1,104 @@
+{
+  "_comment": "Seccomp profile for claw-sandbox. Loaded by Docker via --security-opt seccomp=seccomp.json or by container runtimes that accept OCI-format profiles. Default action is SCMP_ACT_ALLOW so userspace works normally; the explicit denylist below blocks kernel-control surfaces an LLM-driven Coder has no business touching. Architectures match Docker's default profile.",
+  "_source": "Distilled from Docker's default profile (https://github.com/moby/moby/blob/master/profiles/seccomp/default.json) plus the additional denials documented in claw-squad/docs/sandbox-hardening.md.",
+  "defaultAction": "SCMP_ACT_ALLOW",
+  "architectures": [
+    "SCMP_ARCH_X86_64",
+    "SCMP_ARCH_X86",
+    "SCMP_ARCH_X32",
+    "SCMP_ARCH_AARCH64",
+    "SCMP_ARCH_ARM"
+  ],
+  "syscalls": [
+    {
+      "_comment": "Process introspection / debugger surface. ptrace lets one process read another's memory; an LLM-generated Coder dropping a debugger into the sandbox is almost always a mistake or an attack.",
+      "names": ["ptrace", "process_vm_readv", "process_vm_writev"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    },
+    {
+      "_comment": "Kernel module manipulation. No legitimate dev / review / test workflow loads or unloads modules.",
+      "names": [
+        "init_module",
+        "finit_module",
+        "delete_module",
+        "create_module",
+        "query_module"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    },
+    {
+      "_comment": "Kernel boot / panic / reboot surface. kexec swaps the running kernel image; reboot panics the host.",
+      "names": ["kexec_load", "kexec_file_load", "reboot"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    },
+    {
+      "_comment": "Filesystem mount surface. Mounting/unmounting + pivot_root + chroot are how container escapes most often happen. Coder can cd / read / write within the existing tree but cannot remap it.",
+      "names": ["mount", "umount", "umount2", "pivot_root", "chroot"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    },
+    {
+      "_comment": "Privilege boundary changes. setuid/setgid escalation paths plus capability set manipulation that would let the sandbox grow root-equivalent rights.",
+      "names": [
+        "setuid",
+        "setgid",
+        "setreuid",
+        "setregid",
+        "setresuid",
+        "setresgid",
+        "setfsuid",
+        "setfsgid",
+        "capset"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    },
+    {
+      "_comment": "Hostname / domain / time / clock control. Lets an attacker mask telemetry timestamps or fool name-resolution.",
+      "names": [
+        "sethostname",
+        "setdomainname",
+        "settimeofday",
+        "clock_settime",
+        "clock_adjtime",
+        "adjtimex",
+        "stime"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    },
+    {
+      "_comment": "Block / character device IO control beyond the file API. ioperm / iopl give direct port access; bpf can install eBPF programs the sandbox shouldn't ship.",
+      "names": ["ioperm", "iopl", "bpf"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    },
+    {
+      "_comment": "User namespace creation. Required for nested containers; an LLM that generates a Dockerfile + `docker build` inside the sandbox should fail loudly rather than escape.",
+      "names": ["unshare", "setns"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    },
+    {
+      "_comment": "Filesystem swap toggling. swapon / swapoff are root-only on Linux but explicitly denied here so a CAP_SYS_ADMIN run still fails closed.",
+      "names": ["swapon", "swapoff"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    },
+    {
+      "_comment": "Quotactl + filesystem freeze. Sandbox processes don't manage quotas; freeze is a denial-of-service primitive against the host filesystem.",
+      "names": ["quotactl", "personality"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    },
+    {
+      "_comment": "Kernel keyring + audit. add_key / keyctl manipulate kernel-resident credentials; auditctl masks tracing.",
+      "names": ["add_key", "request_key", "keyctl", "perf_event_open"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    }
+  ]
+}
