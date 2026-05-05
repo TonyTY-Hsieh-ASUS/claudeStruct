@@ -23,6 +23,7 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from claudestruct import dashboard as dash_mod
@@ -181,8 +182,6 @@ async def stripe_webhook(
 
 def _handle_stripe_event(session: Session, event) -> None:
     """Route a verified Stripe event to the appropriate handler."""
-    from sqlalchemy import select
-
     handlers = {
         "checkout.session.completed": _handle_checkout_completed,
         "customer.subscription.updated": _handle_subscription_updated,
@@ -273,8 +272,6 @@ def _update_subscription_period(session: Session, sub, subscription_id: str) -> 
 
 def _handle_subscription_updated(session: Session, event) -> None:
     """Sync Stripe subscription status + period to our Subscription row."""
-    from claudestruct.server.models import Org
-
     obj = event.get("object", "")
     if obj != "customer.subscription":
         return

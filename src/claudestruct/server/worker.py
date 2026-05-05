@@ -317,7 +317,6 @@ def _open_pr_as_bot_safe(run: Run, run_root: Path) -> None:
             http_client=client,
         )
         run.github_pr_number = pr_payload.get("number")
-        session.commit()
         log.info(
             "github PR opened for run %s: pr=%s",
             run.run_id, run.github_pr_number,

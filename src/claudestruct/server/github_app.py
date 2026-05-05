@@ -1112,7 +1112,6 @@ def open_pr_as_bot(
 
     # Temp dir for the clone — cleaned up by the caller via
     # ``shutil.rmtree(clone_dir, ignore_errors=True)``.
-    import tempfile, shutil
     clone_dir = Path(tempfile.mkdtemp(prefix="claudestruct-pr-"))
 
     try:
