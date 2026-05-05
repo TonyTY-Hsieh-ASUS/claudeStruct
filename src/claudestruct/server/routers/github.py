@@ -158,6 +158,7 @@ def detect_trigger(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
         # GitHub always populates `pull_request.head.sha` on PR events;
         # absence here would imply a malformed payload.
         head_sha = ((pr.get("head") or {}).get("sha")) or None
+        base_branch = (pr.get("base") or {}).get("ref") or None
         return {
             "task": "review",
             "description": (
@@ -167,6 +168,7 @@ def detect_trigger(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
             "repo_full_name": repo,
             "pr_number": pr.get("number"),
             "head_sha": head_sha,
+            "base_branch": base_branch,
             "trigger": f"pull_request.{action}",
         }
 
@@ -311,6 +313,7 @@ async def receive_webhook(
         run_id = f"run-{secrets.token_hex(8)}"
         pr_number_val = decision.get("pr_number")
         head_sha_val = decision.get("head_sha")
+        base_branch_val = decision.get("base_branch")
         row = Run(
             run_id=run_id,
             org_id=install.org_id,
@@ -328,6 +331,8 @@ async def receive_webhook(
             # NULL skips the Checks-API path in the worker without
             # breaking the comment-based verdict path.
             github_head_sha=head_sha_val if isinstance(head_sha_val, str) else None,
+            # PR-open (W6.6): default branch name for the worker to fork from.
+            github_base_branch=base_branch_val if isinstance(base_branch_val, str) else None,
         )
         session.add(row)
         session.commit()

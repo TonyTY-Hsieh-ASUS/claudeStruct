@@ -274,6 +274,64 @@ def _post_completed_check_run_safe(run: Run) -> None:
             close()
 
 
+def _open_pr_as_bot_safe(run: Run, run_root: Path) -> None:
+    """Open a PR as the GitHub App after a successful run.
+
+    Uses the repo + base branch captured at webhook time to create a
+    branch, push the working tree, and open a draft PR.
+
+    Best-effort: errors are logged and swallowed so a GitHub blip never
+    rolls back the run's terminal status. The verdict comment already
+    posted carries the run outcome to the PR regardless.
+    """
+    if not (
+        run.github_installation_id is not None
+        and run.github_repo_full_name is not None
+        and run.github_base_branch is not None
+    ):
+        # Only runs triggered by PR webhooks have the full context.
+        return
+
+    from claudestruct.server.github_app import (
+        GitHubAppError,
+        load_app_config,
+        open_pr_as_bot,
+    )
+
+    cfg = load_app_config()
+    if cfg is None:
+        return
+
+    factory = http_client_factory or _http_client_default
+    client = factory()
+    try:
+        pr_payload = open_pr_as_bot(
+            cfg=cfg,
+            installation_id=run.github_installation_id,
+            repo_full_name=run.github_repo_full_name,
+            base_branch=run.github_base_branch,
+            run_id=run.run_id,
+            description=run.description,
+            run_root=run_root,
+            cache=_get_verdict_token_cache(),
+            http_client=client,
+        )
+        run.github_pr_number = pr_payload.get("number")
+        session.commit()
+        log.info(
+            "github PR opened for run %s: pr=%s",
+            run.run_id, run.github_pr_number,
+        )
+    except GitHubAppError as exc:
+        log.warning("github PR-open failed for run %s: %s", run.run_id, exc)
+    except Exception:  # noqa: BLE001
+        log.exception("github PR-open unexpected failure for run %s", run.run_id)
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+
+
 _GATHERERS: dict[str, Callable[..., Any]] = {
     "dev": gather_dev_context,
     "review": gather_review_context,
@@ -435,6 +493,7 @@ def process_pending_run(
     log.info("worker run %s done: cost=$%.4f", run.run_id, run.cost_usd)
     _post_verdict_comment_safe(run)
     _post_completed_check_run_safe(run)
+    _open_pr_as_bot_safe(run, run_root)
     return run
 
 
