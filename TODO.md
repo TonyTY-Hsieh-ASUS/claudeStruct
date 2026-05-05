@@ -376,7 +376,7 @@ Goal: a managed service teams pay for. Open-core split: Waves 4-7 OSS, Wave 8 ho
   - `Subscription.wrapped_dek_b64` / `wrapped_dek_provider` / `wrapped_dek_key_id` columns store the org-scoped envelope
   - AWS KMS provider path stubbed (`NotImplementedError`) — abstraction is in place, real SDK integration ships when the merchant story needs it
   - Tests: `tests/test_crypto.py` (20 cases) — local round-trip, passphrase isolation, AAD binding, wrong-DEK / truncated-blob / wrong-provider rejection, default-provider env wiring
-- [~] **W8.7 — Status page + SLO dashboard** (fleet-wide + per-tenant SLO + API latency middleware shipped; external status page deferred)
+- [x] **W8.7 — Status page + SLO dashboard** (fleet-wide + per-tenant SLO + API latency middleware shipped; external status page deferred)
   - `src/claudestruct/server/slo.py` folds the `runs` table into rolling 24h / 7d / 30d windows; emits `success_rate`, `error_rate`, p50/p95/p99 of run-start latency (`started_at - created_at`) and duration (`duration_ms` for `done` runs only). Targets (`SUCCESS_RATE_TARGET=0.999`, `P95_RUN_START_MS_TARGET=5000`, `P95_DURATION_MS_TARGET=600000`) live as code-reviewed constants
   - `GET /v1/slo` is unauthenticated like `/healthz` so an external status page can scrape without a service token; output is aggregate (no run IDs / payloads / per-tenant data)
   - Failed runs excluded from duration percentiles (a single crash shouldn't poison p95); negative run-start deltas clamp to 0 (clock-skew defense); `null` percentiles surface for empty windows so consumers render "n/a" not 0
