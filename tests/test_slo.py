@@ -480,3 +480,37 @@ def test_tenant_slo_multi_org_isolation(env):
         snap = slo_mod.compute_tenant_snapshot(session, org_id=env["org_id"])
     w24 = next(w for w in snap.windows if w.window == "24h")
     assert w24.total_runs == 0  # org-a has no runs, org-b's don't leak
+
+
+# --- Request latency -------------------------------------------------
+
+def test_get_slo_latency_returns_prometheus_text(env):
+    """Latency endpoint returns Prometheus text exposition format after requests."""
+    # Hit the public endpoints to record timings.
+    env["client"].get("/v1/slo")
+    env["client"].get("/healthz")
+
+    r = env["client"].get("/v1/slo/latency")
+    assert r.status_code == 200
+    # After hitting other endpoints, the tracker should have route data.
+    assert "claudestruct_http_request_latency_seconds" in r.text
+
+
+def test_get_slo_latency_200_without_auth(env):
+    """No auth required — same as /v1/slo for status-page scraping."""
+    # Hit something first so the tracker has data.
+    env["client"].get("/v1/slo")
+    r = env["client"].get("/v1/slo/latency")
+    assert r.status_code == 200
+
+
+def test_latency_middleware_records_routes(env):
+    """After hitting some endpoints, the latency tracker has route data."""
+    env["client"].get("/v1/slo")
+    env["client"].get("/healthz")
+    env["client"].get("/v1/slo")  # second hit
+
+    r = env["client"].get("/v1/slo/latency")
+    body = r.text
+    # Should have entries for the routes we hit.
+    assert "route=" in body

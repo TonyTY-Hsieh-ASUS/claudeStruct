@@ -5,14 +5,21 @@ status page.
 
 GET /v1/slo/tenant — authenticated per-org snapshot (viewer+) scoped
 to the caller's org.
+
+GET /v1/slo/latency — unauthenticated Prometheus text exposure of
+per-route HTTP request latency percentiles (p50/p95/p99) collected by
+RequestLatencyMiddleware. Designed for scraping by Prometheus or
+node_exporter's textfile collector.
 """
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import PlainTextResponse
 
 from claudestruct.server import auth as auth_mod
 from claudestruct.server import billing as billing_mod
 from claudestruct.server import slo as slo_mod
+from claudestruct.server.latency import LatencyTracker
 from claudestruct.server.models import Org, Role
 from claudestruct.server.schema import (
     SloSnapshotResponse,
@@ -20,6 +27,7 @@ from claudestruct.server.schema import (
     SloWindow,
     TenantSloResponse,
 )
+from sqlalchemy import select
 
 router = APIRouter(tags=["slo"])
 
@@ -100,3 +108,16 @@ def get_tenant_slo(
         org_slug=org.slug,
         tier=sub.tier,
     )
+
+
+@router.get("/v1/slo/latency", response_class=PlainTextResponse)
+def get_slo_latency(request: Request) -> str:
+    """Prometheus text exposure of per-route HTTP latency percentiles.
+
+    Unauthenticated — designed to be scraped by a Prometheus server or
+    node_exporter textfile collector on the same private network. The
+    endpoint returns no sensitive data (only aggregate timings per
+    route path).
+    """
+    tracker: LatencyTracker = request.app.state.latency_tracker
+    return tracker.render_prometheus()

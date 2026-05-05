@@ -17,6 +17,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from claudestruct import __version__
 from claudestruct.server.db import init_db, make_engine, make_session_factory
+from claudestruct.server.latency import LatencyTracker, RequestLatencyMiddleware
 from claudestruct.server.routers import (
     audit as audit_router,
 )
@@ -124,6 +125,8 @@ def create_app(
     app.state.engine = eng
     app.state.run_root = str(run_root) if run_root else "."
     app.state.region = resolve_region(region)
+    app.state.latency_tracker = LatencyTracker()
+    app.add_middleware(RequestLatencyMiddleware, tracker=app.state.latency_tracker)
     app.add_middleware(RegionHeaderMiddleware, region=app.state.region)
 
     app.include_router(health_router.router)
