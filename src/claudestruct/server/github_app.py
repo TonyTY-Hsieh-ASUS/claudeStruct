@@ -911,7 +911,7 @@ def _run_git(
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        raise GitHubAppError(f"git command timed out after {timeout}s: {' '.join(cmd)}")
+        raise GitHubAppError(f"git command timed out after {timeout}s: {' '.join(cmd)}") from None
     if result.returncode != 0:
         raise GitHubAppError(
             f"git {' '.join(cmd)} failed (exit {result.returncode}): {result.stderr.strip()}"
