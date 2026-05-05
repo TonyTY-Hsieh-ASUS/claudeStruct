@@ -29,6 +29,7 @@
  *     1500ms to stay under Slack's 1 msg/sec/channel cap.
  */
 
+import { randomUUID } from "node:crypto";
 import type { WebClient as WebClientType } from "@slack/web-api";
 import type {
   RoleBucket,
@@ -201,7 +202,28 @@ export class SlackUi implements UserInterface {
         pollIntervalMs: opts.pollIntervalMs ?? POLL_INTERVAL_MS,
       });
     }
+
+    // Surface socket-mode reconnect transitions to the channel so
+    // operators see when a long run loses the socket and recovers.
+    // SDK auto-reconnects under the hood; this is just the UX layer.
+    const sub = (this.strategy as { onConnectionState?: (fn: (s: string) => void) => void })
+      .onConnectionState;
+    if (typeof sub === "function") {
+      sub.call(this.strategy, (state: string) => {
+        if (state === "disconnected") {
+          void this.safePost(":warning: lost Slack socket — reconnecting…");
+        } else if (state === "connected") {
+          // Don't spam on the initial connect; only post on recovery.
+          if (this.hasAnnouncedConnected) {
+            void this.safePost(":white_check_mark: Slack socket reconnected.");
+          }
+          this.hasAnnouncedConnected = true;
+        }
+      });
+    }
   }
+
+  private hasAnnouncedConnected = false;
 
   /** Wait for the opener to resolve. Tests call this before asserting. */
   async ready(): Promise<void> {
@@ -228,7 +250,7 @@ export class SlackUi implements UserInterface {
     if (this.mode === "socket") {
       // Socket mode: post Block Kit buttons; the user clicks one and
       // the strategy delivers the chosen value via nextButton().
-      const promptId = `claw-confirm-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      const promptId = `claw-confirm-${randomUUID()}`;
       await this.safePost(prompt, blockKitConfirm(promptId, prompt));
       const value = await this.strategy.nextButton(promptId);
       if (value !== undefined) return value === "yes";

@@ -15,6 +15,63 @@ dependencies = [
   "click>=8.1.0",
   "rich>=13.7.0",
   "pathspec>=0.12.0",
+  # MCP server mode (`cs mcp`). The SDK is loaded lazily — only the
+  # `cs mcp` subcommand triggers the import — but the dep is hard so
+  # the wire-into-Claude-Code workflow is one `pip install -e .` away.
+  "mcp>=1.0.0",
+]
+
+[project.optional-dependencies]
+# `cs serve` and the daemon-mode REST API + RBAC layer (W6.2 + W6.3).
+# Kept out of the base install so `pip install claudestruct` stays lean.
+server = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.32",
+  "sqlalchemy>=2.0",
+  "pydantic>=2.0",
+  # AES-GCM envelope encryption for W8.6 CMEK + general at-rest crypto.
+  # The library is a hard dep of the server bundle because every
+  # daemon write path will call into it once envelope-encryption is
+  # turned on for an org -- lazy-loading would just defer the pip
+  # install, not the import cost.
+  "cryptography>=42.0",
+]
+# `pip install claudestruct[otel]` to enable OpenTelemetry tracing.
+# Without this extra, tracing.py falls back to no-op spans and prints
+# a single warning when OTEL_EXPORTER_OTLP_ENDPOINT is set anyway.
+otel = [
+  "opentelemetry-api>=1.20.0",
+  "opentelemetry-sdk>=1.20.0",
+  "opentelemetry-exporter-otlp-proto-http>=1.20.0",
+]
+# `pip install claudestruct[sentry]` for opt-in error reporting.
+sentry = [
+  "sentry-sdk>=2.0.0",
+]
+# `pip install claudestruct[openai]` to enable the OpenAI-compat
+# provider (W10.1). Targets local servers (Ollama / vLLM / SGLang /
+# llama.cpp) plus cloud OpenAI; selected at runtime via
+# CLAUDESTRUCT_PROVIDER=openai. tiktoken is included so the dry-run
+# token counter is accurate against models with known tokenizers.
+openai = [
+  "openai>=1.50.0",
+  "tiktoken>=0.7.0",
+]
+# `pip install claudestruct[smart-context]` enables `cs index build`
+# + the `--smart-context` flag (W10.5). The index module itself uses
+# only stdlib (sqlite3 + urllib + json), so this extra is empty
+# today — declared so the docs can point users at a stable install
+# command and so a future sqlite-vec / hnswlib upgrade can land here
+# without breaking any existing pin.
+smart-context = []
+# `pip install claudestruct[voice]` enables `cs voice transcribe` /
+# `cs voice run` (W10.7). faster-whisper is the STT engine;
+# sounddevice + numpy handle mic capture + the float32 array Whisper
+# expects. None of these are imported until `cs voice` actually runs.
+voice = [
+  "faster-whisper>=1.0",
+  "sounddevice>=0.4",
+  "numpy>=1.24",
 ]
 
 [project.scripts]
@@ -26,3 +83,58 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 claudestruct = ["py.typed"]
+
+# --- W5.7 — Test rigor ----------------------------------------------
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+extend-exclude = ["site", "dist", "build", ".venv", ".pytest_cache"]
+
+[tool.ruff.lint]
+# Error-only categories. F = pyflakes (unused imports, undefined names),
+# E/W = pycodestyle errors+warnings, I = isort, B = bugbear (likely
+# bugs), UP = pyupgrade (modernization), SIM = simplify (dead code).
+# Skipping ANN/D/PT/etc -- prefer signal over noise on a small codebase.
+select = ["F", "E", "W", "I", "B", "UP", "SIM"]
+ignore = [
+  "E501",   # line-too-long; handled by formatter, not blocking
+  "B008",   # function call in default arg; click decorators legit use this
+  "SIM103", # explicit `if cond: return True / return False` reads more clearly
+  "SIM105", # `try/except/pass` is fine; `contextlib.suppress` adds an import
+  "SIM108", # ternary preference is opinionated
+  "UP045",  # `Optional[X]` -> `X | None` -- noisy on existing files
+  "UP007",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011", "F841"]  # asserts in tests are fine
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["claudestruct"]
+branch = true
+omit = [
+  # CLI entry points: covered by manual smoke + CI invocations rather
+  # than unit tests. Excluded from the gate so library code drives the
+  # number.
+  "src/claudestruct/cli.py",
+  "src/claudestruct/mcp_server.py",
+  "src/claudestruct/server/cli.py",
+]
+
+[tool.coverage.report]
+# Floor of 70% for the draft -- bumps to 80% after W5.1 OTel adds the
+# tracing module's tests.
+fail_under = 70
+show_missing = true
+skip_covered = false
+exclude_lines = [
+  "pragma: no cover",
+  "raise NotImplementedError",
+  "if __name__ == .__main__.:",
+  "if TYPE_CHECKING:",
+]

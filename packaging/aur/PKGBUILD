@@ -1,0 +1,34 @@
+# Maintainer placeholder; replaced when the AUR account is registered.
+# Arch User Repository PKGBUILD for claudestruct (W7.7).
+#
+# Publishing flow (manual until W4.3 release automation lands):
+#   1. Bump pkgver
+#   2. Refresh sha256sums via `updpkgsums`
+#   3. `makepkg --printsrcinfo > .SRCINFO`
+#   4. Push to AUR via the standard ssh+git remote
+#
+# Install (once the package is on AUR):
+#
+#   yay -S claudestruct        # any AUR helper works
+pkgname=claudestruct
+pkgver=0.0.0
+pkgrel=1
+pkgdesc="Token-efficient Claude Code companion (cs CLI)"
+arch=('any')
+url="https://github.com/tonyandclaw/claudeStruct"
+license=('MIT')
+depends=('python>=3.10' 'python-anthropic' 'python-click' 'python-rich' 'python-pathspec')
+makedepends=('python-build' 'python-installer' 'python-setuptools' 'python-wheel')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/tonyandclaw/claudeStruct/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "$srcdir/claudeStruct-$pkgver"
+  python -m build --wheel --no-isolation
+}
+
+package() {
+  cd "$srcdir/claudeStruct-$pkgver"
+  python -m installer --destdir="$pkgdir" dist/*.whl
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

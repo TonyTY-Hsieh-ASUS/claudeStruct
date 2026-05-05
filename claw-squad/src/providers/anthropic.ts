@@ -12,6 +12,7 @@
  */
 
 import Anthropic from "@anthropic-ai/sdk";
+import { transportPolicy } from "./transport.js";
 import type { InvokeArgs, InvokeResult, Provider, ProviderConfig } from "./types.js";
 
 const DEFAULT_MAX_TOKENS = 16_000;
@@ -29,8 +30,11 @@ export class AnthropicProvider implements Provider {
         "anthropic provider: ANTHROPIC_API_KEY is not set and no apiKey in config",
       );
     }
+    const policy = transportPolicy();
     this.client = new Anthropic({
       apiKey,
+      timeout: policy.timeoutMs,
+      maxRetries: policy.maxRetries,
       ...(cfg.baseURL ? { baseURL: cfg.baseURL } : {}),
     });
   }

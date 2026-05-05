@@ -6,16 +6,27 @@
  * is embedded at build time (see web-page.ts) so no separate build
  * step / static directory is needed.
  *
- * Security posture:
- *   - Binds to 127.0.0.1 by default. Remote access is the user's
- *     responsibility (ssh tunnel / ngrok). No auth on the socket.
- *   - No write surface other than replying to the current prompt.
+ * Security posture (PR-D):
+ *   - Binds to 127.0.0.1 by default. Operator can opt into
+ *     0.0.0.0 / specific interface via `host`, BUT must also
+ *     supply `authToken` — `start()` hard-fails otherwise. Silent
+ *     exposure of the run state to the local network is worse than
+ *     a clear refusal.
+ *   - When `authToken` is set, `/ws` requires `?token=<authToken>`.
+ *     Mismatched tokens get closed with policy-violation 1008.
+ *     The HTML page itself is still public — it reveals nothing
+ *     beyond static markup; the auth gate is on the data socket.
+ *   - The page reads its token from `location.hash` (`#token=…`)
+ *     so the secret never lands in proxy access logs or `Referer`
+ *     headers.
  *   - EADDRINUSE surfaces as a thrown error in start() — the CLI
  *     translates that into a clean exit message, not a hang.
  */
 
+import { randomUUID } from "node:crypto";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
+import { URL } from "node:url";
 import { WebSocketServer, WebSocket } from "ws";
 import { ROLE_BUCKETS, type RoleBucket, type SquadState } from "../types.js";
 import type { UserInterface } from "../orchestrator.js";
@@ -55,7 +66,48 @@ interface PendingPrompt {
 
 export interface WebUiOptions {
   port?: number;
+  /**
+   * Host / interface to bind. Default `127.0.0.1` (localhost-only).
+   * Anything else (`0.0.0.0`, a LAN IP) requires `authToken` —
+   * `start()` will reject without it.
+   */
   host?: string;
+  /**
+   * Required when `host` is non-localhost. When set, every WS
+   * connection must present this token via `?token=…`. The HTML
+   * page extracts the token from `location.hash` (`#token=…`)
+   * client-side and folds it into the WS URL.
+   */
+  authToken?: string;
+}
+
+/**
+ * Hosts treated as "loopback only" for the auth requirement check.
+ * Bind to anything outside this set and you must supply an
+ * authToken.
+ */
+const LOOPBACK_HOSTS: ReadonlySet<string> = new Set([
+  "127.0.0.1",
+  "::1",
+  "localhost",
+]);
+
+/**
+ * Pure validator — same rule used at boot and exposed for unit
+ * tests. Returns an error message when the binding is unsafe.
+ *
+ * Rules:
+ *   - Loopback host with or without a token: ok.
+ *   - Non-loopback host with a token: ok (operator opted in).
+ *   - Non-loopback host without a token: refused.
+ */
+export function validateBindOptions(args: {
+  host: string;
+  authToken?: string;
+}): string | undefined {
+  if (LOOPBACK_HOSTS.has(args.host)) return undefined;
+  if (args.authToken && args.authToken.length > 0) return undefined;
+  return `refusing to bind ${args.host} without authToken — set --web-ui-token (or CLAW_WEB_TOKEN env) before exposing the UI off localhost`;
 }
 
 export class WebUi implements UserInterface {
@@ -89,7 +141,31 @@ export class WebUi implements UserInterface {
       res.writeHead(404);
       res.end();
     });
-    this.wss = new WebSocketServer({ server: this.server, path: "/ws" });
+    // Verify token before completing the WS upgrade. ws gives us
+    // the raw IncomingMessage on `verifyClient` so we can pull the
+    // query param off without parsing headers.
+    this.wss = new WebSocketServer({
+      server: this.server,
+      path: "/ws",
+      verifyClient: (info, cb) => {
+        const token = this.opts.authToken;
+        if (!token) {
+          cb(true);
+          return;
+        }
+        try {
+          const url = new URL(info.req.url ?? "", "http://localhost");
+          const supplied = url.searchParams.get("token");
+          if (supplied === token) {
+            cb(true);
+            return;
+          }
+        } catch {
+          /* fall through to deny */
+        }
+        cb(false, 1008, "missing or invalid token");
+      },
+    });
     this.wss.on("connection", (socket) => this.onConnection(socket));
 
     this.streamer = new BatchedStreamer(STREAM_BATCH_MS, (groups) => {
@@ -107,6 +183,13 @@ export class WebUi implements UserInterface {
   async start(): Promise<{ port: number; host: string }> {
     const port = this.opts.port ?? 3737;
     const host = this.opts.host ?? "127.0.0.1";
+    // Refuse a public bind without auth — silent exposure to the
+    // local network is worse than a hard error.
+    const bindError = validateBindOptions({
+      host,
+      authToken: this.opts.authToken,
+    });
+    if (bindError) throw new Error(bindError);
     // Install a persistent error listener BEFORE calling listen() so we
     // never lose an early error emit. The listener is removed after the
     // promise settles.
@@ -134,7 +217,10 @@ export class WebUi implements UserInterface {
 
   async shutdown(): Promise<void> {
     await this.streamer.shutdown();
-    for (const c of this.clients) {
+    // Snapshot the Set: c.close() can synchronously trigger the
+    // "close" handler that calls this.clients.delete(c), and mutating
+    // the Set mid-iteration would skip clients.
+    for (const c of Array.from(this.clients)) {
       try {
         c.close();
       } catch {
@@ -273,7 +359,7 @@ export class WebUi implements UserInterface {
 
   private askPrompt(text: string): Promise<string> {
     return new Promise<string>((resolve) => {
-      const id = Math.random().toString(36).slice(2);
+      const id = randomUUID();
       this.pendingPrompt = { id, text, resolve };
       this.broadcast({ type: "prompt", prompt: { id, text } });
     });

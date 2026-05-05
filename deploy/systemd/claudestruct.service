@@ -1,0 +1,58 @@
+[Unit]
+# Always-on claudestruct HTTP API. Pairs with claudestruct-worker.service
+# (the queue drainer) — running the API alone returns 202 for POST /v1/runs
+# but nothing actually executes. See docs/home-server.md for the full
+# Tailscale + Caddy reverse-proxy recipe.
+Description=claudestruct HTTP API (cs serve run)
+Documentation=https://github.com/tonyandclaw/claudestruct/blob/main/docs/home-server.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+
+# Drop privileges. Create the user once with:
+#   sudo useradd -r -s /usr/sbin/nologin -d /var/lib/claudestruct claudestruct
+#   sudo install -d -o claudestruct -g claudestruct /var/lib/claudestruct
+User=claudestruct
+Group=claudestruct
+WorkingDirectory=/var/lib/claudestruct
+
+# Override these via a drop-in (see docs/home-server.md §Configuration).
+# The defaults here are sane for a single-host home-server install.
+Environment=CLAUDESTRUCT_DATABASE_URL=sqlite:////var/lib/claudestruct/server.db
+EnvironmentFile=-/etc/claudestruct/claudestruct.env
+
+# `cs serve run` binds 127.0.0.1:8787 by default; expose externally via a
+# reverse proxy (Caddy / nginx / Tailscale Funnel) — never bind 0.0.0.0
+# directly because there's no built-in TLS.
+ExecStartPre=/usr/local/bin/cs serve init-db
+ExecStart=/usr/local/bin/cs serve run --host 127.0.0.1 --port 8787
+
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+
+# Hardening — claudestruct only needs its data dir and stdout/journal.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/claudestruct
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+
+# Journal-only logs. cs already emits structured JSON via --log-json if
+# configured; leave stdout for status lines.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

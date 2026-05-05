@@ -8,10 +8,12 @@
 //   - rlimits: CPU time, wall clock, virtual memory, open files.
 //   - Working directory confined to --repo (argv paths validated).
 //   - Environment stripped to a safe allowlist (PATH, HOME, LANG, USER, TERM).
-//   - Network egress: best-effort. True network isolation requires namespaces
-//     (CLONE_NEWNET) which needs CAP_SYS_ADMIN or a setuid shim. We expose
-//     --no-network as a flag but no-op if we can't achieve it, and print a
-//     warning — we do not claim isolation we did not deliver.
+//   - Network egress: real CLONE_NEWNET isolation when the kernel + caps
+//     allow it (Linux + root, or already inside an unprivileged userns).
+//     On those hosts --no-network defaults to ON; --allow-network opts
+//     out for `npm install` / `pip install` workflows. On hosts that
+//     can't enforce, the flag remains opt-in and is honest about the
+//     resulting status via the structured isolation report.
 //
 // Non-goals: this is a *defense-in-depth* helper, not a replacement for a
 // VM or container sandbox. Against a motivated adversary with code execution,
@@ -25,7 +27,10 @@
 //   --cpu <seconds>      CPU time limit   (default 60)
 //   --wall <seconds>     wall clock limit (default 300)
 //   --mem-mb <int>       virtual memory   (default 1024)
-//   --no-network         advise kernel to drop network (best-effort, needs root)
+//   --no-network         force network isolation on (Linux: real netns;
+//                        elsewhere: emits unsupported in the report)
+//   --allow-network      force network isolation off (cancels the auto-on
+//                        default that fires on Linux + root)
 //   --allow-path <path>  extra allowed read/write path (repeatable)
 //   --verbose            print enforced limits before exec
 package main
@@ -49,13 +54,14 @@ func (p *pathList) Set(v string) error {
 }
 
 var (
-	repoDir    string
-	cpuSec     int
-	wallSec    int
-	memMB      int
-	noNetwork  bool
-	verbose    bool
-	allowPaths pathList
+	repoDir      string
+	cpuSec       int
+	wallSec      int
+	memMB        int
+	noNetwork    bool
+	allowNetwork bool
+	verbose      bool
+	allowPaths   pathList
 )
 
 func main() {
@@ -63,10 +69,21 @@ func main() {
 	flag.IntVar(&cpuSec, "cpu", 60, "CPU time limit (seconds)")
 	flag.IntVar(&wallSec, "wall", 300, "wall clock limit (seconds)")
 	flag.IntVar(&memMB, "mem-mb", 1024, "virtual memory limit (MB)")
-	flag.BoolVar(&noNetwork, "no-network", false, "request network isolation (best-effort)")
+	flag.BoolVar(&noNetwork, "no-network", false,
+		"request network isolation (auto-on as root on Linux; opt out via --allow-network)")
+	flag.BoolVar(&allowNetwork, "allow-network", false,
+		"opt out of the auto-on --no-network default (Linux + root only)")
 	flag.BoolVar(&verbose, "verbose", false, "log enforced limits")
 	flag.Var(&allowPaths, "allow-path", "additional allowed path (repeatable)")
 	flag.Parse()
+
+	// Resolve --no-network with the auto-on policy. Treat the two flags
+	// as opposing intents so the operator can express "force on", "force
+	// off", or "let the host decide". Default before W10.9 was OFF —
+	// the new default ON only kicks in when we can deliver real isolation
+	// (CAP_SYS_ADMIN or unprivileged userns with caps), so existing
+	// non-root callers see no behaviour change.
+	noNetwork = resolveNoNetwork(noNetwork, allowNetwork)
 
 	if repoDir == "" {
 		die("--repo is required")
@@ -109,6 +126,12 @@ func main() {
 		tryDisableNetwork(cmd)
 	}
 
+	// Always emit the structured isolation report, regardless of
+	// --verbose. The whole point is that callers (humans and
+	// claw-squad) shouldn't have to opt in to learning whether the
+	// controls they asked for are actually enforced.
+	emitIsolationReport(buildIsolationReport(absRepo, noNetwork))
+
 	if verbose {
 		fmt.Fprintf(os.Stderr, "[sandbox] repo=%s cpu=%ds wall=%ds mem=%dMB no-network=%v\n",
 			absRepo, cpuSec, wallSec, memMB, noNetwork)
@@ -134,6 +157,41 @@ func main() {
 		_ = cmd.Process.Kill()
 		die("wall clock limit exceeded (%ds)", wallSec)
 	}
+}
+
+// resolveNoNetwork decides whether to actually try CLONE_NEWNET. Three
+// inputs feed the choice:
+//
+//   - noNetworkRequested: --no-network was passed on the CLI.
+//   - allowNetworkRequested: --allow-network was passed on the CLI.
+//   - shouldDefaultNoNetwork(): the host CAN enforce isolation today.
+//
+// The policy:
+//
+//   - Explicit --no-network wins. We try, even if caps say we can't —
+//     the kernel will tell us, and the isolation report records the
+//     resulting status.
+//   - Explicit --allow-network forces OFF. Useful for `npm install`
+//     workflows that need the registry.
+//   - Both flags set: explicit conflict, treat as OFF and warn (caller
+//     should fix their invocation; we don't crash).
+//   - Neither set: ON iff the host reports "enforced" caps. The
+//     "best-effort" tier (already inside a userns) is left OFF by
+//     default — that environment usually has its own outer isolation
+//     and surprising the operator with a nested netns rarely helps.
+func resolveNoNetwork(noNetworkRequested, allowNetworkRequested bool) bool {
+	if noNetworkRequested && allowNetworkRequested {
+		fmt.Fprintln(os.Stderr,
+			"claw-sandbox: --no-network and --allow-network both passed; treating as --allow-network")
+		return false
+	}
+	if allowNetworkRequested {
+		return false
+	}
+	if noNetworkRequested {
+		return true
+	}
+	return shouldDefaultNoNetwork()
 }
 
 func die(format string, a ...any) {

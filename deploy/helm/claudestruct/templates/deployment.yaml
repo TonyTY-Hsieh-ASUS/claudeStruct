@@ -1,0 +1,102 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "claudestruct.fullname" . }}
+  labels:
+    {{- include "claudestruct.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "claudestruct.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "claudestruct.selectorLabels" . | nindent 8 }}
+    spec:
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: claudestruct
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          # Override the image's default ENTRYPOINT (`cs`) with the
+          # serve subcommand so `helm install` boots straight into
+          # the daemon.
+          command: ["cs", "serve", "run"]
+          args:
+            - "--host=0.0.0.0"
+            - "--port={{ .Values.service.internalPort }}"
+            - "--db-url=$(CLAUDESTRUCT_DATABASE_URL)"
+            - "--run-root={{ .Values.config.runRoot }}"
+          env:
+            - name: CLAUDESTRUCT_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "claudestruct.secretName" . }}
+                  key: databaseUrl
+                  optional: true
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "claudestruct.secretName" . }}
+                  key: anthropicApiKey
+            - name: STRIPE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "claudestruct.secretName" . }}
+                  key: stripeSecretKey
+                  optional: true
+            - name: CLAUDESTRUCT_SECRET_STRIPE_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "claudestruct.secretName" . }}
+                  key: stripeWebhookSecret
+                  optional: true
+            - name: CLAUDESTRUCT_REGION
+              value: {{ .Values.config.region | quote }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.internalPort }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probes.liveness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.readiness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            # readOnlyRootFilesystem requires a writable mount for any
+            # path the process touches. SQLite default lives under
+            # /var/lib/claudestruct; the run-log fallback shares it.
+            - name: data
+              mountPath: {{ .Values.config.runRoot }}
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

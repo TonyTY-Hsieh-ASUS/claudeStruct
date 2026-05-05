@@ -19,6 +19,8 @@
 
 import { loadPrompt } from "../prompts.js";
 import type { InvokeResult, Provider } from "../providers/types.js";
+import { appendEvent, type RunLogHandle } from "../runs/log.js";
+import { emitRunIoIfEnabled } from "../runs/dataset.js";
 import type {
   ClarificationTurn,
   SquadState,
@@ -50,6 +52,8 @@ interface PlannerInput {
   completedTaskSummary?: string;
   provider: Provider;
   onText?: (chunk: string) => void;
+  // Optional run-log handle for opt-in W10.6 dataset capture.
+  runLog?: RunLogHandle;
 }
 
 /** Build the user message the Planner sees on each turn. */
@@ -179,6 +183,13 @@ export async function runPlanner(input: PlannerInput): Promise<PlannerOutcome> {
     systemPrompt,
     userMessage,
     onText: input.onText,
+  });
+
+  emitRunIoIfEnabled((e) => appendEvent(input.runLog!, e), {
+    runLog: input.runLog,
+    role: "planner",
+    prompt: userMessage,
+    responseText: usage.text,
   });
 
   const parsed = parsePlannerOutput(usage.text);

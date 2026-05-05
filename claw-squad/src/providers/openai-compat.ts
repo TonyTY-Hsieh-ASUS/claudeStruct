@@ -33,6 +33,7 @@ import type {
   ProviderConfig,
   ProviderName,
 } from "./types.js";
+import { transportPolicy } from "./transport.js";
 
 /**
  * Map our normalized effort to OpenAI's reasoning_effort vocabulary.
@@ -76,8 +77,11 @@ export class OpenAICompatProvider implements Provider {
     this.cfg = cfg;
     this.name = cfg.name;
     const apiKey = cfg.apiKey ?? resolveApiKeyFromEnv(cfg.name) ?? "not-needed";
+    const policy = transportPolicy();
     this.client = new OpenAI({
       apiKey,
+      timeout: policy.timeoutMs,
+      maxRetries: policy.maxRetries,
       ...(cfg.baseURL ? { baseURL: cfg.baseURL } : {}),
     });
   }

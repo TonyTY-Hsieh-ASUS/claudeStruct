@@ -179,6 +179,29 @@ export interface RunConfig {
   waitForCi?: boolean;
   /** Wall clock for waiting on CI. Default 15 min. */
   ciTimeoutMs?: number;
+  /**
+   * Stop after the Planner produces its TODO list and emit a cost
+   * estimate for what the rest of the run would spend. The orchestrator
+   * returns reason="dry_run" before any Coder / Reviewer call. Default
+   * false. claudestruct's `--dry-run` is the analog.
+   */
+  dryRun?: boolean;
+  /**
+   * When set, every run-log event also lands at this path (in addition
+   * to the canonical `.claw-squad/runs/<ts>.jsonl`). Wired by the
+   * `--log-json` CLI flag for callers that want to pipe events into
+   * their own observability pipeline without scanning the runs dir.
+   */
+  logJsonPath?: string;
+  /**
+   * Use the local embedding index (built via `claw-squad index build`)
+   * to pick top-K semantically-relevant files for round 1 of each
+   * Coder task, in addition to the existing keyword-rank gatherer.
+   * The biggest payoff is on local 32B models where the 32K context
+   * window can't fit a glob walk; cloud Sonnet's 200K window absorbs
+   * the noise either way. Default false.
+   */
+  smartContext?: boolean;
 }
 
 // Per-agent provider config now lives in ./config.ts as AgentConfig.

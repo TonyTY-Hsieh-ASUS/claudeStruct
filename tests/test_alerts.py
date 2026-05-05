@@ -1,0 +1,495 @@
+"""Tests for the notification surface + cost-regression detector (W6.5)."""
+from __future__ import annotations
+
+import math
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+pytest.importorskip("fastapi")
+pytest.importorskip("sqlalchemy")
+pytest.importorskip("pydantic")
+
+from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
+
+from claudestruct.server import alerts as alerts_mod
+from claudestruct.server import notify as notify_mod
+from claudestruct.server.db import init_db, make_session_factory
+from claudestruct.server.models import Org, Run, RunStatus, User
+
+# --- Fixtures -------------------------------------------------------
+
+
+@pytest.fixture()
+def factory():
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    init_db(engine)
+    return make_session_factory(engine)
+
+
+@pytest.fixture()
+def env(factory):
+    """Two orgs (acme, beta) each with one user, ready for run seeds."""
+    with factory() as session:
+        acme = Org(slug="acme", name="Acme")
+        beta = Org(slug="beta", name="Beta")
+        ua = User(email="root@acme.test")
+        ub = User(email="root@beta.test")
+        session.add_all([acme, beta, ua, ub])
+        session.flush()
+        ids = {
+            "acme_id": acme.id,
+            "beta_id": beta.id,
+            "ua_id": ua.id,
+            "ub_id": ub.id,
+        }
+        session.commit()
+    return {"factory": factory, **ids}
+
+
+def _seed_run(
+    session,
+    *,
+    org_id: int,
+    user_id: int,
+    run_id: str,
+    cost: float,
+    status: str = RunStatus.done.value,
+    created_at: datetime,
+) -> Run:
+    r = Run(
+        run_id=run_id,
+        org_id=org_id,
+        user_id=user_id,
+        status=status,
+        task="dev",
+        description="x",
+        cost_usd=cost,
+        created_at=created_at,
+    )
+    session.add(r)
+    return r
+
+
+class _CapturingNotifier:
+    name = "capture"
+
+    def __init__(self) -> None:
+        self.calls: list[notify_mod.Alert] = []
+
+    def notify(self, alert: notify_mod.Alert) -> None:
+        self.calls.append(alert)
+
+
+# --- _stddev / sanity ----------------------------------------------
+
+
+def test_stddev_empty_returns_zero():
+    assert alerts_mod._stddev([], 0.0) == 0.0
+
+
+def test_stddev_single_returns_zero():
+    assert alerts_mod._stddev([5.0], 5.0) == 0.0
+
+
+def test_stddev_population_formula():
+    # population stddev of [1, 2, 3] with mean 2 is sqrt((1+0+1)/3)
+    assert alerts_mod._stddev([1.0, 2.0, 3.0], 2.0) == pytest.approx(
+        math.sqrt(2 / 3),
+    )
+
+
+# --- compute_cost_regression_alerts ---------------------------------
+
+
+def test_no_alerts_when_org_has_too_few_runs(env):
+    """Orgs with < 3 runs in window have no statistical baseline; skip."""
+    factory = env["factory"]
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=timezone.utc)
+    with factory() as session:
+        for i in range(2):
+            _seed_run(
+                session,
+                org_id=env["acme_id"], user_id=env["ua_id"],
+                run_id=f"r-{i}", cost=1.0,
+                created_at=now - timedelta(hours=1),
+            )
+        session.commit()
+        findings = alerts_mod.compute_cost_regression_alerts(session, now=now)
+    assert findings == []
+
+
+def test_no_alerts_when_all_runs_same_cost(env):
+    """Stddev=0 baseline; no run is "above" the mean."""
+    factory = env["factory"]
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=timezone.utc)
+    with factory() as session:
+        for i in range(5):
+            _seed_run(
+                session,
+                org_id=env["acme_id"], user_id=env["ua_id"],
+                run_id=f"r-{i}", cost=1.0,
+                created_at=now - timedelta(hours=1),
+            )
+        session.commit()
+        findings = alerts_mod.compute_cost_regression_alerts(session, now=now)
+    assert findings == []
+
+
+def test_run_below_mean_is_not_flagged(env):
+    """Cheap runs aren't regressions."""
+    factory = env["factory"]
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=timezone.utc)
+    with factory() as session:
+        # 3 runs at $10, 1 recent run at $1 — no alert.
+        for i in range(3):
+            _seed_run(
+                session,
+                org_id=env["acme_id"], user_id=env["ua_id"],
+                run_id=f"r-base-{i}", cost=10.0,
+                created_at=now - timedelta(days=5),
+            )
+        _seed_run(
+            session,
+            org_id=env["acme_id"], user_id=env["ua_id"],
+            run_id="r-cheap", cost=1.0,
+            created_at=now - timedelta(hours=1),
+        )
+        session.commit()
+        findings = alerts_mod.compute_cost_regression_alerts(session, now=now)
+    assert findings == []
+
+
+def test_recent_run_above_threshold_is_flagged(env):
+    """Cost > 2σ above mean → flagged."""
+    factory = env["factory"]
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=timezone.utc)
+    with factory() as session:
+        # Baseline: 10 runs at $1; recent: 1 at $10.
+        for i in range(10):
+            _seed_run(
+                session,
+                org_id=env["acme_id"], user_id=env["ua_id"],
+                run_id=f"r-base-{i}", cost=1.0,
+                created_at=now - timedelta(days=10),
+            )
+        _seed_run(
+            session,
+            org_id=env["acme_id"], user_id=env["ua_id"],
+            run_id="r-spike", cost=10.0,
+            created_at=now - timedelta(hours=1),
+        )
+        session.commit()
+        findings = alerts_mod.compute_cost_regression_alerts(
+            session, now=now, sigma=2.0,
+        )
+    assert len(findings) == 1
+    f = findings[0]
+    assert f.run_id == "r-spike"
+    assert f.org_slug == "acme"
+    assert f.run_cost_usd == 10.0
+    assert f.sigma_above >= 2.0
+
+
+def test_old_runs_not_re_alerted_when_outside_recent_window(env):
+    """A spike that's older than ``check_recent_hours`` shouldn't fire
+    every cron tick. It still contributes to the baseline."""
+    factory = env["factory"]
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=timezone.utc)
+    with factory() as session:
+        for i in range(5):
+            _seed_run(
+                session,
+                org_id=env["acme_id"], user_id=env["ua_id"],
+                run_id=f"r-base-{i}", cost=1.0,
+                created_at=now - timedelta(days=5),
+            )
+        # Spike from a week ago — outside default 24h recent window.
+        _seed_run(
+            session,
+            org_id=env["acme_id"], user_id=env["ua_id"],
+            run_id="r-old-spike", cost=20.0,
+            created_at=now - timedelta(days=7),
+        )
+        session.commit()
+        findings = alerts_mod.compute_cost_regression_alerts(session, now=now)
+    assert findings == []
+
+
+def test_failed_runs_excluded_from_baseline_and_alerts(env):
+    """Failed runs' cost reflects partial work; not comparable."""
+    factory = env["factory"]
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=timezone.utc)
+    with factory() as session:
+        for i in range(5):
+            _seed_run(
+                session,
+                org_id=env["acme_id"], user_id=env["ua_id"],
+                run_id=f"r-base-{i}", cost=1.0,
+                created_at=now - timedelta(days=5),
+            )
+        # Big-cost recent FAILED run — must not fire (failed excluded).
+        _seed_run(
+            session,
+            org_id=env["acme_id"], user_id=env["ua_id"],
+            run_id="r-bad", cost=99.0,
+            status=RunStatus.failed.value,
+            created_at=now - timedelta(hours=1),
+        )
+        session.commit()
+        findings = alerts_mod.compute_cost_regression_alerts(session, now=now)
+    assert findings == []
+
+
+def test_alerts_are_per_org(env):
+    """A spike in acme must NOT show up under beta's slug."""
+    factory = env["factory"]
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=timezone.utc)
+    with factory() as session:
+        for i in range(5):
+            _seed_run(
+                session,
+                org_id=env["acme_id"], user_id=env["ua_id"],
+                run_id=f"a-{i}", cost=1.0,
+                created_at=now - timedelta(days=2),
+            )
+            _seed_run(
+                session,
+                org_id=env["beta_id"], user_id=env["ub_id"],
+                run_id=f"b-{i}", cost=1.0,
+                created_at=now - timedelta(days=2),
+            )
+        _seed_run(
+            session,
+            org_id=env["acme_id"], user_id=env["ua_id"],
+            run_id="a-spike", cost=10.0,
+            created_at=now - timedelta(hours=1),
+        )
+        session.commit()
+        findings = alerts_mod.compute_cost_regression_alerts(session, now=now)
+    assert len(findings) == 1
+    assert findings[0].org_slug == "acme"
+
+
+def test_findings_sorted_by_sigma_descending(env):
+    """The worst regression appears first — operator-friendly default.
+
+    Note: a single huge outlier inflates stddev enough that smaller
+    outliers may not exceed the default 2σ threshold. We lower sigma
+    here so both outliers fire and we can assert sort order.
+    """
+    factory = env["factory"]
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=timezone.utc)
+    with factory() as session:
+        for i in range(20):
+            _seed_run(
+                session,
+                org_id=env["acme_id"], user_id=env["ua_id"],
+                run_id=f"r-base-{i}", cost=1.0,
+                created_at=now - timedelta(days=2),
+            )
+        # Two recent outliers — both should fire at sigma=0.5.
+        _seed_run(
+            session,
+            org_id=env["acme_id"], user_id=env["ua_id"],
+            run_id="r-bigger", cost=10.0,
+            created_at=now - timedelta(hours=2),
+        )
+        _seed_run(
+            session,
+            org_id=env["acme_id"], user_id=env["ua_id"],
+            run_id="r-smaller", cost=5.0,
+            created_at=now - timedelta(hours=1),
+        )
+        session.commit()
+        findings = alerts_mod.compute_cost_regression_alerts(
+            session, now=now, sigma=0.5,
+        )
+    assert [f.run_id for f in findings] == ["r-bigger", "r-smaller"]
+
+
+# --- finding_to_alert severity ladder ------------------------------
+
+
+def _finding(sigma_above: float) -> alerts_mod.CostRegressionFinding:
+    return alerts_mod.CostRegressionFinding(
+        org_id=1, org_slug="acme", run_id="r1",
+        run_cost_usd=10.0, baseline_mean=1.0,
+        baseline_stddev=1.0, sigma_above=sigma_above,
+    )
+
+
+def test_finding_to_alert_info_severity_at_2_sigma():
+    a = alerts_mod.finding_to_alert(_finding(2.0))
+    assert a.severity == "info"
+
+
+def test_finding_to_alert_warning_at_3_sigma():
+    a = alerts_mod.finding_to_alert(_finding(3.0))
+    assert a.severity == "warning"
+
+
+def test_finding_to_alert_critical_at_4_sigma():
+    a = alerts_mod.finding_to_alert(_finding(4.0))
+    assert a.severity == "critical"
+
+
+def test_finding_to_alert_critical_for_inf_sigma():
+    """Stddev=0 baseline reports inf σ; must not crash the formatter."""
+    a = alerts_mod.finding_to_alert(_finding(float("inf")))
+    assert a.severity == "critical"
+    assert "∞" in a.summary
+    assert a.details["sigma_above"] == "inf"
+
+
+# --- dispatch_findings + Notifier integration -----------------------
+
+
+def test_dispatch_findings_calls_notifier_for_each(env):
+    """End-to-end: producer → dispatch → CapturingNotifier counts up."""
+    factory = env["factory"]
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=timezone.utc)
+    with factory() as session:
+        for i in range(10):
+            _seed_run(
+                session,
+                org_id=env["acme_id"], user_id=env["ua_id"],
+                run_id=f"r-{i}", cost=1.0,
+                created_at=now - timedelta(days=2),
+            )
+        _seed_run(
+            session,
+            org_id=env["acme_id"], user_id=env["ua_id"],
+            run_id="r-spike", cost=10.0,
+            created_at=now - timedelta(hours=1),
+        )
+        session.commit()
+        findings = alerts_mod.compute_cost_regression_alerts(session, now=now)
+    notifier = _CapturingNotifier()
+    n = alerts_mod.dispatch_findings(findings, notifier)
+    assert n == 1
+    assert len(notifier.calls) == 1
+    assert notifier.calls[0].kind == "cost_regression"
+    assert notifier.calls[0].org_slug == "acme"
+
+
+# --- LogNotifier ----------------------------------------------------
+
+
+def test_log_notifier_writes_warning_for_warning_severity(caplog):
+    notifier = notify_mod.LogNotifier()
+    alert = notify_mod.Alert(
+        kind="cost_regression", severity="warning",
+        org_slug="acme", summary="x", details={},
+    )
+    with caplog.at_level("WARNING", logger="claudestruct.notify"):
+        notifier.notify(alert)
+    assert any("alert" in r.message for r in caplog.records)
+    assert any(r.levelname == "WARNING" for r in caplog.records)
+
+
+def test_log_notifier_writes_error_for_critical_severity(caplog):
+    notifier = notify_mod.LogNotifier()
+    alert = notify_mod.Alert(
+        kind="cost_regression", severity="critical",
+        org_slug="acme", summary="x", details={},
+    )
+    with caplog.at_level("ERROR", logger="claudestruct.notify"):
+        notifier.notify(alert)
+    assert any(r.levelname == "ERROR" for r in caplog.records)
+
+
+# --- SlackWebhookNotifier ------------------------------------------
+
+
+class _FakeHttpClient:
+    """Captures POST calls for SlackWebhookNotifier tests."""
+
+    def __init__(self, status_code: int = 200) -> None:
+        self.calls: list[tuple[str, dict]] = []
+        self._status_code = status_code
+
+    def post(self, url, **kw):
+        self.calls.append((url, kw))
+        class _R:
+            pass
+        _R.status_code = self._status_code
+        return _R
+
+
+def test_slack_notifier_rejects_empty_url():
+    with pytest.raises(ValueError, match="non-empty"):
+        notify_mod.SlackWebhookNotifier("")
+
+
+def test_slack_notifier_posts_to_webhook_url():
+    client = _FakeHttpClient()
+    notifier = notify_mod.SlackWebhookNotifier(
+        "https://hooks.slack.com/services/X/Y/Z",
+        http_client=client,
+    )
+    alert = notify_mod.Alert(
+        kind="cost_regression", severity="warning",
+        org_slug="acme", summary="run cost spike",
+        details={"run_id": "r1", "sigma_above": 3.5},
+    )
+    notifier.notify(alert)
+    assert len(client.calls) == 1
+    url, kwargs = client.calls[0]
+    assert url == "https://hooks.slack.com/services/X/Y/Z"
+    payload = kwargs["json"]
+    assert "WARNING" in payload["text"]
+    assert "acme" in payload["text"]
+    # Slack attachments fields include the alert details.
+    field_titles = {f["title"] for f in payload["attachments"][0]["fields"]}
+    assert "kind" in field_titles
+    assert "run_id" in field_titles
+
+
+def test_slack_notifier_swallows_non_200(caplog):
+    """Slack delivery failures must not crash the cron-driven caller."""
+    client = _FakeHttpClient(status_code=502)
+    notifier = notify_mod.SlackWebhookNotifier(
+        "https://hooks.slack.com/X", http_client=client,
+    )
+    alert = notify_mod.Alert(
+        kind="x", severity="info", org_slug="acme",
+        summary="s", details={},
+    )
+    with caplog.at_level("WARNING", logger="claudestruct.notify"):
+        notifier.notify(alert)  # must not raise
+    assert any("502" in r.message for r in caplog.records)
+
+
+# --- default_notifier factory --------------------------------------
+
+
+def test_default_notifier_returns_log_when_unset(monkeypatch):
+    monkeypatch.delenv("CLAUDESTRUCT_NOTIFY_PROVIDER", raising=False)
+    n = notify_mod.default_notifier()
+    assert n.name == "log"
+
+
+def test_default_notifier_returns_slack_when_configured(monkeypatch):
+    monkeypatch.setenv("CLAUDESTRUCT_NOTIFY_PROVIDER", "slack")
+    monkeypatch.setenv("CLAUDESTRUCT_SLACK_WEBHOOK_URL", "https://hooks.slack.com/X")
+    n = notify_mod.default_notifier()
+    assert n.name == "slack"
+
+
+def test_default_notifier_slack_without_url_raises(monkeypatch):
+    monkeypatch.setenv("CLAUDESTRUCT_NOTIFY_PROVIDER", "slack")
+    monkeypatch.delenv("CLAUDESTRUCT_SLACK_WEBHOOK_URL", raising=False)
+    with pytest.raises(RuntimeError, match="CLAUDESTRUCT_SLACK_WEBHOOK_URL"):
+        notify_mod.default_notifier()
+
+
+def test_default_notifier_unknown_provider_raises(monkeypatch):
+    monkeypatch.setenv("CLAUDESTRUCT_NOTIFY_PROVIDER", "carrier-pigeon")
+    with pytest.raises(RuntimeError, match="unknown"):
+        notify_mod.default_notifier()

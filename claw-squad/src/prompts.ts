@@ -7,6 +7,7 @@
  * prompt cache.
  */
 
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,4 +36,15 @@ export function loadPrompt(role: AgentRole): string {
   const contents = readFileSync(path, "utf-8");
   _cache.set(role, contents);
   return contents;
+}
+
+/**
+ * Short content-hash of a prompt. Auto-bumps when the file changes;
+ * cheaper than asking humans to maintain version strings, and matches
+ * the bytes that determine cache key. Surfaced in the run summary so
+ * regressions can be traced to a specific prompt revision.
+ */
+export function loadPromptVersion(role: AgentRole): string {
+  const text = loadPrompt(role);
+  return createHash("sha256").update(text, "utf-8").digest("hex").slice(0, 8);
 }

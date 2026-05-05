@@ -12,7 +12,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
-import { WebUi } from "../src/ui/web.js";
+import { WebUi, validateBindOptions } from "../src/ui/web.js";
 
 /**
  * Attach a persistent message listener at socket-construction time so
@@ -198,5 +198,114 @@ describe("WebUi", () => {
     expect(snap.logs.some((l) => l.text === "before connect")).toBe(true);
     expect(snap.todos[0]?.id).toBe("T1");
     ws.close();
+  });
+});
+
+describe("validateBindOptions (PR-D)", () => {
+  it("loopback bind never requires a token", () => {
+    expect(validateBindOptions({ host: "127.0.0.1" })).toBeUndefined();
+    expect(validateBindOptions({ host: "::1" })).toBeUndefined();
+    expect(validateBindOptions({ host: "localhost" })).toBeUndefined();
+  });
+
+  it("non-loopback bind without a token is refused", () => {
+    const err = validateBindOptions({ host: "0.0.0.0" });
+    expect(err).toMatch(/refusing/);
+    expect(err).toMatch(/--web-ui-token|CLAW_WEB_TOKEN/);
+  });
+
+  it("non-loopback bind with a token is allowed", () => {
+    expect(
+      validateBindOptions({ host: "0.0.0.0", authToken: "secret" }),
+    ).toBeUndefined();
+    expect(
+      validateBindOptions({ host: "192.168.1.5", authToken: "secret" }),
+    ).toBeUndefined();
+  });
+
+  it("empty-string token counts as missing", () => {
+    expect(validateBindOptions({ host: "0.0.0.0", authToken: "" })).toMatch(
+      /refusing/,
+    );
+  });
+});
+
+describe("WebUi auth (PR-D)", () => {
+  let ui: WebUi;
+  let port: number;
+  const TOKEN = "shh-1234";
+
+  beforeEach(async () => {
+    ui = new WebUi({ port: 0, authToken: TOKEN });
+    const addr = await ui.start();
+    port = addr.port;
+  });
+  afterEach(async () => {
+    await ui.shutdown();
+  });
+
+  /**
+   * Connect and report whether `open` fired. Note: when verifyClient
+   * rejects, the ws client surfaces the failure as `error` + `close`
+   * with code 1006 (the socket never reached open). Our auth gate
+   * is intentionally pre-handshake, so 1006 is the right signal —
+   * checking "did open fire" is the cleanest, lib-version-independent
+   * assertion.
+   */
+  function tryConnect(url: string, timeoutMs = 1500): Promise<"open" | "rejected"> {
+    return new Promise((resolve) => {
+      const ws = new WebSocket(url);
+      const t = setTimeout(() => {
+        ws.removeAllListeners();
+        try { ws.close(); } catch { /* ignore */ }
+        resolve("rejected");
+      }, timeoutMs);
+      ws.once("open", () => {
+        clearTimeout(t);
+        ws.close();
+        resolve("open");
+      });
+      ws.on("error", () => {
+        /* swallow; close will follow */
+      });
+      ws.once("close", () => {
+        clearTimeout(t);
+        // resolve only if open didn't already win
+        resolve("rejected");
+      });
+    });
+  }
+
+  it("rejects WS connections without ?token=…", async () => {
+    expect(await tryConnect(`ws://127.0.0.1:${port}/ws`)).toBe("rejected");
+  });
+
+  it("rejects WS connections with the wrong token", async () => {
+    expect(await tryConnect(`ws://127.0.0.1:${port}/ws?token=wrong`)).toBe(
+      "rejected",
+    );
+  });
+
+  it("accepts WS connections carrying the right token", async () => {
+    expect(
+      await tryConnect(`ws://127.0.0.1:${port}/ws?token=${TOKEN}`),
+    ).toBe("open");
+  });
+
+  it("HTTP page is still served unauthenticated (gate is on the socket)", async () => {
+    const res = await fetch(`http://127.0.0.1:${port}/`);
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    // Page reads token from URL hash so the secret never leaves
+    // the client. Confirm that helper wires up.
+    expect(body).toContain("tokenFromHash");
+    expect(body).toContain("?token=");
+  });
+});
+
+describe("WebUi bind safety (PR-D)", () => {
+  it("start() throws when binding to 0.0.0.0 without a token", async () => {
+    const ui = new WebUi({ port: 0, host: "0.0.0.0" });
+    await expect(ui.start()).rejects.toThrow(/refusing/);
   });
 });

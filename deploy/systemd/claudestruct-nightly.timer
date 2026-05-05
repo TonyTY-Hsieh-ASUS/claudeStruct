@@ -1,0 +1,20 @@
+[Unit]
+# Triggers claudestruct-nightly.service every night. OnCalendar at
+# 03:00 local time is far enough off-peak to avoid colliding with
+# whatever else the host runs (npm/apt cron, cloud backup, etc.) and
+# the morning user gets a fresh dashboard.
+#
+# Persistent=true: if the host was off at 03:00, run the missed
+# trigger as soon as the timer becomes active. Keeps the dashboard
+# trail unbroken across power cycles / reboots.
+Description=Nightly claudestruct code-health review
+Documentation=https://github.com/tonyandclaw/claudestruct/blob/main/docs/home-server.md
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+RandomizedDelaySec=15min
+Unit=claudestruct-nightly.service
+
+[Install]
+WantedBy=timers.target
