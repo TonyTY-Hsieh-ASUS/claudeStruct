@@ -170,6 +170,9 @@ class Run(Base):
     # path only — fetching the SHA needs a separate API call).
     github_head_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
     github_check_run_id: Mapped[int | None] = mapped_column(nullable=True)
+    # W6.6 PR-open: the default branch name captured at webhook time
+    # so the worker knows which branch to fork from when opening a PR.
+    github_base_branch: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
 
 class UserSession(Base):

@@ -616,3 +616,116 @@ def test_run_head_sha_and_check_run_id_round_trip(factory):
 
 # pin so unused-imports check doesn't fire
 _ = datetime(2026, 4, 28, tzinfo=timezone.utc)
+
+
+# --- Annotations (W6.6 — per-line check-run annotations) -----------
+
+
+def test_check_annotation_dataclass():
+    ann = gha.CheckAnnotation(
+        path="src/main.py",
+        start_line=10,
+        end_line=15,
+        annotation_level="warning",
+        message="unused import",
+        title="Style",
+    )
+    assert ann.path == "src/main.py"
+    assert ann.start_line == 10
+    assert ann.end_line == 15
+    assert ann.annotation_level == "warning"
+    assert ann.message == "unused import"
+    assert ann.title == "Style"
+
+
+def test_format_annotations_payload_empty_returns_none():
+    assert gha.format_annotations_payload([]) is None
+
+
+def test_format_annotations_payload_single():
+    anns = [
+        gha.CheckAnnotation(
+            path="foo.py", start_line=1, end_line=1,
+            annotation_level="error", message="x",
+        ),
+    ]
+    payload = gha.format_annotations_payload(anns)
+    assert payload is not None
+    assert len(payload) == 1
+    assert payload[0]["path"] == "foo.py"
+    assert payload[0]["start_line"] == 1
+    assert payload[0]["end_line"] == 1
+    assert payload[0]["annotation_level"] == "error"
+    assert payload[0]["message"] == "x"
+    assert "title" not in payload[0]  # optional, absent when None
+
+
+def test_format_annotations_payload_with_title():
+    anns = [
+        gha.CheckAnnotation(
+            path="bar.py", start_line=5, end_line=7,
+            annotation_level="notice", message="info", title="Info",
+        ),
+    ]
+    payload = gha.format_annotations_payload(anns)
+    assert payload[0]["title"] == "Info"
+
+
+def test_format_check_run_payload_with_annotations():
+    anns = [
+        gha.CheckAnnotation(
+            path="src/worker.py", start_line=20, end_line=25,
+            annotation_level="warning", message="resource leak",
+            title="Resource",
+        ),
+    ]
+    p = gha.format_check_run_payload(
+        name="claudeStruct", head_sha="abc123",
+        status="completed", conclusion="failure",
+        title="Findings",
+        summary="3 issues found",
+        annotations=anns,
+    )
+    assert p["output"]["annotations"] is not None
+    assert len(p["output"]["annotations"]) == 1
+    ann = p["output"]["annotations"][0]
+    assert ann["path"] == "src/worker.py"
+    assert ann["start_line"] == 20
+    assert ann["end_line"] == 25
+    assert ann["annotation_level"] == "warning"
+    assert ann["message"] == "resource leak"
+    assert ann["title"] == "Resource"
+
+
+def test_format_check_run_payload_with_empty_annotations_list():
+    """Empty annotations list should not include the annotations key."""
+    p = gha.format_check_run_payload(
+        name="claudeStruct", head_sha="abc",
+        status="completed", conclusion="success",
+        annotations=[],
+    )
+    # output is present (title/summary were given), but annotations
+    # key must be absent or None so GitHub sees no annotation list.
+    assert "annotations" not in p.get("output", {})
+
+
+def test_format_completed_check_payload_with_annotations():
+    """Annotations are threaded into the completed payload via the
+    annotations kwarg on format_check_run_payload."""
+    anns = [
+        gha.CheckAnnotation(
+            path="x.py", start_line=1, end_line=1,
+            annotation_level="error", message="boom",
+        ),
+    ]
+    payload = gha.format_completed_check_payload(
+        head_sha="abc123",
+        run_id="run-99",
+        status="done",
+        cost_usd=0.05,
+        duration_ms=30_000,
+        annotations=anns,
+    )
+    assert payload["output"]["annotations"] is not None
+    assert len(payload["output"]["annotations"]) == 1
+    assert payload["output"]["annotations"][0]["message"] == "boom"
