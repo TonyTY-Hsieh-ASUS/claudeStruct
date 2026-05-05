@@ -928,7 +928,7 @@ def _git_credential_approve(
     """Store a git credential so subsequent push operations succeed."""
     input_str = f"url={repo_url}\nusername={username}\npassword={password}\n"
     try:
-        result = subprocess.run(
+        subprocess.run(
             ["git", "credential", "approve"],
             input=input_str,
             cwd=str(cwd),
